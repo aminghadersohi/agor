@@ -69,6 +69,9 @@ function migrationTenantTables(): string[] {
   const transferMigration = readRepoFile(
     'packages/core/drizzle/postgres/0112_kb_import_receipts.sql'
   );
+  const openCodeCheckpointMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0117_opencode_checkpoint_attempts.sql'
+  );
   const retiredTables = retiredTenantTables();
   return [
     ...new Set(
@@ -88,6 +91,7 @@ function migrationTenantTables(): string[] {
         ...codexDeviceAuthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...claudeOauthMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...transferMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
+        ...openCodeCheckpointMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...capabilityPoliciesMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
         .map((m) => m[1])
@@ -113,6 +117,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0110_user_provider_oauth_grants.sql'),
     readRepoFile('packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'),
     readRepoFile('packages/core/drizzle/postgres/0112_kb_import_receipts.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0117_opencode_checkpoint_attempts.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [
@@ -159,6 +164,19 @@ describe('Postgres multitenancy schema coverage', () => {
     expect(migration).toContain("IN ('starting', 'running')");
     expect(migration).toContain("= 'environment_health_discovery'");
     expect(migration).not.toContain('WITH CHECK');
+  });
+
+  it('limits API-key host tenant discovery to routing rows and an explicit capability', () => {
+    const migration = readRepoFile(
+      'packages/core/drizzle/postgres/0115_api_key_host_tenant_discovery.sql'
+    );
+
+    expect(migration).toContain('FOR SELECT');
+    expect(migration).toContain("= 'api_key_host_tenant_discovery'");
+    expect(migration).toContain(`"namespace" = 'tenant.routing'`);
+    expect(migration).toContain(`"key" = 'public_url'`);
+    expect(migration).not.toContain('WITH CHECK');
+    expect(migration).not.toContain('user_api_keys');
   });
 
   it('limits upload maintenance discovery to expired rows and an explicit capability', () => {

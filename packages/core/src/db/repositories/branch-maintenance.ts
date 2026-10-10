@@ -5,25 +5,31 @@ import {
   type BranchID,
   type BranchMaintenanceClaim,
   type BranchMaintenanceRoutingRef,
+  isTeammate,
   type TenantID,
   type UserID,
   type UUID,
 } from '../../types';
 import { hasActiveEnvironmentCommand } from '../../types/environment-command';
+import { lockBranchReferenceMutation } from '../branch-reference-admission';
 import type { Database } from '../client';
 import {
   executeRaw,
   isPostgresDatabase,
+  jsonExtract,
+  jsonRemoveProperty,
   lockRowForUpdate,
   rawRows,
   runDatabaseTransaction,
   select,
   update,
 } from '../database-wrapper';
-import { branches, sessions, uploads } from '../schema';
+import { assertNotPrimaryTeammate } from '../primary-teammate-protection';
+import { branches, sessions, uploads, users } from '../schema';
 import { requireCurrentTenantId } from '../tenant-context';
 import { assertTenantWritable } from '../tenant-write-gate';
 import { EntityNotFoundError, RepositoryError } from './base';
+import { BranchRepository } from './branches';
 import { TaskRepository } from './tasks';
 
 /**
@@ -62,6 +68,55 @@ export class BranchMaintenanceRepository {
     );
   }
 
+  /**
+   * Explicit Manager retirement (authorization belongs to validate). Personal
+   * routing preferences are not management vetoes. Board primaries still need
+   * their board's deliberate reassignment. No files are touched by this method.
+   */
+  async claimForTeammateRetirement(
+    branchId: BranchID,
+    requestedBy: UserID,
+    validate: (tx: Database) => Promise<void>
+  ) {
+    return runDatabaseTransaction(
+      this.db,
+      async (tx) => {
+        // Same order as primary designation: tenant references, then Branch.
+        await lockBranchReferenceMutation(tx);
+        const admission = await new BranchMaintenanceRepository(tx).claim(
+          branchId,
+          'cleanup',
+          requestedBy,
+          async (locked) => {
+            await validate(locked);
+            const branch = await new BranchRepository(locked).findById(branchId);
+            if (!branch || !isTeammate(branch) || branch.archived)
+              throw new RepositoryError('Retirement requires an active teammate');
+            await update(locked, users)
+              .set({
+                updated_at: new Date(),
+                data: jsonRemoveProperty(locked, users.data, 'primary_teammate_id'),
+              })
+              .where(eq(jsonExtract(locked, users.data, 'primary_teammate_id'), branchId))
+              .run();
+          }
+        );
+        if (!admission.acquired)
+          throw new RepositoryError(
+            'Branch maintenance is already active; reconcile before retirement'
+          );
+        // Atomic with preference removal and the producer fence. A concurrent
+        // designation either wins before retirement or sees an archived branch.
+        await update(tx, branches)
+          .set({ archived: true, archived_at: new Date(), archived_by: requestedBy })
+          .where(eq(branches.branch_id, branchId))
+          .run();
+        return admission;
+      },
+      { sqliteImmediate: true, sqliteBusyRetries: 9 }
+    );
+  }
+
   async claim(
     branchId: BranchID,
     kind: BranchMaintenanceClaim['kind'],
@@ -70,10 +125,20 @@ export class BranchMaintenanceRepository {
   ): Promise<{ claim: BranchMaintenanceClaim; acquired: boolean }> {
     return this.locked(branchId, async (tx, row) => {
       await validate?.(tx);
+      if (kind === 'cleanup' || kind === 'delete') await assertNotPrimaryTeammate(tx, branchId);
       if (row.data.maintenance) {
         if (row.data.maintenance.kind !== kind)
           throw new RepositoryError('Branch maintenance is already in progress');
-        return { claim: row.data.maintenance, acquired: false };
+        const prior = row.data.maintenance;
+        // Failed, never-claimed dispatches are safely replaceable under this
+        // same lock: a delayed claim/beginExecution carries the old generation.
+        // Missing execution_id alone is NOT evidence about historical effects.
+        const unclaimedDeletion =
+          kind === 'delete' &&
+          row.deletion_status === 'deletion_failed' &&
+          prior.execution_id &&
+          prior.execution_claimed_at === undefined;
+        if (!unclaimedDeletion) return { claim: prior, acquired: false };
       }
       if (row.deletion_status && kind !== 'delete')
         throw new RepositoryError('Branch deletion cannot be cancelled');
@@ -311,7 +376,9 @@ export class BranchMaintenanceRepository {
         .set({
           deletion_status: 'deletion_failed',
           deletion_error: current.execution_id
-            ? 'Deletion executor stopped reporting; its outcome is unknown. Reconciliation is required before retry.'
+            ? current.execution_claimed_at
+              ? 'Deletion executor stopped reporting without a settlement acknowledgement. Retry is blocked: process exit and heartbeat age do not prove storage requests stopped. See the branch deletion recovery guide.'
+              : 'Deletion dispatch was never claimed. Retry permanent deletion to fence the old dispatch and start a new invocation.'
             : 'Deletion was interrupted before executor admission. Retry permanent deletion to continue.',
           // No invocation was ever admitted: there can be no late claimant.
           ...(!current.execution_id ? { data: { ...row.data, maintenance: undefined } } : {}),

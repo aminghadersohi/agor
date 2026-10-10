@@ -3,7 +3,7 @@
 // The catalog is a browsable index of MCP servers users can connect. Its
 // contents are `curated.yaml`, a file checked into this repository: every entry
 // is reviewed, versioned, and rolled back like any other change, and the
-// catalog offers exactly what that file names.
+// catalog offers the visible entries that file names.
 //
 // Nothing here originates with a tenant, a user, or a request. An entry is
 // authored text plus the transport details needed to dial the server.
@@ -143,6 +143,9 @@ export interface MCPCatalogEntry {
   /** Reverse-DNS identity, e.g. `io.github.github/github-mcp-server`. */
   name: string;
 
+  /** Discovery/install visibility only; omission and false both mean visible. */
+  hidden?: boolean;
+
   title?: string;
   description?: string;
   website_url?: string;
@@ -233,8 +236,8 @@ export interface MCPCatalogEntryCredentials {
  *
  * - **No client secret.** `curated.yaml` is checked into a public repository
  *   and is byte-identical for every tenant, so a secret in it is a published
- *   secret shared by everyone. A server that cannot work without a confidential
- *   client cannot be a catalog entry.
+ *   secret shared by everyone. A confidential app needs a reviewed
+ *   `configured_client` recipe; its owner supplies credentials through secure UI.
  * - **No `authorization_url` / `token_url`.** These are where an authorization
  *   code and a client credential are sent, so a stale one does not fail closed
  *   — it delivers a live grant to whatever now answers at that hostname. They
@@ -244,10 +247,12 @@ export interface MCPCatalogEntryCredentials {
  *   is responsible for keeping current.
  *
  * None of this is user-specific: an entry is the same for every installer, and
- * the credential each installer obtains is per-user and lives outside the
- * server row entirely.
+ * the grant each installer obtains is per-user and lives outside the server
+ * row. Customer-owned app credentials are encrypted on the owner's server row.
  */
 export interface MCPCatalogEntryOAuth {
+  /** Reviewed customer-owned app setup; contains no credentials or endpoint overrides. */
+  configured_client?: { setup_url: string; issuer: string; secret_required: boolean };
   /** Space-separated OAuth scopes to request. */
   scope?: string;
   /** A pre-registered *public* client id. Never a confidential one. */
@@ -353,7 +358,7 @@ export type MCPCatalogSort = 'popularity' | 'name';
  * filter's.
  */
 export interface MCPCatalogFilters {
-  /** Case-insensitive substring match over name, title, and description. */
+  /** Case-insensitive substring match over name, title, benefit, and description. */
   search?: string;
   category?: MCPCatalogCategory;
   /** Matches entries carrying this capability tag. */
@@ -378,7 +383,11 @@ export interface MCPCatalogFilters {
  * server-side, so this cannot be used to register an arbitrary server, and a
  * client cannot name the destination its own credential is sent to.
  */
+export type MCPCatalogSharing = 'private' | 'shared';
+
 export interface MCPCatalogConnectData {
+  /** Configuration ownership, independent of scope. Omission is private. */
+  sharing?: MCPCatalogSharing;
   /** The entry's reverse-DNS catalog name. */
   catalog_key: string;
   /**
@@ -397,6 +406,8 @@ export interface MCPCatalogConnectData {
    * to a row with no reason to carry it.
    */
   bearer_token?: string;
+  /** Browser-only configured app material. Never submit through model-visible tools. */
+  oauth_client?: { client_id: string; client_secret?: string };
   /**
    * The `permission_disclosure` the user was shown and accepted.
    *
@@ -469,6 +480,12 @@ export interface MCPCatalogReadiness {
   /** Echo of the catalog identity that was evaluated. */
   catalog_key: string;
   state: MCPCatalogReadinessState;
+  /** Matching configuration can be used without creating/reconciling a row. */
+  reusable_configuration?: boolean;
+  /** Eligible canonical shared configuration exists, independent of selected ownership/grant. Advisory only. */
+  shared_configuration_available?: boolean;
+  /** Exact operator-selected callback to register in the customer's app. */
+  redirect_uri?: string;
 }
 
 /**

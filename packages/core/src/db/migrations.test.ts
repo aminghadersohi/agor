@@ -9,6 +9,7 @@ import { createDatabase } from './client';
 import { executeRaw, isSQLiteDatabase, rawRows } from './database-wrapper';
 import {
   classifyMigrationWatermark,
+  OWNER_ATTRIBUTION_SQLSTATE,
   pendingOfflineCutoverMigrations,
   preflightSQLiteCapabilityPolicyOwners,
   runMigrations,
@@ -435,7 +436,7 @@ describe('Board and branch capability-policy migration', () => {
   const createLegacyTables = async (client: ReturnType<typeof createClient>) => {
     await client.executeMultiple(`
       PRAGMA foreign_keys = ON;
-      CREATE TABLE users (user_id text PRIMARY KEY NOT NULL);
+      CREATE TABLE users (user_id text PRIMARY KEY NOT NULL, role text NOT NULL DEFAULT 'member', created_at integer NOT NULL DEFAULT 1);
       CREATE TABLE groups (group_id text PRIMARY KEY NOT NULL);
       CREATE TABLE boards (
         board_id text PRIMARY KEY NOT NULL, created_at integer NOT NULL, updated_at integer,
@@ -473,7 +474,7 @@ describe('Board and branch capability-policy migration', () => {
     try {
       await createLegacyTables(client);
       await client.executeMultiple(`
-        INSERT INTO users VALUES ('owner'),('manager'),('member');
+        INSERT INTO users (user_id) VALUES ('owner'),('manager'),('member');
         INSERT INTO groups VALUES ('design');
         INSERT INTO boards VALUES (
           'board-1',1,2,'owner',
@@ -681,7 +682,7 @@ describe('Board and branch capability-policy migration', () => {
     try {
       await createLegacyTables(client);
       await client.executeMultiple(`
-        INSERT INTO users VALUES ('owner'),('manager'),('removed-creator'),('unmatched');
+        INSERT INTO users (user_id) VALUES ('owner'),('manager'),('removed-creator'),('unmatched');
         INSERT INTO groups VALUES ('design');
         INSERT INTO boards VALUES (
           'private-board',1,2,'removed-creator',
@@ -800,6 +801,56 @@ describe('Board and branch capability-policy migration', () => {
     }
   });
 
+  it('uses the oldest admin only after existing ownership and passes the SQLite preflight', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agor-rbac-admin-fallback-'));
+    const url = `file:${join(directory, 'migration.db')}`;
+    const client = createClient({ url });
+    const db = createDatabase({ url });
+    try {
+      await createLegacyTables(client);
+      await client.executeMultiple(`
+        INSERT INTO users VALUES ('z-admin','admin',2),('a-admin','admin',2),
+          ('new-superadmin','superadmin',3),('member','member',1);
+        INSERT INTO boards VALUES ('orphan',1,1,'anonymous','{"keep":42}'),
+          ('creator',1,1,'member','{}'),('owned',1,1,'a-admin','{}');
+        INSERT INTO board_owners VALUES ('owned','member',1);
+        INSERT INTO branches VALUES ('orphan-branch','orphan',1,1,'missing','override','none','none','{"keep":true}');
+      `);
+      await expect(preflightSQLiteCapabilityPolicyOwners(db)).resolves.toBeUndefined();
+      const migration = await readFile(
+        new URL('../../drizzle/sqlite/0098_board_branch_capability_policies.sql', import.meta.url),
+        'utf8'
+      );
+      for (const statement of migration.split('--> statement-breakpoint')) {
+        if (statement.trim()) await client.execute(statement);
+      }
+      expect(
+        (
+          await client.execute(
+            'SELECT board_id, primary_owner_user_id FROM boards ORDER BY board_id'
+          )
+        ).rows
+      ).toEqual([
+        { board_id: 'creator', primary_owner_user_id: 'member' },
+        { board_id: 'orphan', primary_owner_user_id: 'a-admin' },
+        { board_id: 'owned', primary_owner_user_id: 'member' },
+      ]);
+      expect(
+        (await client.execute('SELECT created_by,data,primary_owner_user_id FROM branches')).rows
+      ).toEqual([
+        {
+          created_by: 'missing',
+          data: '{"keep":true,"dangerously_allow_session_sharing":false}',
+          primary_owner_user_id: 'a-admin',
+        },
+      ]);
+    } finally {
+      client.close();
+      (db as unknown as { $client: { close(): void } }).$client.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed when SQLite cannot attribute a primary owner', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agor-rbac-owner-preflight-'));
     const client = createClient({ url: `file:${join(directory, 'migration.db')}` });
@@ -850,8 +901,9 @@ describe('Board and branch capability-policy migration', () => {
       expect(migration).toContain(`ALTER TABLE ${table} FORCE ROW LEVEL SECURITY`);
       expect(migration).toContain(`tenant_isolation_${table}`);
     }
-    expect(migration).toContain("string_agg(kind||':'||id");
+    expect(migration).toContain("string_agg('tenant='||tenant_id");
     expect(migration).toContain('RBAC migration cannot attribute primary owners');
+    expect(migration).toContain(`ERRCODE = '${OWNER_ATTRIBUTION_SQLSTATE}'`);
     expect(migration).toContain("SET LOCAL lock_timeout = '3s'");
     expect(migration).toContain('ORDER BY bo.created_at NULLS LAST,bo.user_id');
     expect(migration).toContain('CONSTRAINT "boards_tenant_primary_owner_fk"');
@@ -1399,7 +1451,7 @@ describe('SQLite index parity with the declared schema', () => {
   //
   // `0009_reconcile-missing-columns` did exactly that and dropped
   // `sessions_agentic_tool_idx` and `sessions_scheduled_flag_idx`;
-  // `0114_restore_session_indexes` puts them back. Migration-local tests cannot
+  // `0117_restore_session_indexes` puts them back. Migration-local tests cannot
   // catch this class of drift — they compare the table before a rebuild to the
   // table after it, and an index already missing from both sides looks fine.
   // Only the whole chain measured against the declared schema does.

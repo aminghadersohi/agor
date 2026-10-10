@@ -29,6 +29,7 @@ import {
   type BranchRemovalRealtimeVisibilitySnapshot,
   type HookContext,
   hasMinimumRole,
+  type Message,
   ROLES,
   type Task,
   type TenantID,
@@ -49,6 +50,7 @@ import {
 import {
   redactMcpRecoveryTopology,
   stripMcpSlackRecoveryNotice,
+  stripWidgetSlackConnectDelivery,
 } from './mcp-recovery-redaction.js';
 import {
   type RealtimeAccessBranchRepository,
@@ -610,6 +612,15 @@ async function resolvePublishScope(
   context: PublishContext,
   accessCache: RealtimeAccessCache
 ): Promise<PublishScope> {
+  if (context.path === 'mcp-servers' && context.event === 'removed') {
+    // The row no longer exists. Removal carries only its ID and explicit
+    // pre-delete owner snapshot, including null for a shared server. Do not
+    // infer "shared" from an event that omitted the snapshot.
+    const record = asRecord(data);
+    if (record?.owner_user_id === null) return { kind: 'global' };
+    const owner = pickString(record, 'owner_user_id');
+    return owner ? { kind: 'users', userIds: new Set([owner]) } : { kind: 'serviceOnly' };
+  }
   const audience = audienceFor(context.path);
   switch (audience) {
     case 'board': {
@@ -1108,6 +1119,15 @@ export function configureRealtimePublish(options: RealtimePublishOptions): void 
       db && tenantId
         ? await runWithTenantDatabaseScope(db, tenantId, resolveDelivery)
         : await resolveDelivery();
+    // Widget messages carry the connect lane's daemon-owned delivery state.
+    // Subscribers get the widget; they do not get its Slack delivery record.
+    const messageData = data as Message | undefined;
+    if (context.path === 'messages' && messageData?.metadata?.widget?.slack_connect) {
+      const channels = Array.isArray(delivery) ? delivery : [delivery];
+      delivery = channels.map((channel) =>
+        channel.send(stripWidgetSlackConnectDelivery(messageData))
+      );
+    }
     const taskData = data as Task | undefined;
     if (
       context.path === 'tasks' &&

@@ -1,6 +1,9 @@
-import type { MCPCatalogEntry, MCPServer } from '@agor/core/types';
+import { loadCatalog } from '@agor/core/mcp-catalog';
+import type { MCPCatalogEntry, MCPCatalogServerCandidate, MCPServer } from '@agor/core/types';
 import { describe, expect, it } from 'vitest';
+import { compatibleCatalogOAuthPeers } from './mcp-catalog-credential-match.js';
 import {
+  configuredCatalogIssuer,
   presentMCPOAuthCompatibilityPolicy,
   presentMCPOAuthEffectivePolicy,
   resolveMCPOAuthCompatibilityPolicy,
@@ -13,7 +16,7 @@ const entry = {
   remote_url: 'https://provider.example/mcp',
   transport: 'streamable-http',
   has_remote: true,
-  category: 'developer-tools',
+  category: 'dev-tools',
   capabilities: [],
   benefit: 'Test',
   starter_prompt: 'Test',
@@ -39,12 +42,59 @@ function catalogServer(overrides: Partial<MCPServer> = {}): MCPServer {
 }
 
 describe('resolveMCPOAuthCompatibilityPolicy', () => {
+  it('fails closed for saved Datadog endpoints and grants predating the v1 catalog URL', async () => {
+    const datadog = (await loadCatalog()).find((entry) => entry.name === 'com.datadoghq/mcp')!;
+    const oldUrl = 'https://mcp.datadoghq.com/api/unstable/mcp-server/mcp';
+    const saved = catalogServer({ catalog_entry_name: datadog.name, url: oldUrl });
+    const before = structuredClone(saved);
+    await expect(resolveMCPOAuthCompatibilityPolicy(saved)).resolves.toMatchObject({
+      mode: 'strict',
+      reason: 'catalog_configuration_drift',
+    });
+    const current = { ...saved, url: datadog.remote_url };
+    await expect(resolveMCPOAuthCompatibilityPolicy(current)).resolves.toMatchObject({
+      mode: 'marketplace',
+      reason: 'current_catalog_marketplace',
+    });
+    const candidate: MCPCatalogServerCandidate = {
+      server: saved,
+      has_row_secret: false,
+      grant: {
+        has_access_token: true,
+        refresh_status: 'idle',
+        binding_ready: true,
+        resource_uri: oldUrl,
+      },
+    };
+    const definition = { ...datadog, remote_url: datadog.remote_url! };
+    // Neither the old row nor a changed URL carrying an old-resource grant is reusable.
+    expect(
+      await compatibleCatalogOAuthPeers(definition, [candidate, { ...candidate, server: current }])
+    ).toEqual([]);
+    expect(saved).toEqual(before);
+  });
+
   it('derives marketplace only from a canonical install of a current OAuth entry', async () => {
     await expect(resolveMCPOAuthCompatibilityPolicy(catalogServer(), [entry])).resolves.toEqual({
       mode: 'marketplace',
       reason: 'current_catalog_marketplace',
       catalogEntryName: entry.name,
     });
+  });
+
+  it('preserves saved canonical policy and drift checks when a definition is hidden', async () => {
+    const server = catalogServer();
+    const before = structuredClone(server);
+    const hidden = { ...entry, hidden: true };
+    expect(await resolveMCPOAuthCompatibilityPolicy(server, [hidden])).toEqual(
+      await resolveMCPOAuthCompatibilityPolicy(server, [entry])
+    );
+    await expect(
+      resolveMCPOAuthCompatibilityPolicy(catalogServer({ url: 'https://different.example/mcp' }), [
+        hidden,
+      ])
+    ).resolves.toMatchObject({ mode: 'strict', reason: 'catalog_configuration_drift' });
+    expect(server).toEqual(before);
   });
 
   it('reconciles an existing install with a newly explicit current strict policy', async () => {
@@ -173,3 +223,86 @@ describe('resolveMCPOAuthCompatibilityPolicy', () => {
     );
   });
 });
+
+it('resolves actual hidden saved installs through the full runtime catalog, without mutation', async () => {
+  const definitions = (await loadCatalog()).filter((entry) => entry.hidden);
+  expect(definitions).toHaveLength(7);
+  for (const definition of definitions) {
+    const server = catalogServer({
+      catalog_entry_name: definition.name,
+      url: definition.remote_url,
+    });
+    const before = structuredClone(server);
+    expect(await resolveMCPOAuthCompatibilityPolicy(server)).toEqual(
+      await resolveMCPOAuthCompatibilityPolicy(server, [{ ...definition, hidden: false }])
+    );
+    expect(await resolveMCPOAuthCompatibilityPolicy(server)).toMatchObject({ mode: 'marketplace' });
+    expect(server).toEqual(before);
+  }
+});
+
+it('pins reviewed configured-client issuer and refuses recipe drift', async () => {
+  const configured = {
+    ...entry,
+    oauth: {
+      dcr_mode: 'disabled' as const,
+      configured_client: {
+        issuer: 'https://issuer.example',
+        setup_url: 'https://issuer.example/apps',
+        secret_required: true,
+      },
+    },
+  };
+  const server = catalogServer({
+    auth: {
+      type: 'oauth',
+      oauth_mode: 'per_user',
+      oauth_dcr_mode: 'disabled',
+      oauth_client_id: 'customer-app',
+      oauth_client_secret: 'test-secret',
+    },
+  });
+  await expect(configuredCatalogIssuer(server, [configured])).resolves.toBe(
+    'https://issuer.example'
+  );
+  await expect(
+    configuredCatalogIssuer({ ...server, url: 'https://other.example/mcp' }, [configured])
+  ).rejects.toThrow('reviewed recipe');
+  await expect(
+    configuredCatalogIssuer({ ...server, source: 'user' }, [configured])
+  ).resolves.toBeUndefined();
+});
+
+it.each(['per_user', 'shared'] as const)(
+  'accepts a %s-mode install of the shipped Asana recipe and still pins everything else',
+  async (oauthMode) => {
+    // The real curated entry and loader, not a fixture or stub.
+    const asana = (await loadCatalog()).find((candidate) => candidate.name === 'com.asana/mcp')!;
+    expect(asana.oauth?.configured_client).toBeDefined();
+    const server = catalogServer({
+      catalog_entry_name: asana.name,
+      url: asana.remote_url,
+      auth: {
+        type: 'oauth',
+        oauth_mode: oauthMode,
+        oauth_dcr_mode: 'disabled',
+        oauth_client_id: 'customer-app',
+        oauth_client_secret: 'test-secret',
+      },
+    });
+    await expect(configuredCatalogIssuer(server)).resolves.toBe('https://app.asana.com');
+    await expect(resolveMCPOAuthCompatibilityPolicy(server)).resolves.toMatchObject({
+      catalogEntryName: asana.name,
+      reason: 'current_catalog_marketplace',
+    });
+    for (const drift of [
+      { url: 'https://mcp.asana.com/v1/mcp' },
+      { auth: { ...server.auth!, oauth_dcr_mode: 'advertised' as const } },
+      { auth: { ...server.auth!, oauth_token_url: 'https://attacker.example/token' } },
+    ]) {
+      await expect(configuredCatalogIssuer({ ...server, ...drift })).rejects.toThrow(
+        'reviewed recipe'
+      );
+    }
+  }
+);

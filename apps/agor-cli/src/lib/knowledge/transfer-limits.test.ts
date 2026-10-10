@@ -1,10 +1,11 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { serializeTransferManifest, transferSha256 } from '@agor/core/knowledge';
+import { transferSha256 } from '@agor/core/knowledge';
 import type { KnowledgeTransferManifest } from '@agor/core/types';
 import { describe, expect, it, vi } from 'vitest';
 import { KnowledgeProgress } from './progress';
+import { writeRepositoryFixture } from './repository.test-helpers';
 import { importKnowledge } from './transfer';
 
 // Scale the aggregate ceiling down to keep the quote-expansion regression cheap;
@@ -17,7 +18,7 @@ vi.mock('@agor/core/types', async (original) => {
   };
 });
 
-describe.skipIf(process.platform !== 'linux')('import plan aggregate limits', () => {
+describe.skipIf(process.platform === 'win32')('import plan aggregate limits', () => {
   it('rejects quote-expanded aggregate requests before any write, including dry-run and resume', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'kb-transfer-limit-'));
     const progress = new KnowledgeProgress({ isTTY: false, write: () => true });
@@ -51,9 +52,7 @@ describe.skipIf(process.platform !== 'linux')('import plan aggregate limits', ()
     };
     const client = { find: vi.fn(), get: vi.fn(), create: vi.fn() };
     try {
-      await writeFile(join(directory, 'manifest.json'), serializeTransferManifest(manifest));
-      for (const doc of manifest.documents)
-        await writeFile(join(directory, `${doc.key}-${hash}.md`), content);
+      await writeRepositoryFixture(directory, manifest, content);
       for (const mode of [
         { dryRun: false, resume: false },
         { dryRun: true, resume: false },

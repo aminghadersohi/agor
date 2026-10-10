@@ -7,6 +7,7 @@
 
 import type { UserApiKeysRepository } from '@agor/core/db';
 import { AuthenticationBaseStrategy, NotAuthenticated } from '@agor/core/feathers';
+import { isUserApiKeySource, PERSONAL_API_KEY_PREFIX } from '@agor/core/types';
 import { markAuthenticationUserLookup } from '../services/users.js';
 import { isSocketIoHandshakeRequest } from './socket-handshake-request.js';
 
@@ -28,13 +29,21 @@ export class ApiKeyStrategy extends AuthenticationBaseStrategy {
     }
 
     const apiKey = authentication.apiKey;
-    if (!apiKey?.startsWith('agor_sk_')) {
+    if (!apiKey?.startsWith(PERSONAL_API_KEY_PREFIX)) {
       throw new NotAuthenticated('Invalid API key format');
     }
 
     // Verify key against stored hashes
     const keyRow = await this.apiKeysRepo.verifyKey(apiKey);
     if (!keyRow) {
+      throw new NotAuthenticated('Invalid API key');
+    }
+
+    // Tenant RLS already confines verifyKey to the request tenant; also refuse
+    // explicitly so key/tenant agreement never rests on a policy alone.
+    const requestTenantId = params?.tenant?.tenant_id as string | undefined;
+    const keyTenantId = (keyRow as { tenant_id?: unknown }).tenant_id;
+    if (requestTenantId && typeof keyTenantId === 'string' && keyTenantId !== requestTenantId) {
       throw new NotAuthenticated('Invalid API key');
     }
 
@@ -46,14 +55,30 @@ export class ApiKeyStrategy extends AuthenticationBaseStrategy {
     // Browser-token issuance needs backend-only credential metadata. Preserve
     // the already-resolved tenant context while marking this one lookup as an
     // internal authentication read; ordinary external user reads stay redacted.
-    markAuthenticationUserLookup(params);
-    const user = await this.usersService.get(keyRow.user_id, params);
+    // User query validation mutates its query in place. Never give this
+    // internal lookup the caller's service query: it would strip unrelated
+    // filters (e.g. Knowledge namespace/bundle), and caller-controlled $select
+    // could alter the authentication entity. Preserve trusted tenant context,
+    // but isolate both the query and the authentication-lookup marker.
+    const lookupParams = { ...params, query: {} };
+    markAuthenticationUserLookup(lookupParams);
+    const user = await this.usersService.get(keyRow.user_id, lookupParams);
     if (!user) {
       throw new NotAuthenticated('User not found for API key');
     }
+    const userTenantId = (user as { tenant_id?: unknown }).tenant_id;
+    if (requestTenantId && typeof userTenantId === 'string' && userTenantId !== requestTenantId) {
+      throw new NotAuthenticated('Invalid API key');
+    }
 
     return {
-      authentication: { strategy: 'api-key' },
+      // Non-secret key identity so the caller can manage its own credential
+      // (e.g. `agor logout` deleting the key a CLI login minted).
+      authentication: {
+        strategy: 'api-key',
+        api_key_id: keyRow.id,
+        api_key_source: isUserApiKeySource(keyRow.source) ? keyRow.source : 'manual',
+      },
       user,
     };
   }
@@ -70,7 +95,7 @@ export class ApiKeyStrategy extends AuthenticationBaseStrategy {
 
     // Check X-API-Key header first
     const xApiKey = req.headers?.['x-api-key'];
-    if (xApiKey && typeof xApiKey === 'string' && xApiKey.startsWith('agor_sk_')) {
+    if (xApiKey && typeof xApiKey === 'string' && xApiKey.startsWith(PERSONAL_API_KEY_PREFIX)) {
       return { strategy: 'api-key', apiKey: xApiKey };
     }
 
@@ -78,7 +103,7 @@ export class ApiKeyStrategy extends AuthenticationBaseStrategy {
     const authorization = req.headers?.authorization;
     if (authorization && typeof authorization === 'string') {
       const [scheme, token] = authorization.split(' ');
-      if (scheme?.toLowerCase() === 'bearer' && token?.startsWith('agor_sk_')) {
+      if (scheme?.toLowerCase() === 'bearer' && token?.startsWith(PERSONAL_API_KEY_PREFIX)) {
         return { strategy: 'api-key', apiKey: token };
       }
     }

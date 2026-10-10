@@ -48,7 +48,10 @@ export interface BranchModalProps {
   // it calls `client.service('branches').patch()` directly so errors bubble.
   onUpdateBranch?: (branchId: string, updates: BranchUpdate) => void;
   onUpdateRepo?: (repoId: string, updates: Partial<Repo>) => void;
-  onArchiveOrDelete?: (branchId: string, options: BranchArchiveOrDeleteOptions) => void;
+  onArchiveOrDelete?: (
+    branchId: string,
+    options: BranchArchiveOrDeleteOptions
+  ) => void | Promise<void>;
   onOpenSettings?: () => void; // Navigate to Settings → Repositories
   onSessionClick?: (sessionId: string) => void;
   onExecuteScheduleNow?: (branchId: string) => Promise<void>;
@@ -188,6 +191,8 @@ export const BranchModal: React.FC<BranchModalProps> = ({
             children: (
               <TeammateTab
                 branch={branch}
+                client={client}
+                onRetired={onClose}
                 canEdit={form.canEditGeneral}
                 state={form.teammate}
                 setField={form.setTeammate}

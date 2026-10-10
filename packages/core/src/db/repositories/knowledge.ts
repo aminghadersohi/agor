@@ -10,10 +10,12 @@
 import { createHash } from 'node:crypto';
 import type {
   GroupID,
+  KnowledgeArchiveFilter,
   KnowledgeDocument,
   KnowledgeDocumentID,
   KnowledgeDocumentIndexingStatus,
   KnowledgeDocumentKind,
+  KnowledgeDocumentSortField,
   KnowledgeDocumentStatus,
   KnowledgeDocumentUnitID,
   KnowledgeDocumentVersion,
@@ -52,7 +54,7 @@ import {
   parseKnowledgeUri,
   titleFromKnowledgePath,
 } from '@agor/core/types';
-import { and, asc, desc, eq, inArray, like, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, like, or, type SQL, sql } from 'drizzle-orm';
 import { getBaseUrl } from '../../config/config-manager';
 import { generateId } from '../../lib/ids';
 import { getKnowledgeUrl } from '../../utils/url';
@@ -103,6 +105,9 @@ import {
 } from './base';
 import { deepMerge } from './merge-utils';
 
+/** Path reservations include archives; old databases may already contain duplicates. */
+export class KnowledgeDocumentPathConflictError extends RepositoryError {}
+
 const MARKDOWN_MIME_TYPE = 'text/markdown';
 export interface KnowledgeNamespaceFilters {
   slug?: string;
@@ -114,6 +119,7 @@ export interface KnowledgeNamespaceFilters {
 }
 
 export interface KnowledgeDocumentFilters {
+  archive_filter?: KnowledgeArchiveFilter;
   namespace_id?: KnowledgeNamespaceID;
   namespace_slug?: string;
   path?: string;
@@ -130,6 +136,23 @@ export interface KnowledgeDocumentFilters {
   include_other_user_drafts?: boolean;
   draft_filter_user_id?: UserID;
 }
+
+export interface KnowledgeDocumentPageOptions {
+  limit: number;
+  offset: number;
+  /** Feathers `$sort`; keys outside KNOWLEDGE_DOCUMENT_SORT_FIELDS are ignored. */
+  sort?: Record<string, 1 | -1>;
+  read: KnowledgeDocumentReadScope;
+}
+
+/**
+ * Who a document list is read for. Admins read every document; everyone else
+ * must name the namespaces they can read, so omitting them cannot silently
+ * drop the namespace restriction.
+ */
+export type KnowledgeDocumentReadScope =
+  | { as_admin: true }
+  | { as_admin: false; user_id?: UserID; namespace_ids: KnowledgeNamespaceID[] };
 
 export interface CreateKnowledgeDocumentInput extends Partial<KnowledgeDocument> {
   namespace_slug?: string;
@@ -166,6 +189,7 @@ type KnowledgeDocumentWriteInput = Partial<KnowledgeDocument> &
   Partial<UpdateKnowledgeDocumentInput>;
 
 export interface KnowledgeSearchQuery {
+  archive_filter?: KnowledgeArchiveFilter;
   q?: string;
   mode?: KnowledgeSearchMode;
   include_chunks?: boolean;
@@ -303,6 +327,34 @@ function makeSnippet(content: string | null | undefined, q: string): string | nu
   const start = Math.max(0, index - 80);
   const end = Math.min(content.length, index + needle.length + 160);
   return `${start > 0 ? '…' : ''}${content.slice(start, end)}${end < content.length ? '…' : ''}`;
+}
+
+/**
+ * SQL form of `canReadKnowledgeDocument`: readable namespaces plus the
+ * visibility overlay (public, own, or admin). Returns null when nothing can be
+ * read. `namespaceIds` undefined means no namespace restriction.
+ * `KnowledgeDocumentReadScope` (document lists) only allows that for admins;
+ * the older `KnowledgeSearchQuery` contract still treats the IDs as optional,
+ * and its service always supplies them for non-admins.
+ */
+function knowledgeDocumentReadConditions(options: {
+  asAdmin: boolean;
+  userId?: UserID;
+  namespaceIds?: readonly KnowledgeNamespaceID[];
+}): SQL[] | null {
+  const conditions: SQL[] = [];
+  if (options.namespaceIds) {
+    if (options.namespaceIds.length === 0) return null;
+    conditions.push(inArray(kbDocuments.namespace_id, [...options.namespaceIds]));
+  }
+  if (!options.asAdmin) {
+    conditions.push(
+      options.userId
+        ? or(eq(kbDocuments.visibility, 'public'), eq(kbDocuments.created_by, options.userId))!
+        : eq(kbDocuments.visibility, 'public')
+    );
+  }
+  return conditions;
 }
 
 function knowledgeDraftVisibilityCondition(options: {
@@ -1094,6 +1146,26 @@ export class KnowledgeDocumentRepository
       const txDb = txAsDb(tx);
       if (namespace.kind === 'branch' && namespace.branch_id)
         await lockBranchForAdmission(txDb, namespace.branch_id);
+      await lockRowForUpdate(
+        txDb,
+        this.db,
+        kbNamespaces,
+        eq(kbNamespaces.namespace_id, namespace.namespace_id)
+      );
+      const occupied = await select(txDb)
+        .from(kbDocuments)
+        .where(
+          and(
+            eq(kbDocuments.namespace_id, namespace.namespace_id),
+            eq(kbDocuments.path, normalizeKnowledgePath(data.path ?? ''))
+          )
+        )
+        .limit(1)
+        .one();
+      if (occupied)
+        throw new KnowledgeDocumentPathConflictError(
+          'Knowledge path is already reserved, possibly by an archived document; restore or use its document ID'
+        );
       const docInsert = this.documentToInsert(
         {
           ...data,
@@ -1167,28 +1239,37 @@ export class KnowledgeDocumentRepository
 
   async findByNamespaceAndPath(
     namespaceId: KnowledgeNamespaceID,
-    path: string
+    path: string,
+    includeArchived = false
   ): Promise<KnowledgeDocument | null> {
-    const row = await select(this.db)
+    const rows = await select(this.db)
       .from(kbDocuments)
       .where(
         and(
           eq(kbDocuments.namespace_id, namespaceId),
           eq(kbDocuments.path, normalizeKnowledgePath(path)),
-          eq(kbDocuments.archived, false)
+          includeArchived ? undefined : eq(kbDocuments.archived, false)
         )
       )
-      .one();
-    return row ? this.rowToDocumentWithUrl(row) : null;
+      .orderBy(asc(kbDocuments.archived))
+      .limit(2)
+      .all();
+    if (rows.length > 1 && rows[0].archived) {
+      throw new KnowledgeDocumentPathConflictError(
+        'Multiple archived documents use this path; address the document by ID'
+      );
+    }
+    return rows[0] ? this.rowToDocumentWithUrl(rows[0]) : null;
   }
 
   async findByNamespaceSlugAndPath(
     namespaceSlug: string,
-    path: string
+    path: string,
+    includeArchived = false
   ): Promise<KnowledgeDocument | null> {
     const namespace = await new KnowledgeNamespaceRepository(this.db).findBySlug(namespaceSlug);
     if (!namespace) return null;
-    return this.findByNamespaceAndPath(namespace.namespace_id, path);
+    return this.findByNamespaceAndPath(namespace.namespace_id, path, includeArchived);
   }
 
   async findByUnitId(unitId: string): Promise<KnowledgeDocument | null> {
@@ -1304,7 +1385,8 @@ export class KnowledgeDocumentRepository
     return Array.isArray(documents) ? withStatus : withStatus[0];
   }
 
-  async findAll(filters?: KnowledgeDocumentFilters): Promise<KnowledgeDocument[]> {
+  /** SQL predicates for a document filter, or null when nothing can match. */
+  private async documentConditions(filters?: KnowledgeDocumentFilters) {
     const conditions = [];
     let namespaceId = filters?.namespace_id;
     if (!namespaceId && filters?.namespace_slug) {
@@ -1312,7 +1394,7 @@ export class KnowledgeDocumentRepository
         filters.namespace_slug
       );
       namespaceId = namespace?.namespace_id;
-      if (!namespaceId) return [];
+      if (!namespaceId) return null;
     }
     if (namespaceId) conditions.push(eq(kbDocuments.namespace_id, namespaceId));
     if (filters?.path) conditions.push(eq(kbDocuments.path, normalizeKnowledgePath(filters.path)));
@@ -1325,26 +1407,32 @@ export class KnowledgeDocumentRepository
       includeOtherUserDrafts: filters?.include_other_user_drafts,
     });
     if (draftCondition) conditions.push(draftCondition);
-    conditions.push(eq(kbDocuments.archived, filters?.archived ?? false));
-    if (filters?.archived !== true) {
-      conditions.push(sql`exists (
+    const archiveFilter = filters?.archive_filter ?? (filters?.archived ? 'archived' : 'active');
+    if (archiveFilter !== 'all')
+      conditions.push(eq(kbDocuments.archived, archiveFilter === 'archived'));
+    conditions.push(sql`exists (
         select 1 from ${kbNamespaces}
         where ${kbNamespaces.namespace_id} = ${kbDocuments.namespace_id}
           and ${kbNamespaces.archived} = false
       )`);
-    }
+    return conditions;
+  }
 
-    const rows = await select(this.db)
-      .from(kbDocuments)
-      .where(and(...conditions))
-      .orderBy(desc(kbDocuments.updated_at), asc(kbDocuments.document_id))
-      .all();
+  private async rowsToDocuments(rows: KBDocumentRow[]): Promise<KnowledgeDocument[]> {
+    if (rows.length === 0) return [];
+    const namespaceIds = [...new Set(rows.map((row) => row.namespace_id))];
     const [baseUrl, namespaceRows] = await Promise.all([
       getBaseUrl(this.db),
-      select(this.db).from(kbNamespaces).all(),
+      select(this.db, { namespace_id: kbNamespaces.namespace_id, slug: kbNamespaces.slug })
+        .from(kbNamespaces)
+        .where(inArray(kbNamespaces.namespace_id, namespaceIds))
+        .all(),
     ]);
     const namespaceSlugById = new Map<string, string>(
-      namespaceRows.map((row: KBNamespaceRow) => [row.namespace_id, row.slug])
+      namespaceRows.map((row: { namespace_id: string; slug: string }) => [
+        row.namespace_id,
+        row.slug,
+      ])
     );
     return rows.map((row: KBDocumentRow) =>
       this.rowToDocument(row, {
@@ -1354,7 +1442,73 @@ export class KnowledgeDocumentRepository
     );
   }
 
-  async update(id: string, updates: KnowledgeDocumentWriteInput): Promise<KnowledgeDocument> {
+  async findAll(filters?: KnowledgeDocumentFilters): Promise<KnowledgeDocument[]> {
+    const conditions = await this.documentConditions(filters);
+    if (!conditions) return [];
+    const rows = await select(this.db)
+      .from(kbDocuments)
+      .where(and(...conditions))
+      .orderBy(desc(kbDocuments.updated_at), asc(kbDocuments.document_id))
+      .all();
+    return this.rowsToDocuments(rows);
+  }
+
+  /**
+   * One page of documents the caller can read. Read access, sort,
+   * LIMIT/OFFSET and the total (a separate COUNT) are all evaluated in SQL, so
+   * the database never returns rows the caller could not read.
+   */
+  async findPage(
+    filters: KnowledgeDocumentFilters,
+    page: KnowledgeDocumentPageOptions
+  ): Promise<{ total: number; data: KnowledgeDocument[] }> {
+    const conditions = await this.documentConditions(filters);
+    const readConditions = knowledgeDocumentReadConditions(
+      page.read.as_admin
+        ? { asAdmin: true }
+        : { asAdmin: false, userId: page.read.user_id, namespaceIds: page.read.namespace_ids }
+    );
+    if (!conditions || !readConditions) return { total: 0, data: [] };
+    const where = and(...conditions, ...readConditions);
+
+    const countRow = await select(this.db, { count: sql<number>`count(*)` })
+      .from(kbDocuments)
+      .where(where)
+      .one();
+    const total = Number(countRow?.count ?? 0);
+    if (page.limit === 0 || page.offset >= total) return { total, data: [] };
+
+    const sortColumns = {
+      updated_at: kbDocuments.updated_at,
+      created_at: kbDocuments.created_at,
+      path: kbDocuments.path,
+      title: kbDocuments.title,
+    } as const satisfies Record<KnowledgeDocumentSortField, unknown>;
+    const orderBy: SQL[] = [];
+    for (const [field, direction] of Object.entries(page.sort ?? {})) {
+      const column = sortColumns[field as keyof typeof sortColumns];
+      if (!column) continue;
+      orderBy.push(direction === -1 ? desc(column) : asc(column));
+    }
+    // Default order and tie-break: most recently updated first, then by id.
+    orderBy.push(desc(kbDocuments.updated_at), asc(kbDocuments.document_id));
+    const rows = await select(this.db)
+      .from(kbDocuments)
+      .where(where)
+      .orderBy(...orderBy)
+      .limit(page.limit)
+      .offset(page.offset)
+      .all();
+    return { total, data: await this.rowsToDocuments(rows) };
+  }
+
+  async update(
+    id: string,
+    updates: KnowledgeDocumentWriteInput,
+    // Runs under the document lock; false is a validated, idempotent no-op.
+    beforeWrite?: (current: KnowledgeDocument) => Promise<boolean>,
+    options: { requeueRestoredUnits?: boolean } = {}
+  ): Promise<KnowledgeDocument> {
     const fullId = await this.resolveId(id);
     if (updates.mime_type && updates.mime_type !== MARKDOWN_MIME_TYPE) {
       throw new RepositoryError('Knowledge V1 only supports text/markdown documents');
@@ -1373,6 +1527,12 @@ export class KnowledgeDocumentRepository
         );
         if (namespace?.kind === 'branch' && namespace.branch_id)
           await lockBranchForAdmission(txDb, namespace.branch_id);
+        await lockRowForUpdate(
+          txDb,
+          this.db,
+          kbNamespaces,
+          eq(kbNamespaces.namespace_id, membership.namespace_id)
+        );
       }
       await lockRowForUpdate(txDb, this.db, kbDocuments, eq(kbDocuments.document_id, fullId));
 
@@ -1382,9 +1542,28 @@ export class KnowledgeDocumentRepository
         .one();
       if (!currentRow) throw new EntityNotFoundError('KnowledgeDocument', id);
       const current = this.rowToDocument(currentRow);
+      if (beforeWrite && (await beforeWrite(current)) === false) {
+        return this.rowToDocumentWithUrl(currentRow);
+      }
       const namespace = await new KnowledgeNamespaceRepository(txDb).findById(current.namespace_id);
       if (!namespace) throw new RepositoryError('Knowledge namespace not found');
 
+      if (updates.path !== undefined && normalizeKnowledgePath(updates.path) !== current.path) {
+        const occupied = await select(txDb)
+          .from(kbDocuments)
+          .where(
+            and(
+              eq(kbDocuments.namespace_id, current.namespace_id),
+              eq(kbDocuments.path, normalizeKnowledgePath(updates.path))
+            )
+          )
+          .limit(1)
+          .one();
+        if (occupied)
+          throw new KnowledgeDocumentPathConflictError(
+            'Knowledge path is already reserved, possibly by an archived document'
+          );
+      }
       let nextVersionId = current.current_version_id ?? null;
       if (updates.content_text !== undefined) {
         const latestRow = await select(txDb)
@@ -1459,8 +1638,31 @@ export class KnowledgeDocumentRepository
         }
       }
 
+      // Archived work may have been reconciled to not_configured by the indexer.
+      // Keep ready vectors and unit identities; queue only unfinished current units.
+      if (
+        current.archived &&
+        updates.archived === false &&
+        options.requeueRestoredUnits &&
+        current.current_version_id
+      ) {
+        await update(txDb, kbDocumentUnits)
+          .set({ embedding_status: 'pending', updated_at: new Date() })
+          .where(
+            and(
+              eq(kbDocumentUnits.version_id, current.current_version_id),
+              eq(kbDocumentUnits.embedding_status, 'not_configured')
+            )
+          )
+          .run();
+      }
       const merged = deepMerge(current, {
         ...updates,
+        ...(updates.archived !== undefined
+          ? {
+              archived_at: updates.archived ? (current.archived_at ?? new Date()) : null,
+            }
+          : {}),
         document_id: current.document_id,
         namespace_id: current.namespace_id,
         created_at: current.created_at,
@@ -1590,15 +1792,17 @@ export class KnowledgeSearchRepository {
       if (!namespaceId) return [];
     }
 
-    const conditions = [];
-    if (!query.include_archived) {
-      conditions.push(eq(kbDocuments.archived, false));
-      conditions.push(eq(kbNamespaces.archived, false));
-    }
-    if (query.readable_namespace_ids) {
-      if (query.readable_namespace_ids.length === 0) return [];
-      conditions.push(inArray(kbDocuments.namespace_id, query.readable_namespace_ids));
-    }
+    const readConditions = knowledgeDocumentReadConditions({
+      asAdmin: query.readable_as_admin === true,
+      userId: query.readable_by_user_id,
+      namespaceIds: query.readable_namespace_ids,
+    });
+    if (!readConditions) return [];
+    const conditions = [...readConditions];
+    const archiveFilter = query.archive_filter ?? (query.include_archived ? 'all' : 'active');
+    if (archiveFilter !== 'all')
+      conditions.push(eq(kbDocuments.archived, archiveFilter === 'archived'));
+    conditions.push(eq(kbNamespaces.archived, false));
     if (namespaceId) conditions.push(eq(kbDocuments.namespace_id, namespaceId));
     if (query.path_prefix) {
       const prefix = normalizeKnowledgeFolderPath(query.path_prefix);
@@ -1615,16 +1819,6 @@ export class KnowledgeSearchRepository {
       includeOtherUserDrafts: query.include_other_user_drafts ?? query.includeOtherUserDrafts,
     });
     if (draftCondition) conditions.push(draftCondition);
-    if (!query.readable_as_admin) {
-      conditions.push(
-        query.readable_by_user_id
-          ? or(
-              eq(kbDocuments.visibility, 'public'),
-              eq(kbDocuments.created_by, query.readable_by_user_id)
-            )!
-          : eq(kbDocuments.visibility, 'public')
-      );
-    }
 
     const needle = q.toLowerCase();
     const terms = needle

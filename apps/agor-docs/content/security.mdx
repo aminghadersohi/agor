@@ -51,7 +51,7 @@ The external launcher is responsible for identity, credentials, storage, contain
 
 The launcher command receives a curated minimal process environment. The authenticated executor payload (including the task's resolved user environment) is delivered over stdin, not argv. Give the launcher its own workload identity in the delegated substrate; do not depend on inheriting daemon database, JWT, master-key, or provider credentials.
 
-> `strict` and `insulated` were removed in 0.25. Upgrade through the latest 0.24.x release and migrate to `sandbox` before upgrading a legacy installation.
+> `strict` and `insulated` were removed in 0.25. Use the documented [offline 0.24.7 → 0.25.1 cutover](/guide/multiplayer-unix-isolation#migrating-from-024) for legacy installations; there is no published 0.24 bridge release.
 
 ## Board and branch permissions (RBAC)
 
@@ -153,16 +153,6 @@ Users with the `admin` role can manage other users, configure MCP servers, view 
 - **Keep the deployment master secret stable and recoverable.** Online rotation/re-encryption is not implemented; rotate provider credentials independently after suspected exposure.
 - **Audit daemon and external-launcher logs.** Correlate tenant, user, session, task, and runtime identifiers.
 - **Pilot before scaling.** Run the first weeks of multi-user use with logs open.
-
----
-
-## What's on the Roadmap
-
-- **Rate limiting & quotas** (per-user limits on session count and API spend)
-- **Enhanced audit log UI** (in-product viewer for security events)
-- **Hardened MCP token management** (more granular scoping, revocation)
-- **Resource usage tracking.** Per-user cost dashboards (partial today via Settings → Analytics)
-- **Formal pen testing.** Ongoing; until then, keep daemons inside trusted network boundaries
 
 ---
 

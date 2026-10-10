@@ -58,6 +58,32 @@ export const DURABLE_GATEWAY_LISTENER_CHANNEL_TYPES = [
   'discord',
 ] as const satisfies readonly ChannelType[];
 
+/**
+ * Per-platform channel-config flag that makes an inbound prompt carry its REAL
+ * sender instead of the channel's "Post messages as" account.
+ *
+ * This is an ALLOWLIST, and the polarity matters. `GatewayService.emitMessage`
+ * falls back to `channel.agor_user_id` for every platform whose flag is absent
+ * or off, so a platform that is missing from this map has no proven per-user
+ * attribution — not "no shared-account problem". Anything that mints a
+ * credential on behalf of "the user who asked" must therefore treat an absent
+ * entry as unaligned.
+ *
+ * `GatewayService.emitMessage` reads its flags through this map and
+ * `resolveGatewayPromptIdentity` derives its allowlist from the same keys, so
+ * adding a platform's alignment support is one edit in one place. A new
+ * `ChannelType` is refused by both until it is listed here.
+ */
+export const GATEWAY_USER_ALIGNMENT_CONFIG_KEYS = {
+  slack: 'align_slack_users',
+  github: 'align_github_users',
+  discord: 'align_discord_users',
+  shortcut: 'align_shortcut_users',
+} as const satisfies Partial<Record<ChannelType, string>>;
+
+/** A `ChannelType` that has a user-alignment switch. */
+export type AlignableChannelType = keyof typeof GATEWAY_USER_ALIGNMENT_CONFIG_KEYS;
+
 /** Thread lifecycle status */
 export type ThreadStatus = 'active' | 'archived' | 'paused';
 
@@ -178,13 +204,85 @@ export interface DiscordGatewayConfig {
   message_content_enabled?: boolean;
   thread_mode?: 'public_thread_per_summon';
   thread_auto_archive_minutes?: 60 | 1440 | 4320 | 10080;
+  direct_messages_enabled?: boolean;
   align_discord_users?: boolean;
   user_map?: Record<string, string>;
   catch_up?: DiscordCatchUpConfig;
-  files?: false;
-  agent_tools?: never[];
+  /** Opt-in bounded image and text attachment ingestion for live Discord messages. */
+  files?: boolean;
+  /**
+   * Agent-callable MCP tool toggles. `[]` is the legacy all-off value and
+   * stays valid; see {@link resolveDiscordAgentTools}.
+   */
+  agent_tools?: DiscordAgentToolsConfig | never[];
   outbound_enabled?: boolean;
   default_outbound_target?: string | null;
+  /**
+   * Per allowed channel: answer messages that do not mention the bot. Absent
+   * channels keep the default `mention` mode. See {@link discordResponseModeAdmits}.
+   */
+  response_modes?: Record<string, DiscordResponseMode>;
+}
+
+/**
+ * How the bot treats messages that do not mention it in one allowed forum
+ * channel (text channels stay mention-only):
+ * - `mention`: only mentions start or continue a conversation (default);
+ * - `starters`: a new post's opening message also starts one; follow-ups in
+ *   the post still need a mention;
+ * - `all`: every message from an allowed author in the forum's posts is answered.
+ */
+export const DISCORD_RESPONSE_MODES = ['mention', 'starters', 'all'] as const;
+export type DiscordResponseMode = (typeof DISCORD_RESPONSE_MODES)[number];
+
+/** An assistant reply of only this marker is not posted to Discord. */
+export const DISCORD_NO_REPLY_SENTINEL = '[no-reply]';
+
+/** True for a reply that is just the no-reply marker, tolerating wrappers, a period, and case. */
+export function isDiscordNoReply(text: string): boolean {
+  const trimmed = text.trim();
+  // Only a short reply can be the marker; never run the regex on long output.
+  if (trimmed.length > DISCORD_NO_REPLY_SENTINEL.length + 16) return false;
+  // Tolerate Markdown, code-fence (with a language tag), quote, or blockquote wrappers and a trailing period.
+  return (
+    trimmed
+      .replace(/^```[a-z]*\s+/i, '')
+      .replace(/^[`*_~"'>\s]+|[`*_~"'.\s]+$/g, '')
+      .toLowerCase() === DISCORD_NO_REPLY_SENTINEL
+  );
+}
+
+/**
+ * Whether a forum post message that does not mention the bot is admitted by
+ * its forum's response mode. Response modes apply to forum channels only (the
+ * listener refuses them elsewhere), so a top-level message is never admitted.
+ * Within a post, only the opening message has the post's own ID.
+ */
+export function discordResponseModeAdmits(
+  config: Pick<DiscordGatewayConfig, 'response_modes'>,
+  message: { channelId: string; parentChannelId?: string; messageId: string; isThread: boolean }
+): boolean {
+  if (!message.isThread || !message.parentChannelId) return false;
+  const mode = config.response_modes?.[message.parentChannelId];
+  if (mode === 'all') return true;
+  if (mode === 'starters') return message.messageId === message.channelId;
+  return false;
+}
+
+/**
+ * Cheap pre-check, before any channel lookup, for a message that does not
+ * mention the bot: only a message in a forum post (never an allowed top-level
+ * channel) can qualify, and under `starters` only a post's opening message.
+ */
+export function discordResponseModeMayAdmit(
+  config: Pick<DiscordGatewayConfig, 'allowed_channel_ids' | 'response_modes'>,
+  message: { channelId: string; messageId: string }
+): boolean {
+  if (config.allowed_channel_ids?.includes(message.channelId)) return false;
+  const modes = Object.values(config.response_modes ?? {});
+  return (
+    modes.includes('all') || (modes.includes('starters') && message.messageId === message.channelId)
+  );
 }
 
 /**
@@ -268,6 +366,25 @@ export function isDiscordSnowflake(value: unknown): value is string {
   }
 }
 
+/** Decode the provider timestamp of an already-validated Discord Snowflake. */
+export function discordSnowflakeTimestampMs(id: string): number {
+  return Number((BigInt(id) >> 22n) + 1420070400000n);
+}
+
+/** The Snowflake just before an already-validated one, so an exclusive after-cursor includes `id`. */
+export function previousDiscordSnowflake(id: string): string {
+  if (!isDiscordSnowflake(id)) {
+    throw new Error('Discord Snowflake decrement requires a canonical Snowflake');
+  }
+  return (BigInt(id) - 1n).toString();
+}
+
+/** The channel snowflake of a `channel:<snowflake>` proactive target, if well formed. */
+export function discordOutboundChannelTarget(target: string): string | undefined {
+  const channelId = /^channel:(\d{17,20})$/.exec(target.trim())?.[1];
+  return channelId && isDiscordSnowflake(channelId) ? channelId : undefined;
+}
+
 /** Compare two already-validated Discord Snowflakes without losing precision. */
 export function compareDiscordSnowflakes(a: string, b: string): number {
   if (!isDiscordSnowflake(a) || !isDiscordSnowflake(b)) {
@@ -301,6 +418,163 @@ function validateCatchUpConfig(raw: unknown, errors: string[]): void {
       );
     }
   }
+}
+
+/**
+ * Per-channel toggles for agent-callable Discord MCP tools, stored at
+ * `config.agent_tools` on Discord gateway channels. Every capability is off
+ * unless an admin enables it; the legacy `[]` value means all off.
+ */
+export interface DiscordAgentToolsConfig {
+  /**
+   * Read allowlisted channel history (agor_gateway_discord_channel_history_get)
+   * and list forum posts (agor_gateway_discord_forum_posts_list).
+   */
+  channel_history?: boolean;
+}
+
+export type DiscordAgentToolCapability = keyof DiscordAgentToolsConfig;
+
+export const DISCORD_AGENT_TOOL_DEFAULTS: Record<DiscordAgentToolCapability, boolean> = {
+  channel_history: false,
+};
+
+function validateDiscordAgentTools(raw: unknown, errors: string[]): void {
+  if (raw === undefined) return;
+  if (Array.isArray(raw)) {
+    if (raw.length > 0) errors.push('agent_tools must be [] or an object of capability toggles');
+    return;
+  }
+  if (!isRecord(raw)) {
+    errors.push('agent_tools must be [] or an object of capability toggles');
+    return;
+  }
+  for (const [key, value] of Object.entries(raw)) {
+    if (!Object.hasOwn(DISCORD_AGENT_TOOL_DEFAULTS, key)) {
+      errors.push(`agent_tools.${key} is not a supported Discord agent tool`);
+    } else if (typeof value !== 'boolean') {
+      errors.push(`agent_tools.${key} must be a boolean`);
+    }
+  }
+}
+
+/**
+ * Resolve a Discord channel's `config.agent_tools` value (absent, legacy `[]`,
+ * or a toggle object) into a fully-populated capability map.
+ */
+export function resolveDiscordAgentTools(
+  raw: unknown
+): Record<DiscordAgentToolCapability, boolean> {
+  const resolved = { ...DISCORD_AGENT_TOOL_DEFAULTS };
+  if (!isRecord(raw)) return resolved;
+  for (const capability of Object.keys(resolved) as DiscordAgentToolCapability[]) {
+    if (typeof raw[capability] === 'boolean') resolved[capability] = raw[capability] as boolean;
+  }
+  return resolved;
+}
+
+/** One agent read of recent messages from an already-authorized channel. */
+export interface DiscordChannelHistoryRequest {
+  channelId: string;
+  /** Exclusive cursor: return the newest matches older than this message. */
+  before?: string;
+  /** Exclusive cursor: return the oldest matches newer than this message. */
+  after?: string;
+  /** Matching messages to return (1–200, default 50). */
+  limit?: number;
+  /** Include bot and system messages. Defaults to false. */
+  includeBotMessages?: boolean;
+}
+
+/**
+ * Connector-level agent read: an explicit channel, or the allowlisted parent
+ * channel of a Discord gateway session's thread.
+ */
+export interface DiscordAgentChannelHistoryRequest
+  extends Omit<DiscordChannelHistoryRequest, 'channelId'> {
+  channelId?: string;
+  /** Gateway session thread key whose allowlisted parent channel is read. */
+  sessionThreadKey?: string;
+}
+
+export interface DiscordChannelHistoryAttachment {
+  filename: string;
+  content_type?: string;
+  size: number;
+}
+
+export interface DiscordChannelHistoryMessage {
+  id: string;
+  iso_time: string;
+  actor_label: string;
+  author_id?: string;
+  text: string;
+  /** Set when the text alone exceeded the byte budget and was cut. */
+  text_truncated?: true;
+  is_bot: boolean;
+  is_system: boolean;
+  is_mention: boolean;
+  /** Set for a forward; text and attachments are the forwarded message's. */
+  is_forwarded?: true;
+  attachments?: DiscordChannelHistoryAttachment[];
+  /** Thread started from this message, readable with the same tool. */
+  thread_id?: string;
+}
+
+export interface DiscordChannelHistoryResult {
+  channelId: string;
+  /** Chronological order. */
+  messages: DiscordChannelHistoryMessage[];
+  has_more: boolean;
+  /** Cursor for the next call in the same direction; null when complete. */
+  next_cursor: { before: string } | { after: string } | null;
+}
+
+/** Agent read of the posts (public threads) in an allowlisted forum channel. */
+export interface DiscordForumPostsRequest {
+  channelId: string;
+  /** List archived posts instead of active ones. Defaults to false. */
+  archived?: boolean;
+  /**
+   * Exclusive cursor from a previous result: a post ID for active posts, an
+   * archive ISO timestamp for archived posts.
+   */
+  before?: string;
+  /** Posts to return, newest first (1–100, default 25). */
+  limit?: number;
+}
+
+/**
+ * Connector-level forum read: an explicit forum, or the allowlisted forum
+ * behind a Discord gateway session's post.
+ */
+export interface DiscordAgentForumPostsRequest extends Omit<DiscordForumPostsRequest, 'channelId'> {
+  channelId?: string;
+  /** Gateway session thread key whose allowlisted parent forum is listed. */
+  sessionThreadKey?: string;
+}
+
+export interface DiscordForumPost {
+  id: string;
+  title: string;
+  tags: Array<{ id: string; name: string }>;
+  author_id?: string;
+  created_at: string;
+  /** Replies, excluding the opening message. */
+  reply_count?: number;
+  last_message_id?: string;
+  archived: boolean;
+  locked: boolean;
+  archived_at?: string;
+}
+
+export interface DiscordForumPostsResult {
+  channelId: string;
+  archived: boolean;
+  /** Newest first: by creation for active posts, by archive time for archived posts. */
+  posts: DiscordForumPost[];
+  has_more: boolean;
+  next_cursor: { before: string } | null;
 }
 
 /** Fill only non-authority defaults; Message Content and identity stay explicit. */
@@ -372,6 +646,21 @@ export function validateDiscordConfig(
   };
   validateAllowlist('allowed_user_ids');
   validateAllowlist('allowed_role_ids');
+  if (raw.response_modes !== undefined) {
+    if (!isRecord(raw.response_modes)) {
+      errors.push('response_modes must map allowed channel IDs to a response mode');
+    } else {
+      const entries = Object.entries(raw.response_modes);
+      if (entries.some(([channelId]) => !allowedChannelIds.includes(channelId))) {
+        errors.push('response_modes keys must be allowed channel IDs');
+      }
+      if (
+        entries.some(([, mode]) => !DISCORD_RESPONSE_MODES.includes(mode as DiscordResponseMode))
+      ) {
+        errors.push('response_modes values must be mention, starters, or all');
+      }
+    }
+  }
   const userAllowlist = Array.isArray(raw.allowed_user_ids) ? raw.allowed_user_ids : [];
   const roleAllowlist = Array.isArray(raw.allowed_role_ids) ? raw.allowed_role_ids : [];
   if (userAllowlist.length === 0 && roleAllowlist.length === 0) {
@@ -415,16 +704,17 @@ export function validateDiscordConfig(
     errors.push('user_map must contain at least one entry when align_discord_users is true');
   }
 
-  validateCatchUpConfig(raw.catch_up, errors);
-  if (raw.files !== undefined && raw.files !== false) {
-    errors.push('files must be false');
-  }
   if (
-    raw.agent_tools !== undefined &&
-    (!Array.isArray(raw.agent_tools) || raw.agent_tools.length > 0)
+    raw.direct_messages_enabled !== undefined &&
+    typeof raw.direct_messages_enabled !== 'boolean'
   ) {
-    errors.push('agent_tools must be an empty array');
+    errors.push('direct_messages_enabled must be a boolean');
   }
+  validateCatchUpConfig(raw.catch_up, errors);
+  if (raw.files !== undefined && typeof raw.files !== 'boolean') {
+    errors.push('files must be a boolean');
+  }
+  validateDiscordAgentTools(raw.agent_tools, errors);
 
   if (raw.outbound_enabled !== undefined && typeof raw.outbound_enabled !== 'boolean') {
     errors.push('outbound_enabled must be a boolean');
@@ -433,8 +723,8 @@ export function validateDiscordConfig(
     if (typeof raw.default_outbound_target !== 'string') {
       errors.push('default_outbound_target must be channel:<snowflake>');
     } else {
-      const match = /^channel:(\d{17,20})$/.exec(raw.default_outbound_target.trim());
-      if (!match || !isDiscordSnowflake(match[1]) || !allowedChannelIds.includes(match[1])) {
+      const targetChannelId = discordOutboundChannelTarget(raw.default_outbound_target);
+      if (!targetChannelId || !allowedChannelIds.includes(targetChannelId)) {
         errors.push('default_outbound_target must target an allowed channel');
       }
     }
@@ -542,11 +832,20 @@ export interface GatewayConnectionTestPermissionDetails {
   sendInThreads: boolean;
 }
 
+/** Kinds of Discord channel an allowlist may name: text, or forum (whose posts are threads). */
+export type DiscordParentChannelKind = 'text' | 'forum';
+
 /** Access result for one configured provider channel. */
 export interface GatewayConnectionTestChannelAccess {
   channelId: string;
+  /** Discord only, when the channel is a supported kind. */
+  kind?: DiscordParentChannelKind;
   ok: boolean;
   permissions?: GatewayConnectionTestPermissionDetails;
+}
+
+export function isDiscordDirectMessagesEnabled(config: DiscordGatewayConfig): boolean {
+  return config.direct_messages_enabled === true;
 }
 
 /**
@@ -557,6 +856,7 @@ export interface GatewayConnectionTestChannelAccess {
  * guarantee; connector-specific optional fields carry richer details.
  */
 export interface GatewayConnectionTestResult {
+  directMessages?: { enabled: boolean };
   ok: boolean;
   team?: { id: string; name: string };
   bot?: { userId: string; name: string };
@@ -690,6 +990,7 @@ type ReferencedGatewayAgenticConfig = {
   codexSandboxMode?: never;
   codexApprovalPolicy?: never;
   codexNetworkAccess?: never;
+  codexIncludePlugins?: never;
 };
 
 type InlineGatewayAgenticConfig = {
@@ -699,6 +1000,7 @@ type InlineGatewayAgenticConfig = {
   codexSandboxMode?: CodexSandboxMode;
   codexApprovalPolicy?: CodexApprovalPolicy;
   codexNetworkAccess?: boolean;
+  codexIncludePlugins?: boolean;
 };
 
 export type GatewayAgenticConfig = GatewayAgenticConfigBase &
@@ -713,6 +1015,7 @@ export type PersistedGatewayAgenticConfig = GatewayAgenticConfigBase & {
   codexSandboxMode?: CodexSandboxMode;
   codexApprovalPolicy?: CodexApprovalPolicy;
   codexNetworkAccess?: boolean;
+  codexIncludePlugins?: boolean;
 };
 
 // ============================================================================

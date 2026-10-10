@@ -75,8 +75,10 @@ resumed.
 
 Agor sets each supported tool's config-home environment variables and mounts
 the branch directory at its real path. Cursor is refused because its config
-home cannot currently be relocated reliably. OpenCode is also refused because
-its current XDG data home combines native credentials with relocatable state.
+home cannot currently be relocated reliably. Local OpenCode is also refused because
+its current XDG data home combines native credentials with relocatable state;
+hosted OpenCode keeps live state and the prompter's key on Job-local scratch and
+stores only sealed conversation checkpoints in the branch home.
 Credentials remain caller-scoped rather than being copied into the shared
 branch home. Codex API keys are injected through the environment; Codex
 subscription auth uses a caller-specific file overlay in local sandbox mode.
@@ -139,106 +141,10 @@ sudo.
 
 ## Board and branch permissions
 
-Every board and branch has one primary owner. The current owner or a workspace
-Admin/Superadmin can use **Transfer ownership** in its permission settings to
-choose another member of the same workspace. Managers cannot transfer ownership
-unless they are also the owner or a workspace administrator. Viewer-only accounts
-cannot receive ownership. This transfer authority is independent of the configured
-superadmin bypass for ordinary branch operations.
-
-Transfer changes management ownership of **one resource only**. A board transfer
-does not transfer its branches, and a branch transfer does not grant access to
-its board. Creators and historical authorship stay unchanged. Named access
-entries, groups, Others, inheritance/overrides, and session-sharing switches are
-preserved. The former owner loses the primary-owner shortcut but keeps any
-independent access or administrator privileges. The result shows their remaining
-resource-policy capabilities and branch file access.
-
-This is **not an assistant runtime handoff or offboarding**: sessions, schedules,
-gateway run-as, Knowledge namespace ownership, personal MCP connections, OAuth
-grants and credentials do not move. Existing work keeps its execution identity;
-normal authorization rechecks may stop it if that identity loses access. Transfer
-does not pause work or guarantee immediate credential/process revocation.
-The successor must configure their own connections. Execution-home Sessions
-remain unshareable; branch-home Sessions still require both sharing gates.
-
-The REST/Socket.IO commands are `PATCH /boards/:id/ownership` and
-`PATCH /branches/:id/ownership`, with full UUIDs in the route and body:
-
-```json
-{
-  "expected_owner_user_id": "<current owner UUID>",
-  "target_user_id": "<successor UUID>"
-}
-```
-
-Read the resource first. A stale expected owner is rejected; reload before
-retrying. Ordinary resource and permission patches cannot change ownership.
-MCP exposes `agor_boards_transfer_ownership` and
-`agor_branches_transfer_ownership`. Bulk transfer, runtime handoff and user
-soft/hard deletion are not part of these commands.
-
-Upgrade the daemon and apply its normal database migrations before using transfer.
-The migration removes only the old ownership-immutability triggers; it does not
-rewrite existing owners. Authorization, successor eligibility and stale-owner
-checks run in the shared application transaction on SQLite and PostgreSQL.
-Existing database reference protections remain in place (SQLite owner-update
-eligibility is checked by the application, not a replacement trigger).
-Branches undergoing maintenance or permanent deletion reject transfer.
-
-A board has two separate settings:
-
-- **Board access** controls who can see and edit the canvas.
-- **Branch defaults** are the complete permission package inherited by branches on that board.
-
-A branch either inherits that entire package or uses one override copied from the current defaults. This includes session sharing—there is no separate inheritance switch for it.
-
-Board roles are **Viewer**, **Editor**, and **Manager**. Branch roles are:
-
-| Role         | Meaning                                                                                    |
-| ------------ | ------------------------------------------------------------------------------------------ |
-| Viewer       | View the branch and its conversations                                                      |
-| Collaborator | View, create Sessions, and prompt branch-home Sessions                                     |
-| Manager      | Collaborator access plus branch, environment, session-lifecycle, and permission management |
-
-Branch file access is selected separately as `none`, `read`, or `read/write`. Collaborator and Manager can open a terminal only when file access is not `none`.
-
-Each entry names exactly one person or group. A person's direct entry overrides their group memberships; otherwise group permissions combine and the highest file access wins. **Others** is a fallback only for active members of the same workspace who match no person or group entry.
-
-Collaborators and Managers may prompt another person's **branch-home** Session
-only when the workspace preference and effective branch permission package both
-enable shared session prompting. The task runs as the actual caller while the
-conversation and native SDK state remain branch-owned. An **execution-home**
-Session is never shareable; create a new branch-home Session instead. When a
-gate is disabled, Agor and connected gateway channels return an actionable,
-terminal denial rather than silently changing execution identity or retrying.
-
-## Capability-policy upgrade
-
-The normalized board/branch permission migration is a coordinated offline cutover. Stop every daemon, take and test a complete database backup, then run the migration with only the new version installed.
-
-The migration maps legacy access conservatively. Personal sharing grants are
-not broadened into branch-wide access: the new workspace and branch switches
-start off. Some users may therefore have less access after the upgrade. Review
-important board and branch permission screens before resuming normal work.
-
-If a board or branch cannot be attributed to a primary owner, migration stops and lists the affected IDs. Resolve those resources manually rather than assigning an arbitrary owner. Old daemon versions cannot run against the migrated authority model. Rollback requires restoring the complete pre-migration database backup.
-
-## Migrating from 0.24
-
-There is no published 0.24 bridge release for this conversion. Treat the 0.25.1 upgrade as an offline cutover:
-
-1. While still on 0.24.7, drain work, stop **every** daemon connected to the database, and take tested database, configuration, and storage backups.
-2. Install the 0.25.1 software without starting its daemon, then run `agor db migrate --offline-cutover` from 0.25.1.
-3. Obtain the 0.25.1 [`sandbox-home-migration-preflight.sh`](https://github.com/preset-io/agor/blob/v0.25.1/scripts/sandbox-home-migration-preflight.sh) and [`strict-to-sandbox-migration.sh`](https://github.com/preset-io/agor/blob/v0.25.1/scripts/strict-to-sandbox-migration.sh). Review the [full operator runbook](https://github.com/preset-io/agor/blob/v0.25.1/context/guides/migrate-strict-to-sandbox.md).
-4. Run both scripts' read-only checks, then use `--prepare-only` to create and inspect the ownership manifest, config backup, ownership plan, and progress journal. Apply with `--apply --resume` only after that checkpoint is preserved.
-5. Start only 0.25.1 daemons, then verify one real task for every configured agentic tool.
-
-The migration scripts are Linux/GNU-specific reference tooling. They only detect the configured systemd service, so independently verify that foreground and alternate-service daemons are stopped. They do not cross nested mount points, and the ownership manifest is not an automatic rollback tool. Keep host users, groups, sudoers, and all recovery artifacts through a production soak. The safest full rollback is to stop 0.25.1 and restore the complete pre-upgrade backup.
-
-Version 0.25 refuses `strict`, `insulated`, and `opportunistic` configuration values; it does not downgrade them to `simple`. For migration help, bring the dry-run output and deployment layout to [Discord](https://discord.gg/Qh4TrFQZpd) before applying filesystem changes.
-
-Historical `unix_group` database values remain nullable for rollback and audit but are no longer written or interpreted. `unix_username` remains temporarily as the delegated home key and immutable session stamp.
+For roles, file access, ownership transfers, and shared-session gates, see
+[Sharing & Permissions](/guide/permissions#board-and-branch-permissions).
+Application permissions remain separate from execution isolation: assigning a
+role does not make trusted local `simple` execution a filesystem sandbox.
 
 ## Related
 

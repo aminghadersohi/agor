@@ -46,7 +46,7 @@ it('backfills SQLite recency atomically without losing children, indexes or fiel
       )
     ).toEqual(fixture.taskRows);
     // 0113 still preserves every index it inherited. `runMigrations` also runs
-    // 0114, which restores the two the 0009 rebuild dropped, so the set may
+    // 0117, which restores the two the 0009 rebuild dropped, so the set may
     // only grow — and only by exactly those two.
     const afterIndexes = await indexes();
     expect(afterIndexes).toEqual(expect.arrayContaining(beforeIndexes));

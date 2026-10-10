@@ -23,6 +23,7 @@ vi.mock('../resolve-ids.js', () => ({
   resolveSessionId: async (_ctx: unknown, id: string) => id,
   resolveBranchId: async (_ctx: unknown, id: string) => id,
   resolveMcpServerId: async (_ctx: unknown, id: string) => `full-${id}`,
+  resolveTaskId: async (_ctx: unknown, id: string) => `full-${id}`,
 }));
 
 vi.mock('../../utils/branch-authorization.js', () => ({
@@ -147,6 +148,106 @@ async function registerAndCaptureHandlers(
   const tools = await registerAndCaptureTools(ctx, toolNames);
   return Object.fromEntries(Object.entries(tools).map(([name, { cb }]) => [name, cb]));
 }
+
+describe('conditional MCP Stop', () => {
+  it('preserves the successful already_idle outcome', async () => {
+    const create = vi.fn().mockResolvedValue({
+      success: true,
+      outcome: 'already_idle',
+      status: 'idle',
+    });
+    const { agor_sessions_stop } = await registerAndCaptureHandlers(
+      { app: makeFakeApp({ '/sessions/:id/stop': { create } }), userId: 'user-1' },
+      ['agor_sessions_stop']
+    );
+
+    const response = await agor_sessions_stop({ sessionId: 'session-1' });
+
+    expect(JSON.parse(response.content[0].text)).toEqual({
+      success: true,
+      sessionId: 'session-1',
+      outcome: 'already_idle',
+      status: 'idle',
+      note: 'Session stopped successfully.',
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves ordinary success compatibility when the backend omits outcome', async () => {
+    const create = vi.fn().mockResolvedValue({
+      success: true,
+      status: 'idle',
+      reason: 'Executor termination verified.',
+    });
+    const { agor_sessions_stop } = await registerAndCaptureHandlers(
+      { app: makeFakeApp({ '/sessions/:id/stop': { create } }), userId: 'user-1' },
+      ['agor_sessions_stop']
+    );
+
+    const response = await agor_sessions_stop({
+      sessionId: 'session-1',
+      reason: 'User requested',
+    });
+
+    expect(JSON.parse(response.content[0].text)).toEqual({
+      success: true,
+      sessionId: 'session-1',
+      status: 'idle',
+      reason: 'User requested',
+      note: 'Executor termination verified.',
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('validates the optional guard, forwards it with delegated params, and never retries a mismatch', async () => {
+    const create = vi.fn().mockResolvedValue({
+      success: false,
+      outcome: 'condition_changed',
+      reason: 'Execution changed before Stop could be claimed.',
+    });
+    const baseServiceParams = {
+      provider: 'mcp',
+      user: { user_id: 'acting-user', role: 'member' },
+      tenant: { source: 'explicit', tenant_id: 'acting-tenant' },
+    };
+    const tools = await registerAndCaptureTools(
+      {
+        app: makeFakeApp({ '/sessions/:id/stop': { create } }),
+        userId: 'acting-user',
+        baseServiceParams,
+      },
+      ['agor_sessions_stop']
+    );
+    const { cfg, cb } = tools.agor_sessions_stop;
+    for (const expectedTaskId of ['', 42, null]) {
+      expect(cfg.inputSchema!.safeParse({ sessionId: 'session-1', expectedTaskId }).success).toBe(
+        false
+      );
+    }
+    const args = {
+      sessionId: 'session-1',
+      expectedTaskId: 'original-task',
+      reason: 'Update queued',
+    };
+    expect(cfg.inputSchema!.safeParse(args).success).toBe(true);
+    const response = await cb(args);
+    expect(JSON.parse(response.content[0].text)).toMatchObject({
+      success: false,
+      outcome: 'condition_changed',
+    });
+    expect(create).toHaveBeenCalledExactlyOnceWith(
+      { expected_task_id: 'full-original-task', reason: 'Update queued' },
+      { ...baseServiceParams, route: { id: 'session-1' } }
+    );
+    // Omitting the guard retains the existing emergency-stop contract.
+    expect(cfg.inputSchema!.safeParse({ sessionId: 'session-1' }).success).toBe(true);
+    await cb({ sessionId: 'session-1' });
+    expect(create).toHaveBeenLastCalledWith(
+      {},
+      { ...baseServiceParams, route: { id: 'session-1' } }
+    );
+  });
+});
 
 describe('sessionless MCP context', () => {
   afterEach(() => {
@@ -570,6 +671,196 @@ describe('agor_sessions_create', () => {
     vi.clearAllMocks();
   });
 
+  it('makes the tool optional in discovery while rejecting invalid explicit choices', async () => {
+    const { agor_sessions_create: tool } = await registerAndCaptureTools(
+      { app: makeFakeApp({}), userId: 'user-1' },
+      ['agor_sessions_create']
+    );
+    expect(tool.cfg.inputSchema?.safeParse({ branchId: 'wt-1' }).success).toBe(true);
+    for (const agenticTool of [null, '', 'unknown', 'claude-code-cli']) {
+      expect(tool.cfg.inputSchema?.safeParse({ branchId: 'wt-1', agenticTool }).success).toBe(
+        false
+      );
+    }
+    expect(tool.cfg.description).toContain('Prefer omitting agenticTool');
+    expect(tool.cfg.description).toContain('If no primary coding agent is set, creation fails');
+  });
+
+  it.each(['inline', 'preset', 'workspace_default'] as const)(
+    'uses the caller primary tool and leaves %s configuration resolution to the service',
+    async (source) => {
+      const baseServiceParams = {
+        provider: 'mcp',
+        tenant: { tenant_id: 'tenant-b' },
+        user: { user_id: 'user-b', role: 'member' },
+      };
+      const getUser = vi.fn(async () => ({
+        ...baseUser,
+        user_id: 'user-b',
+        unix_username: 'bob',
+        primary_agentic_tool: 'codex',
+        default_agentic_selection: {
+          codex: source === 'preset' ? { source, preset_id: 'preset-b' } : { source },
+        },
+      }));
+      const create = vi.fn(async (data: Record<string, unknown>) => ({
+        ...data,
+        session_id: 'new',
+      }));
+      const app = makeFakeApp({
+        users: { get: getUser },
+        branches: { get: async () => baseBranch },
+        sessions: {
+          create,
+          get: async () => ({
+            session_id: 'parent',
+            branch_id: 'wt-1',
+            created_by: 'user-a',
+            agentic_tool: 'claude-code',
+            genealogy: { children: [] },
+          }),
+          patch: async () => ({}),
+        },
+      });
+      const { agor_sessions_create } = await registerAndCaptureHandlers(
+        { app, userId: 'user-b', sessionId: 'parent', baseServiceParams },
+        ['agor_sessions_create']
+      );
+
+      await agor_sessions_create({ branchId: 'wt-1' });
+
+      expect(getUser).toHaveBeenCalledWith('user-b', baseServiceParams);
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentic_tool: 'codex',
+          created_by: 'user-b',
+          unix_username: 'bob',
+        }),
+        baseServiceParams
+      );
+      const data = create.mock.calls[0][0];
+      // No parent config or inline snapshot may bypass user/preset resolution.
+      expect(data).not.toHaveProperty('model_config');
+      expect(data).not.toHaveProperty('permission_config');
+      expect(data).not.toHaveProperty('agentic_tool_preset_id');
+    }
+  );
+
+  it.each([undefined, null, 'claude-code-cli'])(
+    'fails before creation when the omitted tool has no usable saved preference (%s)',
+    async (primaryAgenticTool) => {
+      const getBranch = vi.fn();
+      const create = vi.fn();
+      const app = makeFakeApp({
+        users: { get: async () => ({ ...baseUser, primary_agentic_tool: primaryAgenticTool }) },
+        branches: { get: getBranch },
+        sessions: { create },
+      });
+      const { agor_sessions_create } = await registerAndCaptureHandlers({ app, userId: 'user-1' }, [
+        'agor_sessions_create',
+      ]);
+
+      await expect(agor_sessions_create({ branchId: 'wt-1' })).rejects.toThrow(
+        'No primary coding agent is set. Specify agenticTool'
+      );
+      expect(getBranch).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    { primaryAgenticTool: undefined, agenticTool: 'codex' },
+    { primaryAgenticTool: 'gemini', agenticTool: 'codex' },
+    { primaryAgenticTool: 'codex', agenticTool: undefined },
+  ])(
+    'honors model overrides with primary $primaryAgenticTool and explicit tool $agenticTool',
+    async ({ primaryAgenticTool, agenticTool }) => {
+      const create = vi.fn(async (data: Record<string, unknown>) => ({
+        ...data,
+        session_id: 'new',
+      }));
+      const app = makeFakeApp({
+        users: { get: async () => ({ ...baseUser, primary_agentic_tool: primaryAgenticTool }) },
+        branches: { get: async () => baseBranch },
+        sessions: { create },
+      });
+      const { agor_sessions_create } = await registerAndCaptureHandlers({ app, userId: 'user-1' }, [
+        'agor_sessions_create',
+      ]);
+      await agor_sessions_create({
+        branchId: 'wt-1',
+        agenticTool,
+        modelConfig: 'gpt-5.4',
+      });
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({ agentic_tool: 'codex', model_config: { model: 'gpt-5.4' } }),
+        expect.anything()
+      );
+    }
+  );
+
+  it('does not retry a foreign-tenant user lookup without the caller tenant context', async () => {
+    const baseServiceParams = { provider: 'mcp', tenant: { tenant_id: 'tenant-b' } };
+    const get = vi.fn(async (_id: string, params: unknown) => {
+      if (params === baseServiceParams) throw new Error('User not found');
+      return { ...baseUser, primary_agentic_tool: 'codex' };
+    });
+    const create = vi.fn();
+    const app = makeFakeApp({ users: { get }, sessions: { create } });
+    const { agor_sessions_create } = await registerAndCaptureHandlers(
+      { app, userId: 'user-1', baseServiceParams },
+      ['agor_sessions_create']
+    );
+
+    await expect(agor_sessions_create({ branchId: 'wt-1' })).rejects.toThrow('User not found');
+    expect(get).toHaveBeenCalledExactlyOnceWith('user-1', baseServiceParams);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('preserves service policy rejection for an implicitly selected disabled tool', async () => {
+    const create = vi.fn(async () => {
+      throw new Error('codex is disabled for this workspace');
+    });
+    const app = makeFakeApp({
+      users: { get: async () => ({ ...baseUser, primary_agentic_tool: 'codex' }) },
+      branches: { get: async () => baseBranch },
+      sessions: { create },
+    });
+    const { agor_sessions_create } = await registerAndCaptureHandlers({ app, userId: 'user-1' }, [
+      'agor_sessions_create',
+    ]);
+
+    await expect(agor_sessions_create({ branchId: 'wt-1' })).rejects.toThrow(
+      'codex is disabled for this workspace'
+    );
+    expect(create).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])(
+    'transports explicit Codex plugin preference %s on create',
+    async (codexIncludePlugins) => {
+      const create = vi.fn(async (data: Record<string, unknown>) => ({
+        ...data,
+        session_id: 'new',
+      }));
+      const app = makeFakeApp({
+        users: { get: async () => baseUser },
+        branches: { get: async () => baseBranch },
+        sessions: { create },
+      });
+      const { agor_sessions_create } = await registerAndCaptureHandlers({ app, userId: 'user-1' }, [
+        'agor_sessions_create',
+      ]);
+      await agor_sessions_create({ branchId: 'wt-1', agenticTool: 'codex', codexIncludePlugins });
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          permission_config: { codex: { includePlugins: codexIncludePlugins } },
+        }),
+        expect.anything()
+      );
+    }
+  );
+
   it('threads explicit modelConfig through to session.model_config (Bug 2)', async () => {
     const sessionCreates: unknown[] = [];
     const app = makeFakeApp({
@@ -761,131 +1052,71 @@ describe('agor_sessions_create', () => {
     expect(created).not.toHaveProperty('model_config');
   });
 
-  it('attaches explicit mcpServerIds via the /sessions/:id/mcp-servers route (Bug 1)', async () => {
-    // Regression: previously called the flat `session-mcp-servers` service which
-    // is read-only (find-only), so every attach silently failed with
-    // "ctx.app.service(...).create is not a function". The correct surface is
-    // the session-scoped REST route with `{ mcpServerId }` in the body and
-    // `route: { id: <session_id> }` in the params.
-    const attachCalls: Array<{ data: any; params: any }> = [];
+  it.each([[['short-id-1', 'short-id-2']], [[]], [undefined]])(
+    'passes explicit/empty/omitted MCP selection %j to atomic create',
+    async (mcpServerIds) => {
+      const create = vi.fn(async (data: unknown) => ({
+        session_id: 'sess-new',
+        ...(data as object),
+      }));
+      const app = makeFakeApp({
+        users: { get: async () => baseUser },
+        branches: { get: async () => ({ ...baseBranch, mcp_server_ids: ['stale-default'] }) },
+        sessions: { create },
+      });
+      const { agor_sessions_create } = await registerAndCaptureHandlers({ app, userId: 'user-1' }, [
+        'agor_sessions_create',
+      ]);
+      await agor_sessions_create({ branchId: 'wt-1', agenticTool: 'claude-code', mcpServerIds });
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mcpServerIds: mcpServerIds?.map((id) => `full-${id}`),
+        }),
+        expect.anything()
+      );
+    }
+  );
+
+  it('propagates atomic explicit attachment failure without prompting', async () => {
+    const prompt = vi.fn();
     const app = makeFakeApp({
       users: { get: async () => baseUser },
       branches: { get: async () => baseBranch },
       sessions: {
-        create: async (data: unknown) => ({
-          session_id: 'sess-new',
-          ...(data as Record<string, unknown>),
-        }),
-        get: async (id: string) => ({
-          session_id: id,
-          branch_id: 'wt-1',
-          genealogy: { children: [] },
-        }),
-        patch: async () => ({}),
-      },
-      '/sessions/:id/mcp-servers': {
-        create: async (data: unknown, params: unknown) => {
-          attachCalls.push({ data, params });
-          return data;
+        create: async () => {
+          throw new Error('MCP selection rejected');
         },
       },
+      '/sessions/:id/prompt': { create: prompt },
     });
-
-    const { agor_sessions_create } = await registerAndCaptureHandlers(
-      { app, userId: 'user-1', sessionId: 'sess-caller' },
-      ['agor_sessions_create']
-    );
-
-    const result = await agor_sessions_create({
-      branchId: 'wt-1',
-      agenticTool: 'claude-code',
-      mcpServerIds: ['short-id-1', 'short-id-2'],
-    });
-
-    expect(attachCalls).toHaveLength(2);
-    // resolveMcpServerId mock prefixes with 'full-'
-    expect(attachCalls[0].data.mcpServerId).toBe('full-short-id-1');
-    expect(attachCalls[0].params.route.id).toBe('sess-new');
-    expect(attachCalls[1].data.mcpServerId).toBe('full-short-id-2');
-
-    const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.mcpAttachFailures).toBeUndefined();
+    const { agor_sessions_create } = await registerAndCaptureHandlers({ app, userId: 'user-1' }, [
+      'agor_sessions_create',
+    ]);
+    await expect(
+      agor_sessions_create({
+        branchId: 'wt-1',
+        agenticTool: 'claude-code',
+        mcpServerIds: ['short-id-1'],
+        initialPrompt: 'hello',
+      })
+    ).rejects.toThrow('MCP selection rejected');
+    expect(prompt).not.toHaveBeenCalled();
   });
 
-  it('surfaces attach failures in the response when caller explicitly requested mcpServerIds', async () => {
+  it('surfaces the service warning for missing inherited defaults without leaking IDs', async () => {
     const app = makeFakeApp({
       users: { get: async () => baseUser },
-      branches: { get: async () => baseBranch },
-      sessions: {
-        create: async () => ({ session_id: 'sess-new' }),
-        get: async (id: string) => ({
-          session_id: id,
-          branch_id: 'wt-1',
-          genealogy: { children: [] },
-        }),
-        patch: async () => ({}),
-      },
-      '/sessions/:id/mcp-servers': {
-        create: async () => {
-          throw new Error('RBAC: forbidden');
-        },
-      },
+      branches: { get: async () => ({ ...baseBranch, mcp_server_ids: ['stale-default'] }) },
+      sessions: { create: async () => ({ session_id: 'sess-new', mcp_defaults_skipped: 1 }) },
     });
-
-    const { agor_sessions_create } = await registerAndCaptureHandlers(
-      { app, userId: 'user-1', sessionId: 'sess-caller' },
-      ['agor_sessions_create']
-    );
-
-    const result = await agor_sessions_create({
-      branchId: 'wt-1',
-      agenticTool: 'claude-code',
-      mcpServerIds: ['short-id-1'],
-    });
-
+    const { agor_sessions_create } = await registerAndCaptureHandlers({ app, userId: 'user-1' }, [
+      'agor_sessions_create',
+    ]);
+    const result = await agor_sessions_create({ branchId: 'wt-1', agenticTool: 'claude-code' });
     const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.mcpAttachFailures).toHaveLength(1);
-    expect(parsed.mcpAttachFailures[0].mcp_server_id).toBe('full-short-id-1');
-    expect(parsed.mcpAttachFailures[0].reason).toContain('RBAC');
-  });
-
-  it('silently skips (does not surface) attach failures for inherited mcpServerIds', async () => {
-    const branchWithMcps = {
-      ...baseBranch,
-      mcp_server_ids: ['inherited-1'],
-    };
-    const app = makeFakeApp({
-      users: { get: async () => baseUser },
-      branches: { get: async () => branchWithMcps },
-      sessions: {
-        create: async () => ({ session_id: 'sess-new' }),
-        get: async (id: string) => ({
-          session_id: id,
-          branch_id: 'wt-1',
-          genealogy: { children: [] },
-        }),
-        patch: async () => ({}),
-      },
-      '/sessions/:id/mcp-servers': {
-        create: async () => {
-          throw new Error('boom');
-        },
-      },
-    });
-
-    const { agor_sessions_create } = await registerAndCaptureHandlers(
-      { app, userId: 'user-1', sessionId: 'sess-caller' },
-      ['agor_sessions_create']
-    );
-
-    const result = await agor_sessions_create({
-      branchId: 'wt-1',
-      agenticTool: 'claude-code',
-      // no explicit mcpServerIds → inherits from branch
-    });
-
-    const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.mcpAttachFailures).toBeUndefined();
+    expect(parsed.mcp_defaults_skipped).toBe(1);
+    expect(parsed.note).toContain('Warning: 1 unavailable default MCP server');
+    expect(result.content[0].text).not.toContain('stale-default');
   });
 
   it('auto-links to calling session when ctx.sessionId is set', async () => {
@@ -1939,7 +2170,7 @@ describe('agor_models_list', () => {
 
     expect(Object.keys(parsed)).toEqual(AGENTIC_TOOL_NAMES);
 
-    expect(parsed['claude-code'].default).toBe('claude-sonnet-5');
+    expect(parsed['claude-code'].default).toBe('claude-sonnet-5-5');
     expect(Array.isArray(parsed['claude-code'].models)).toBe(true);
     expect(parsed['claude-code'].models[0]).toMatchObject({
       id: expect.any(String),
@@ -1949,6 +2180,7 @@ describe('agor_models_list', () => {
     // Sanity: the canonical aliases an agent would want to pin should be discoverable
     const claudeIds = parsed['claude-code'].models.map((m: { id: string }) => m.id);
     expect(claudeIds).toContain('claude-opus-4-6');
+    expect(claudeIds).toContain('claude-sonnet-5-5');
     expect(claudeIds).toContain('claude-sonnet-5');
     expect(parsed.opencode).toMatchObject({
       default: null,
@@ -1977,8 +2209,9 @@ describe('agor_models_list', () => {
 
     const codexIds = parsed.codex.models.map((m: { id: string }) => m.id);
     expect(parsed.codex.default).toBe('gpt-6-astra');
-    expect(codexIds.slice(0, 4)).toEqual([
+    expect(codexIds.slice(0, 5)).toEqual([
       'gpt-6-astra',
+      'gpt-6.1-sol',
       'gpt-6-sol',
       'gpt-6-luna',
       'gpt-5.6-terra',

@@ -1,6 +1,7 @@
 import { knowledgeTransferSlug } from '@agor/core/types';
 import { Args, Flags } from '@oclif/core';
 import { BaseCommand } from '../../base-command';
+import { assertKnowledgeDirectorySupported } from '../../lib/knowledge/directory';
 import { importKnowledge, knowledgeTransferClient } from '../../lib/knowledge/transfer';
 import { withKnowledgeTransfer } from '../../lib/knowledge/transfer-lifecycle';
 
@@ -8,7 +9,10 @@ export default class KnowledgeImport extends BaseCommand {
   static override description =
     'Plan a current-markdown import into a new private, caller-owned namespace. Add --apply to execute. No overwrite, ACL transfer or deletion.';
   static override args = {
-    directory: Args.string({ required: true, description: 'Completed export directory (Linux)' }),
+    directory: Args.string({
+      required: true,
+      description: 'Version 2 Knowledge repository (manifest.yaml and docs/)',
+    }),
   };
   static override flags = {
     namespace: Flags.string({ required: true, description: 'New destination namespace slug' }),
@@ -22,12 +26,19 @@ export default class KnowledgeImport extends BaseCommand {
   async run() {
     const { args, flags } = await this.parse(KnowledgeImport);
     const namespace = knowledgeTransferSlug.parse(flags.namespace);
+    try {
+      // Unsupported platforms fail before any remote work or resume advice.
+      assertKnowledgeDirectorySupported();
+    } catch (error) {
+      this.error((error as Error).message);
+    }
     const client = await this.connectToDaemon();
     try {
       await withKnowledgeTransfer(
         {
-          failureNote:
-            'Import incomplete. Committed documents are retained. Re-run the same command with --resume --apply. Conflicts are never overwritten.',
+          failureNote: flags.apply
+            ? 'Import incomplete. Any previously committed documents are retained; conflicts are never overwritten. Resolve the reported error, then check the same bundle with --resume --dry-run (without --apply) before applying again.'
+            : 'Planning incomplete. This run sent no import writes. Resolve the reported error before retrying; existing destination data and local checkpoints are unchanged.',
           cleanup: () => this.cleanupClient(client),
         },
         async ({ signal, progress }) => {

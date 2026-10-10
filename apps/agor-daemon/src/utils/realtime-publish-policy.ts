@@ -1,8 +1,10 @@
 import {
   BRANCH_CLEANUP_REPORT_SERVICE,
   BRANCH_DELETION_REPORT_SERVICE,
+  BRANCH_WORKSPACE_NOTIFICATION_DISMISS_SERVICE,
   ENVIRONMENT_COMMAND_REPORT_SERVICE,
   KNOWLEDGE_TRANSFER,
+  MCP_OAUTH_RELAY,
   OWNERSHIP_TRANSFER_SERVICES,
   type UserRole,
 } from '@agor/core/types';
@@ -192,7 +194,7 @@ export const REALTIME_PUBLISH_POLICY = {
   },
   'mcp-servers': {
     audience: 'tenant',
-    why: 'useAgorData tracks server rows, and useMcpMemberPolicy refetches its caller-specific capability on the empty member-policy invalidation. Secrets are stripped from context.dispatch unconditionally by redactMCPServerSecretFields — the audience is tenant-wide, so row payloads must never carry credentials.',
+    why: 'Removal is ID/owner-only and narrowed to the private owner/admins by resolvePublishScope (explicit null owner means shared). useAgorData tracks server rows, and useMcpMemberPolicy refetches its caller-specific capability on the empty member-policy invalidation. Secrets are stripped from context.dispatch unconditionally by redactMCPServerSecretFields — the audience is tenant-wide, so row payloads must never carry credentials.',
   },
   'gateway-channels': {
     audience: 'tenant',
@@ -266,6 +268,14 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Invocation-scoped workspace reports; branch state publishes through branches.',
   },
+  'branches/:id/retire-teammate': {
+    audience: 'none',
+    why: 'Retirement admission response; archived branch state publishes through branches.',
+  },
+  [BRANCH_WORKSPACE_NOTIFICATION_DISMISS_SERVICE]: {
+    audience: 'none',
+    why: 'Acknowledgement response; updated branch publishes through branches.',
+  },
   'branches/:id/clean': {
     audience: 'none',
     why: 'Cleanup admission response; status publishes through branches.',
@@ -283,6 +293,7 @@ export const REALTIME_PUBLISH_POLICY = {
     why: 'Returns a command-scoped Git credential DTO to one executor.',
   },
   'api/v1/user/api-keys': { audience: 'none', why: 'Returns a freshly minted user API key.' },
+  'api/v1/user/me': { audience: 'none', why: 'Returns the caller identity to that caller only.' },
   terminals: {
     audience: 'none',
     why: 'Shell control plane; output rides native terminal:* socket packets.',
@@ -365,6 +376,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Authenticated recovery preflight belongs only to the caller; never broadcast its result.',
   },
+  'mcp-oauth-connect': {
+    audience: 'none',
+    why: 'Authenticated connect preflight belongs only to the caller; never broadcast its result.',
+  },
   'mcp-marketplace': {
     audience: 'none',
     why: 'Caller-private overview returned only to the requesting connection.',
@@ -382,6 +397,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Tenant-scoped rollout and health status; Settings refetches explicitly.',
   },
+  'mcp-slack-connect/card': {
+    audience: 'none',
+    why: 'Admin-only operator switch; the answer belongs to the operator who asked, and the lane reads the setting itself rather than a broadcast.',
+  },
 
   // ---------------------------------------------------------------------------
   // Silent: CRUD services with no realtime consumer. Denying costs nothing
@@ -392,6 +411,14 @@ export const REALTIME_PUBLISH_POLICY = {
   'agentic-tool-presets': { audience: 'none', why: 'Read-mostly presets; no socket subscriber.' },
   templates: { audience: 'none', why: 'Static template list.' },
   leaderboard: { audience: 'none', why: 'Analytics rollup, polled.' },
+  'branch-counts': {
+    audience: 'none',
+    why: 'Per-caller RBAC-scoped aggregate; refetched on branch events.',
+  },
+  'session-counts': {
+    audience: 'none',
+    why: 'Per-caller RBAC-scoped aggregate; refetched on session events.',
+  },
   'thread-session-map': { audience: 'none', why: 'Gateway-internal thread bookkeeping.' },
   gateway: { audience: 'none', why: 'Inbound/outbound message routing; no socket subscriber.' },
   file: { audience: 'none', why: 'Reads a file out of a branch worktree for the caller.' },
@@ -515,6 +542,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Widget input is deliberately kept out of broadcast.',
   },
+  'widgets/:id/oauth-resolve': {
+    audience: 'none',
+    why: 'The resolution answers the caller; subscribers learn the outcome from the messages room.',
+  },
 } as const satisfies Record<string, RealtimePublishPolicy>;
 
 export type RealtimePublishPolicyPath = keyof typeof REALTIME_PUBLISH_POLICY;
@@ -559,6 +590,7 @@ export function isRealtimePublishAllowed(path: string | null | undefined): boole
 export const NON_SERVICE_REGISTERED_PATHS: ReadonlySet<string> = new Set([
   '', // SPA fallback
   'static', // express.static
+  MCP_OAUTH_RELAY.deliveryPath.slice(1), // Signed raw-body Express callback; no service events.
 ]);
 
 export class RealtimePublishPolicyCoverageError extends Error {

@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import * as yaml from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Database } from '../db/client';
 import {
   __resetConfigCacheForTests,
   AtomicConfigPublicationUnsupportedError,
@@ -118,6 +119,25 @@ describe('resolveEffectiveConfig', () => {
     });
   });
 
+  it('lets AGOR_WEBSOCKET_COMPRESSION override daemon.websocket_compression', () => {
+    expect(resolveEffectiveConfig({}, {}).daemon?.websocket_compression).toBeUndefined();
+    expect(
+      resolveEffectiveConfig(
+        { daemon: { websocket_compression: true } },
+        { AGOR_WEBSOCKET_COMPRESSION: '0' }
+      ).daemon?.websocket_compression
+    ).toBe(false);
+    expect(
+      resolveEffectiveConfig(
+        { daemon: { websocket_compression: false } },
+        { AGOR_WEBSOCKET_COMPRESSION: 'true' }
+      ).daemon?.websocket_compression
+    ).toBe(true);
+    expect(() => resolveEffectiveConfig({}, { AGOR_WEBSOCKET_COMPRESSION: 'off' })).toThrow(
+      /AGOR_WEBSOCKET_COMPRESSION must be one of/
+    );
+  });
+
   it('keeps the fail-safe password profile out of environment-variable override space', () => {
     const resolved = resolveEffectiveConfig(
       { identity: { password_policy: 'secure' } },
@@ -134,12 +154,16 @@ describe('resolveEffectiveConfig', () => {
       AGOR_RBAC_ENABLED: 'true',
       AGOR_UNIX_USER_MODE: 'delegated',
       INSTANCE_LABEL: 'replica-a',
+      EXTERNAL_APP_LINK: 'https://console.example.test/',
+      EXTERNAL_APP_LABEL: 'Open Agor Cloud',
     });
     expect(resolved.daemon).toMatchObject({
       host: 'env-host',
       port: 4321,
       mcpEnabled: true,
       instanceLabel: 'replica-a',
+      externalAppLink: 'https://console.example.test/',
+      externalAppLabel: 'Open Agor Cloud',
     });
     expect(resolved.execution).toMatchObject({ branch_rbac: true, unix_user_mode: 'delegated' });
     expect(resolved.multi_tenancy?.mode).toBe('static');
@@ -368,6 +392,25 @@ describe('assertValidEffectiveExecutionConfig', () => {
     expect(() =>
       assertValidEffectiveExecutionConfig({ execution: { unix_user_mode: 'delegated' } })
     ).toThrow(/requires execution\.executor_command_template/);
+  });
+
+  it('requires an explicit delegated executor for permanent deletion', () => {
+    expect(() =>
+      assertValidEffectiveExecutionConfig({ execution: { delegated_branch_deletion: true } })
+    ).toThrow(/requires delegated mode/);
+    expect(() =>
+      assertValidEffectiveExecutionConfig({
+        execution: {
+          delegated_branch_deletion: true,
+          unix_user_mode: 'delegated',
+          executor_command_template: 'launcher',
+          executor_response: {
+            external_protocol: 'executor-response-v1',
+            origin_url: 'http://daemon.internal:3030',
+          },
+        },
+      })
+    ).not.toThrow();
   });
 
   it.each(['{unix_user_uid}', '{unix_user_gid}'])(
@@ -1035,6 +1078,39 @@ describe('loadConfig', () => {
     await expect(loadConfig()).rejects.toThrow(/claude_subscription_oauth must be a boolean/);
   });
 
+  it('accepts only checkpointed or disabled for hosted OpenCode', async () => {
+    const configPath = path.join(tempDir, '.agor', 'config.yaml');
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+    await fs.writeFile(
+      configPath,
+      yaml.dump({ agentic_tools: { opencode_hosted_native_state: 'checkpointed' } }),
+      'utf-8'
+    );
+    await expect(loadConfig()).resolves.toMatchObject({
+      agentic_tools: { opencode_hosted_native_state: 'checkpointed' },
+    });
+
+    __resetConfigCacheForTests();
+    await fs.writeFile(
+      configPath,
+      yaml.dump({ agentic_tools: { opencode_hosted_native_state: 'disabled' } }),
+      'utf-8'
+    );
+    await expect(loadConfig()).resolves.toMatchObject({
+      agentic_tools: { opencode_hosted_native_state: 'disabled' },
+    });
+
+    __resetConfigCacheForTests();
+    await fs.writeFile(
+      configPath,
+      yaml.dump({ agentic_tools: { opencode_hosted_native_state: 'live' } }),
+      'utf-8'
+    );
+    await expect(loadConfig()).rejects.toThrow(
+      /opencode_hosted_native_state must be 'checkpointed' or 'disabled'/
+    );
+  });
+
   it('rejects unsupported or duplicate configured agentic tools', async () => {
     const agorDir = path.join(tempDir, '.agor');
     const configPath = path.join(agorDir, 'config.yaml');
@@ -1073,6 +1149,28 @@ describe('loadConfig', () => {
     await fs.mkdir(agorDir, { recursive: true });
     await fs.writeFile(configPath, yaml.dump({ daemon: { trust_proxy_hops: 2 } }), 'utf-8');
     await expect(loadConfig()).resolves.toMatchObject({ daemon: { trust_proxy_hops: 2 } });
+  });
+
+  it('accepts a boolean daemon.websocket_compression', async () => {
+    const agorDir = path.join(tempDir, '.agor');
+    await fs.mkdir(agorDir, { recursive: true });
+    await fs.writeFile(
+      path.join(agorDir, 'config.yaml'),
+      yaml.dump({ daemon: { websocket_compression: false } }),
+      'utf-8'
+    );
+    await expect(loadConfig()).resolves.toMatchObject({ daemon: { websocket_compression: false } });
+  });
+
+  it('rejects a non-boolean daemon.websocket_compression', async () => {
+    const agorDir = path.join(tempDir, '.agor');
+    await fs.mkdir(agorDir, { recursive: true });
+    await fs.writeFile(
+      path.join(agorDir, 'config.yaml'),
+      yaml.dump({ daemon: { websocket_compression: 'off' } }),
+      'utf-8'
+    );
+    await expect(loadConfig()).rejects.toThrow(/daemon\.websocket_compression must be a boolean/);
   });
 
   it('reports every unrecognized nested key with its full path', async () => {
@@ -1151,6 +1249,7 @@ describe('loadConfig', () => {
       yaml.dump({
         identity: {
           user_lifecycle: 'external',
+          avatar_authority: 'internal',
           role_authority: 'claims',
           local_auth: 'disabled',
           external: { provider: 'external_launch', provisioning: 'jit' },
@@ -1162,6 +1261,7 @@ describe('loadConfig', () => {
     await expect(loadConfig()).resolves.toMatchObject({
       identity: {
         user_lifecycle: 'external',
+        avatar_authority: 'internal',
         role_authority: 'claims',
         local_auth: 'disabled',
         external: { provider: 'external_launch', provisioning: 'jit' },
@@ -1582,6 +1682,23 @@ describe('unixUserModeRequiresExecutionHomeKey', () => {
   });
 });
 
+/**
+ * The handle every static/local `getBaseUrl` assertion below passes.
+ *
+ * `getBaseUrl` requires one so no caller can forget it in hosted mode, but the
+ * static path resolves entirely from env and config. Handing it a proxy that
+ * throws on any access turns "the handle is unused here" from a claim in this
+ * comment into something these tests would fail on.
+ */
+const UNTOUCHED_DB = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error('static base URL resolution must not touch the database');
+    },
+  }
+) as unknown as Database;
+
 describe('base URL resolution', () => {
   let tempDir: string;
   let originalBaseUrl: string | undefined;
@@ -1605,7 +1722,7 @@ describe('base URL resolution', () => {
 
   it('returns AGOR_BASE_URL env when set', async () => {
     process.env.AGOR_BASE_URL = 'https://agor.example.com';
-    await expect(getBaseUrl()).resolves.toBe('https://agor.example.com');
+    await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('https://agor.example.com');
     await expect(getDaemonBaseUrl()).resolves.toBe('https://agor.example.com');
     await expect(requirePublicBaseUrl()).resolves.toBe('https://agor.example.com');
   });
@@ -1619,7 +1736,7 @@ describe('base URL resolution', () => {
       'utf-8'
     );
 
-    await expect(getBaseUrl()).resolves.toBe('https://agor.sandbox.example.com');
+    await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('https://agor.sandbox.example.com');
     await expect(getDaemonBaseUrl()).resolves.toBe('https://agor.sandbox.example.com');
     await expect(requirePublicBaseUrl()).resolves.toBe('https://agor.sandbox.example.com');
   });
@@ -1654,7 +1771,7 @@ describe('base URL resolution', () => {
       'utf-8'
     );
 
-    await expect(getBaseUrl()).resolves.toBe('https://agor-ui.sandbox.example.com');
+    await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('https://agor-ui.sandbox.example.com');
     await expect(getDaemonBaseUrl()).resolves.toBe('https://agor-ui.sandbox.example.com');
     await expect(requirePublicBaseUrl()).resolves.toBe('https://agor-ui.sandbox.example.com');
   });
@@ -1671,13 +1788,13 @@ describe('base URL resolution', () => {
       'utf-8'
     );
 
-    await expect(getBaseUrl()).resolves.toBe('http://localhost:5173');
+    await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('http://localhost:5173');
     await expect(getDaemonBaseUrl()).resolves.toBe('http://[::1]:3030');
     await expect(requirePublicBaseUrl()).resolves.toBe('http://[::1]:3030');
   });
 
   it('throws PublicBaseUrlNotConfiguredError when neither env nor config is set', async () => {
-    await expect(getBaseUrl()).resolves.toBe('http://localhost:3030');
+    await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('http://localhost:3030');
     await expect(getDaemonBaseUrl()).resolves.toBe('http://localhost:3030');
     await expect(requirePublicBaseUrl()).rejects.toBeInstanceOf(PublicBaseUrlNotConfiguredError);
   });
@@ -2502,5 +2619,35 @@ describe('resolveBranchStorageConfig + ensureBranchStorageModeAllowed', () => {
     expect(resolveBranchStorageConfig().allowShallowClones).toBe(false);
     expect(() => ensureBranchCloneDepthAllowed(undefined)).not.toThrow();
     expect(() => ensureBranchCloneDepthAllowed(1)).toThrow(/full clone/);
+  });
+});
+
+describe('external cleanup command configuration', () => {
+  it('accepts a bounded cleanup command alongside a remote launcher', () => {
+    expect(() =>
+      assertValidEffectiveExecutionConfig({
+        execution: {
+          executor_command_template: 'launcher',
+          executor_cleanup_command_template: 'cleanup',
+          executor_cleanup_timeout_ms: 30000,
+          executor_response: {
+            external_protocol: 'executor-response-v1',
+            origin_url: 'http://daemon.internal:3030',
+          },
+        },
+      })
+    ).not.toThrow();
+  });
+  it.each([0, 999, 120001, NaN, 1.5])('rejects invalid cleanup deadline %s', (timeout) => {
+    expect(() =>
+      assertValidEffectiveExecutionConfig({ execution: { executor_cleanup_timeout_ms: timeout } })
+    ).toThrow('executor_cleanup_timeout_ms');
+  });
+  it('rejects cleanup without remote launch configuration', () => {
+    expect(() =>
+      assertValidEffectiveExecutionConfig({
+        execution: { executor_cleanup_command_template: 'cleanup' },
+      })
+    ).toThrow('executor_command_template');
   });
 });

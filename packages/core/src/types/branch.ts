@@ -1,7 +1,7 @@
 // src/types/branch.ts
 import type { BranchDeletionStatus } from './branch-deletion';
 import type { BoardID, BranchID, UUID } from './id';
-import type { KnowledgeNamespaceID, KnowledgeVisibility } from './knowledge';
+import type { KnowledgeEditPolicy, KnowledgeNamespaceID, KnowledgeVisibility } from './knowledge';
 import type { BranchName, Repo } from './repo';
 
 export const BRANCH_METADATA_ACTIONS = ['archive', 'delete'] as const;
@@ -23,6 +23,42 @@ export function isBranchProvisioningOutcome(value: unknown): value is BranchProv
     (outcome.filesystem_status === 'ready' || outcome.filesystem_status === 'failed') &&
     (outcome.error_message === undefined || typeof outcome.error_message === 'string') &&
     Object.keys(outcome).every((key) => key === 'filesystem_status' || key === 'error_message')
+  );
+}
+
+/** Resolved source only; never materialization intent or filesystem readiness. */
+export type BranchProvisioningProvenance = Required<Pick<Branch, 'base_ref' | 'base_sha'>> &
+  Pick<Branch, 'base_source'>;
+
+export function isBranchProvisioningProvenance(
+  value: unknown
+): value is BranchProvisioningProvenance {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const ref = (v: unknown) =>
+    typeof v === 'string' &&
+    v.length > 0 &&
+    v.length <= 1024 &&
+    !v.startsWith('-') &&
+    !Array.from(v).some((c) => c.charCodeAt(0) <= 32 || c.charCodeAt(0) === 127 || /\s/.test(c));
+  const source = record.base_source as Record<string, unknown> | undefined;
+  return (
+    Object.keys(record).every((key) => ['base_ref', 'base_sha', 'base_source'].includes(key)) &&
+    ref(record.base_ref) &&
+    typeof record.base_sha === 'string' &&
+    /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(record.base_sha) &&
+    (source === undefined ||
+      (!!source &&
+        typeof source === 'object' &&
+        !Array.isArray(source) &&
+        Object.keys(source).every((key) => key === 'name' || key === 'remote_url') &&
+        ref(source.name) &&
+        typeof source.remote_url === 'string' &&
+        source.remote_url.length > 0 &&
+        source.remote_url.length <= 4096 &&
+        !Array.from(source.remote_url).some(
+          (c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127
+        )))
   );
 }
 
@@ -389,6 +425,8 @@ export interface Branch {
 
   /** Set only by permanent deletion; remains fenced after partial failure. */
   deletion_status?: BranchDeletionStatus;
+  /** Read-only runtime support, projected by branches.get; never a grant or readiness proof. */
+  maintenance_capabilities?: import('./branch-cleanup').BranchMaintenanceCapabilities;
   /** Bounded, sanitized latest error; never used to decide recovery. */
   deletion_error?: string;
   deletion_updated_at?: string;
@@ -462,7 +500,6 @@ export interface Branch {
   others_fs_access?: 'none' | 'read' | 'write';
 
   // ===== Branch Storage Mode =====
-  // See context/explorations/clone-redesign.md.
 
   /**
    * How this branch's filesystem is materialised.
@@ -589,6 +626,8 @@ export interface BranchEnvironmentInstance {
   process?: {
     /** Process ID */
     pid?: number;
+    /** Opaque ID used to reject a late Start result from an older attempt. */
+    attempt_id?: string;
     /** When process started */
     started_at?: string;
     /** Human-readable uptime */
@@ -616,6 +655,14 @@ export interface BranchEnvironmentInstance {
     name: string;
     url: string;
   }>;
+
+  /**
+   * Runtime health URL reported by the most recent successful Start command.
+   * It overrides the rendered static health URL until the next lifecycle
+   * boundary. Unlike operator-authored static URLs, this value is always
+   * treated as untrusted outbound input by the daemon.
+   */
+  health_url?: string;
 
   /**
    * Process logs (last N lines)
@@ -656,6 +703,8 @@ export const BRANCH_ENVIRONMENT_CLEARABLE_FIELDS = [
   'last_error',
   'last_command',
   'logs',
+  'access_urls',
+  'health_url',
 ] as const satisfies ReadonlyArray<keyof BranchEnvironmentInstance>;
 
 export type BranchEnvironmentClearableField = (typeof BRANCH_ENVIRONMENT_CLEARABLE_FIELDS)[number];
@@ -876,6 +925,7 @@ export type RepoEnvironmentConfig = RepoEnvironmentConfigV1;
 /** Public framework repository that owns Agor's built-in teammate templates. */
 export const TEAMMATE_FRAMEWORK_REPO_SLUG = 'preset-io/agor-teammate';
 export const TEAMMATE_FRAMEWORK_REPO_URL = 'https://github.com/preset-io/agor-teammate.git';
+export const TEAMMATE_FRAMEWORK_DEFAULT_BRANCH = 'main';
 
 /** Exact public template identity, never a name/slug substring match. */
 export function isCanonicalTeammateFrameworkRepo(repo: Pick<Repo, 'remote_url'>): boolean {
@@ -889,6 +939,18 @@ export function isCanonicalTeammateFrameworkRepo(repo: Pick<Repo, 'remote_url'>)
   ].includes(repo.remote_url ?? '');
 }
 
+export const TEAMMATE_FRAMEWORK_PRIVATE_FORK_NAMES = [
+  'agor-teammate-private',
+  'agor-assistant-private',
+] as const;
+
+/** Loose name match for repo selection; the content rule is the exact defaultsToPublicTeammateTemplate. */
+export function isPrivateTeammateFrameworkFork(repo: Pick<Repo, 'slug' | 'remote_url'>): boolean {
+  return TEAMMATE_FRAMEWORK_PRIVATE_FORK_NAMES.some(
+    (name) => !!repo.slug?.includes(name) || !!repo.remote_url?.includes(name)
+  );
+}
+
 export type TeammateKnowledgeGrantAccess = 'none' | 'read' | 'write';
 export interface TeammateKnowledgeGrant {
   namespace_id: KnowledgeNamespaceID;
@@ -900,7 +962,24 @@ export interface TeammateKnowledgeConfig {
   primary_namespace_id: KnowledgeNamespaceID;
   primary_namespace_slug: string;
   memory_path_template: 'memory/{{YYYY-MM-DD}}.md';
+  /**
+   * Governance default for ordinary teammate documents.
+   *
+   * This is a machine-maintained mirror of the home namespace's
+   * `visibility_default` (see `teammateKbPatch`), not a statement of intent —
+   * so it must not be read as an opt-in to publish anything.
+   */
   default_visibility: KnowledgeVisibility;
+  /**
+   * Explicit opt-in overrides for daily memory documents only.
+   *
+   * Daily memory is personal operational context, so it is created
+   * private/owner. Nothing auto-populates these two fields, which is what
+   * makes a value here an actual owner decision rather than an inherited
+   * namespace default.
+   */
+  memory_visibility?: KnowledgeVisibility;
+  memory_edit_policy?: KnowledgeEditPolicy;
   /**
    * Teammate-tool policy for namespaces not listed in `grants`.
    *
@@ -962,6 +1041,26 @@ export const isPersistedAgent = isTeammate;
  * Supports canonical (`custom_context.teammate`) plus legacy
  * (`custom_context.assistant` / `custom_context.agent`) storage.
  */
+/**
+ * One row of `branch-counts.find()`: the number of active (non-archived)
+ * branches on a board, counting only branches the caller can view on boards
+ * the caller can view. Backs the board-switcher and mobile nav-tree badges.
+ */
+export interface BoardBranchCount {
+  board_id: BoardID;
+  branch_count: number;
+}
+
+/**
+ * One row of `session-counts.find({ group_by })`: the active sessions on a
+ * branch, or on a board's branches, that the caller can view.
+ */
+export interface SessionCount {
+  /** The branch id or board id, per `group_by`. */
+  id: string;
+  session_count: number;
+}
+
 export function getTeammateConfig(branch: {
   custom_context?: Record<string, unknown>;
 }): TeammateConfig | null {

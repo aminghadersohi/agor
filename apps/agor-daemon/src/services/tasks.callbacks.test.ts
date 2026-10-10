@@ -220,6 +220,11 @@ describe('TasksService completion callbacks', () => {
         ...data,
       };
     });
+    // The service's own handle, and the one the ambient scope is opened on,
+    // must be the same database: a scope is fenced to the database it was
+    // opened on, so `this.db` left undefined here would no longer silently
+    // borrow the scope's handle. The real constructor always sets it.
+    (service as unknown as { db: unknown }).db = db;
     await runWithTenantDatabaseScope(db as never, 'tenant-1', async () => {
       await service.patch(taskId, {
         status: TaskStatus.COMPLETED,
@@ -313,6 +318,27 @@ describe('TasksService completion callbacks', () => {
         }),
       ])
     );
+  });
+
+  it('runs a callback without a stored principal as the completing task creator, never the target owner', async () => {
+    const taskCreator = '018f0000-0000-7000-8000-000000000402';
+    const targetOwner = '018f0000-0000-7000-8000-000000000403';
+    const { service, createPending } = makeService({
+      task: { created_by: taskCreator },
+      childSession: { callback_config: undefined },
+      parentSession: { created_by: targetOwner },
+    });
+
+    await service.patch(taskId, {
+      status: TaskStatus.COMPLETED,
+      completed_at: '2026-01-01T00:00:05.000Z',
+    });
+
+    await vi.waitFor(() => expect(createPending).toHaveBeenCalledTimes(1));
+    expect(createPending.mock.calls[0][0]).toMatchObject({
+      created_by: taskCreator,
+      metadata: { queued_by_user_id: taskCreator },
+    });
   });
 
   it('includeOriginalPrompt=false queues one templated callback without an original prompt section', async () => {

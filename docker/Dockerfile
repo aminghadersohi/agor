@@ -7,6 +7,11 @@
 #
 # Or use docker-compose which automatically selects the right target
 
+# Platforms without a --target option can select the final runtime through a
+# build argument. Preserve the historical default; explicit targets are unchanged.
+ARG AGOR_RUNTIME_TARGET=production-source-ha
+ARG AGOR_PREVIEW_BASE=runtime-build
+
 # ============================================================================
 # Stage 0: Security-pinned bubblewrap
 # ============================================================================
@@ -229,7 +234,8 @@ COPY . .
 # surfaces at startup. CI passes --build-arg AGOR_BUILD_SHA=<github.sha>; left
 # empty (local builds) the stamp falls back to the 'dev' sentinel.
 ARG AGOR_BUILD_SHA=""
-ENV AGOR_BUILD_SHA=${AGOR_BUILD_SHA}
+ARG RAILWAY_GIT_COMMIT_SHA=""
+ENV AGOR_BUILD_SHA=${AGOR_BUILD_SHA:-${RAILWAY_GIT_COMMIT_SHA}}
 
 # Install workspace deps (dev deps needed for the turbo build), build the exact
 # release artifacts, then perform a script-disabled install. Supplying the
@@ -298,3 +304,73 @@ RUN install -d -o root -g root -m 0755 /etc/agor \
 USER agor
 
 ENTRYPOINT ["/usr/local/bin/agor-ha-entrypoint"]
+
+# Experimental runtime compilation: reuses the SQLite development dependency
+# layers, but not its watch processes or development authentication defaults.
+# No source COPY: startup fetches the configured public branch into its own
+# persistent checkout and builds once with a persistent Turbo cache.
+FROM development AS runtime-build
+# The watch image builds only core workspaces. A packaged release additionally
+# builds the integration packages, so extend its dependency skeleton (no source).
+COPY --chown=agor:agor packages/agor-live/package.json ./packages/agor-live/
+COPY --chown=agor:agor packages/agor-claude/package.json ./packages/agor-claude/
+COPY --chown=agor:agor packages/agor-codex/package.json ./packages/agor-codex/
+COPY --chown=agor:agor packages/agor-copilot/package.json ./packages/agor-copilot/
+COPY --chown=agor:agor packages/agor-gemini/package.json ./packages/agor-gemini/
+COPY --chown=agor:agor packages/agor-opencode/package.json ./packages/agor-opencode/
+COPY --chown=agor:agor packages/agor-cursor/package.json ./packages/agor-cursor/
+RUN CI=true pnpm install --frozen-lockfile
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends rsync \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /usr/local/lib/agor /opt/agor-runtime \
+  && chown agor:agor /opt/agor-runtime
+COPY docker/runtime-checkout.mjs docker/runtime-watch.mjs /usr/local/lib/agor/
+COPY docker/docker-entrypoint-runtime.sh docker/docker-entrypoint-prod.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint-runtime.sh /usr/local/bin/docker-entrypoint-prod.sh \
+  && node /usr/local/lib/agor/runtime-checkout.mjs fingerprint > /opt/agor-dependency-fingerprint
+USER agor
+ENV NODE_ENV=production HOME=/home/agor
+EXPOSE 3030
+ENTRYPOINT ["docker-entrypoint-runtime.sh"]
+
+# Published dependency image only; application source is still fetched from the branch.
+# Default keeps cold builds working before main has published the first image.
+FROM ${AGOR_PREVIEW_BASE} AS railway-preview
+USER agor
+RUN rm -rf /app/patches
+COPY --chown=agor:agor package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=agor:agor apps/agor-daemon/package.json ./apps/agor-daemon/
+COPY --chown=agor:agor apps/agor-cli/package.json ./apps/agor-cli/
+COPY --chown=agor:agor apps/agor-ui/package.json ./apps/agor-ui/
+COPY --chown=agor:agor packages/git/package.json ./packages/git/
+COPY --chown=agor:agor packages/core/package.json ./packages/core/
+COPY --chown=agor:agor packages/agentic-tool-opencode/package.json ./packages/agentic-tool-opencode/
+COPY --chown=agor:agor packages/agentic-tools/package.json ./packages/agentic-tools/
+COPY --chown=agor:agor packages/executor/package.json ./packages/executor/
+COPY --chown=agor:agor packages/client/package.json ./packages/client/
+COPY --chown=agor:agor patches/ ./patches/
+COPY --chown=agor:agor packages/agor-live/package.json ./packages/agor-live/
+COPY --chown=agor:agor packages/agor-claude/package.json ./packages/agor-claude/
+COPY --chown=agor:agor packages/agor-codex/package.json ./packages/agor-codex/
+COPY --chown=agor:agor packages/agor-copilot/package.json ./packages/agor-copilot/
+COPY --chown=agor:agor packages/agor-gemini/package.json ./packages/agor-gemini/
+COPY --chown=agor:agor packages/agor-opencode/package.json ./packages/agor-opencode/
+COPY --chown=agor:agor packages/agor-cursor/package.json ./packages/agor-cursor/
+USER root
+COPY docker/runtime-checkout.mjs docker/runtime-watch.mjs /usr/local/lib/agor/
+COPY docker/docker-entrypoint-runtime.sh docker/docker-entrypoint-prod.sh /usr/local/bin/
+RUN chown agor:agor /opt/agor-dependency-fingerprint \
+  && chmod +x /usr/local/bin/docker-entrypoint-runtime.sh /usr/local/bin/docker-entrypoint-prod.sh
+USER agor
+RUN set -eu; expected="$(node /usr/local/lib/agor/runtime-checkout.mjs fingerprint)"; \
+    if [ "$expected" != "$(cat /opt/agor-dependency-fingerprint)" ]; then \
+      echo 'Installing changed preview dependencies'; \
+      env -i PATH="$PATH" HOME="$HOME" NODE_ENV=development CI=true pnpm install --frozen-lockfile; \
+    else \
+      echo 'Reusing preview dependencies'; \
+    fi && printf '%s\n' "$expected" > /opt/agor-dependency-fingerprint
+
+# Railway selects a branch-source runtime through AGOR_RUNTIME_TARGET.
+# This reuses the source-built SQLite runtime, not the npm-latest or HA image.
+FROM ${AGOR_RUNTIME_TARGET} AS runtime

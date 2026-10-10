@@ -26,6 +26,7 @@ import type {
   MCPOAuthMode,
   MCPOAuthPendingFlowSealedMaterial,
   MCPServerID,
+  MCPSlackOAuthConnectContext,
   MCPSlackOAuthRecoveryContext,
   UserID,
 } from '@agor/core/types';
@@ -45,23 +46,51 @@ export interface DurableMCPOAuthFlowCreate {
   oauthMode: MCPOAuthMode;
   configFingerprint: string;
   slackRecovery?: MCPSlackOAuthRecoveryContext;
+  slackConnect?: MCPSlackOAuthConnectContext;
 }
 
 export interface ClaimedDurableMCPOAuthFlow {
   record: MCPOAuthPendingFlowRecord;
   context: DurableMCPOAuthFlowContext;
   slackRecovery?: MCPSlackOAuthRecoveryContext;
+  slackConnect?: MCPSlackOAuthConnectContext;
 }
 
 export function fingerprintMCPOAuthState(state: string): string {
   return createHash('sha256').update(state, 'utf8').digest('hex');
 }
 
+/**
+ * Sealed-envelope versions this daemon writes.
+ *
+ * v3 added `slackConnect`; v4 adds the Cloud `relay` delivery binding. A daemon
+ * predating either field must refuse the newer envelope, not ignore a binding
+ * and complete a callback without re-proving its authority during an upgrade.
+ * Direct flows stay at v3 so older replicas keep completing them during a
+ * rolling upgrade; only relay-bound flows are written as v4.
+ */
+const DIRECT_PENDING_FLOW_MATERIAL_VERSION = 3;
+const PENDING_FLOW_MATERIAL_VERSION = 4;
+
+/**
+ * Versions this daemon will still open.
+ *
+ * v2/v3 direct attempts remain readable during an upgrade. They cannot carry
+ * relay bindings, and v2 cannot carry a connect binding. Older versions with
+ * those fields are rejected, not silently treated as direct attempts.
+ */
+const ACCEPTED_PENDING_FLOW_MATERIAL_VERSIONS = new Set([
+  2,
+  DIRECT_PENDING_FLOW_MATERIAL_VERSION,
+  PENDING_FLOW_MATERIAL_VERSION,
+]);
+
 function hasOnlyExpectedMaterialShape(value: unknown): value is MCPOAuthPendingFlowSealedMaterial {
   if (!value || typeof value !== 'object') return false;
   const material = value as Partial<MCPOAuthPendingFlowSealedMaterial>;
   return (
-    material.version === 2 &&
+    typeof material.version === 'number' &&
+    ACCEPTED_PENDING_FLOW_MATERIAL_VERSIONS.has(material.version) &&
     typeof material.attemptId === 'string' &&
     typeof material.tenantId === 'string' &&
     typeof material.userId === 'string' &&
@@ -87,6 +116,11 @@ function hasOnlyExpectedMaterialShape(value: unknown): value is MCPOAuthPendingF
     (material.authorizationResponseIssuerParameterSupported === undefined ||
       typeof material.authorizationResponseIssuerParameterSupported === 'boolean') &&
     typeof material.allowLocalhostHttp === 'boolean' &&
+    (material.relay === undefined ||
+      (material.version === PENDING_FLOW_MATERIAL_VERSION &&
+        !!material.relay &&
+        typeof material.relay.cellId === 'string' &&
+        typeof material.relay.cloudUserId === 'string')) &&
     (material.slackRecovery === undefined ||
       (!!material.slackRecovery &&
         typeof material.slackRecovery.notice_id === 'string' &&
@@ -95,7 +129,24 @@ function hasOnlyExpectedMaterialShape(value: unknown): value is MCPOAuthPendingF
         typeof material.slackRecovery.mcp_server_id === 'string' &&
         Number.isSafeInteger(material.slackRecovery.recovery_generation) &&
         (material.slackRecovery.recovery_request_id === undefined ||
-          typeof material.slackRecovery.recovery_request_id === 'string')))
+          typeof material.slackRecovery.recovery_request_id === 'string'))) &&
+    // Only v3 and later may carry a connect binding. A v2 envelope claiming
+    // one has been edited, not upgraded.
+    (material.slackConnect === undefined
+      ? true
+      : material.version >= 3 &&
+        !!material.slackConnect &&
+        typeof material.slackConnect.delivery_id === 'string' &&
+        Number.isSafeInteger(material.slackConnect.delivery_generation) &&
+        typeof material.slackConnect.widget_id === 'string' &&
+        typeof material.slackConnect.session_id === 'string' &&
+        typeof material.slackConnect.mcp_server_id === 'string' &&
+        typeof material.slackConnect.gateway_channel_id === 'string' &&
+        // The two versions the callback's authority re-read compares against.
+        // Required, not optional: an envelope without them leaves the callback
+        // with nothing to compare.
+        Number.isSafeInteger(material.slackConnect.gateway_config_generation) &&
+        Number.isSafeInteger(material.slackConnect.mcp_server_config_version))
   );
 }
 
@@ -144,7 +195,9 @@ export class MCPOAuthPendingFlowAuthority {
         subjectUserId,
       });
       const material: MCPOAuthPendingFlowSealedMaterial = {
-        version: 2,
+        version: input.context.relay
+          ? PENDING_FLOW_MATERIAL_VERSION
+          : DIRECT_PENDING_FLOW_MATERIAL_VERSION,
         attemptId,
         tenantId: input.tenantId,
         userId: input.userId,
@@ -171,7 +224,9 @@ export class MCPOAuthPendingFlowAuthority {
         authorizationResponseIssuerParameterSupported:
           input.context.authorizationResponseIssuerParameterSupported,
         allowLocalhostHttp: input.context.allowLocalhostHttp,
+        ...(input.context.relay ? { relay: input.context.relay } : {}),
         ...(input.slackRecovery ? { slackRecovery: input.slackRecovery } : {}),
+        ...(input.slackConnect ? { slackConnect: input.slackConnect } : {}),
       };
       const sealedMaterial = sealBoundSecret(
         JSON.stringify(material),
@@ -224,6 +279,22 @@ export class MCPOAuthPendingFlowAuthority {
       (systemDb) =>
         new MCPOAuthPendingFlowRepository(systemDb).failPendingForCallback(stateHash, failureCode),
       { capability: 'mcp_oauth_callback' }
+    );
+  }
+
+  async failPendingForUser(
+    tenantId: string,
+    userId: UserID,
+    rawState: string,
+    failureCode: string
+  ): Promise<boolean> {
+    return runWithTenantDatabaseScope(this.db, tenantId, (scoped) =>
+      new MCPOAuthPendingFlowRepository(scoped).failPendingForUser(
+        tenantId,
+        userId,
+        fingerprintMCPOAuthState(rawState),
+        failureCode
+      )
     );
   }
 
@@ -294,7 +365,9 @@ export class MCPOAuthPendingFlowAuthority {
     return {
       record,
       ...(material.slackRecovery ? { slackRecovery: material.slackRecovery } : {}),
+      ...(material.slackConnect ? { slackConnect: material.slackConnect } : {}),
       context: {
+        ...(material.relay ? { relay: material.relay } : {}),
         metadataUrl: material.metadataUrl,
         resourceUri: material.resourceUri,
         issuer: material.issuer,

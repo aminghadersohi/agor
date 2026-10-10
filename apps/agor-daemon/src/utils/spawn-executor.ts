@@ -32,6 +32,7 @@ import {
 import {
   type AgorExecutionSettings,
   buildAllowlistedEnv,
+  EXECUTOR_SCRATCH_ROOT_ENV,
   type ResolvedExecutorResponseConfig,
   resolveExecutorResponseConfig,
   resolveExecutorResponseTimeoutMs,
@@ -41,6 +42,7 @@ import {
   EXECUTOR_RESPONSE_PROTOCOL,
   type ExecutorCommandResult,
 } from '@agor/core/executor-protocol';
+import { EXECUTOR_LAUNCH_REFUSED_MESSAGE, executorAdmissionClassFor } from '@agor/core/types';
 import { isValidExecutionHomeKey } from '@agor/core/unix';
 import { getCurrentLogLevel } from '@agor/core/utils/logger';
 import type { SignOptions } from 'jsonwebtoken';
@@ -60,6 +62,7 @@ import {
 } from '../executor-tracking.js';
 import { withResolvedConfig } from './build-resolved-config-slice.js';
 import { buildSandboxWrap, type SandboxRuntimePaths } from './sandbox-wrap.js';
+import { classifyExecutorExit } from './task-launch-state.js';
 import { buildTrustedLauncherEnvironment } from './trusted-launcher-environment.js';
 
 let configuredDaemonUrl: string | null = null;
@@ -185,6 +188,8 @@ export type ExecutorSpawnMode = 'local' | 'templated';
 
 export interface ExecutorSpawnContext {
   mode: ExecutorSpawnMode;
+  /** Terminating signal reported by the OS, when the process was signaled. */
+  signal?: NodeJS.Signals | null;
 }
 
 export interface SpawnExecutorOptions {
@@ -443,6 +448,7 @@ export function spawnExecutor(
       : configuredExecutorDefaults.executorCommandTemplate;
   const payloadWithConfig = {
     ...withResolvedConfig(payload),
+    admissionClass: executorAdmissionClassFor(payload.command),
     executorMode: 'autonomous' as const,
   };
 
@@ -681,10 +687,10 @@ function spawnExecutorLocalPrepared(
   console.log(`${logPrefix} Command: ${payload.command}`);
 
   let reportedExit = false;
-  const reportExit = (code: number | null): void => {
+  const reportExit = (code: number | null, signal?: NodeJS.Signals | null): void => {
     if (reportedExit) return;
     reportedExit = true;
-    observeExitCallback(options.onExit, code, { mode: 'local' }, logPrefix);
+    observeExitCallback(options.onExit, code, { mode: 'local', signal }, logPrefix);
   };
 
   let executorProcess: ChildProcess;
@@ -709,13 +715,15 @@ function spawnExecutorLocalPrepared(
     reportExit(127);
   });
 
-  executorProcess.on('exit', (code) => {
+  executorProcess.on('exit', (code, signal) => {
     if (code === 0) {
       console.log(`${logPrefix} Executor completed successfully`);
     } else {
-      console.error(`${logPrefix} Executor exited with code ${code}`);
+      console.error(
+        `${logPrefix} Executor exited with code ${code}${signal ? ` signal ${signal}` : ''}`
+      );
     }
-    reportExit(code);
+    reportExit(code, signal);
   });
 
   sendExecutorPayload(executorProcess, payload, spawnReady, logPrefix, reportExit);
@@ -739,10 +747,10 @@ function spawnExecutorWithTemplate(
   console.log(`${logPrefix} Template command (first 200 chars): ${command.slice(0, 200)}...`);
 
   let reportedExit = false;
-  const reportExit = (code: number | null): void => {
+  const reportExit = (code: number | null, signal?: NodeJS.Signals | null): void => {
     if (reportedExit) return;
     reportedExit = true;
-    observeExitCallback(options.onExit, code, { mode: 'templated' }, logPrefix);
+    observeExitCallback(options.onExit, code, { mode: 'templated', signal }, logPrefix);
   };
 
   const executorProcess = spawn('sh', ['-c', command], {
@@ -761,17 +769,17 @@ function spawnExecutorWithTemplate(
     reportExit(127);
   });
 
-  executorProcess.on('exit', (code) => {
+  executorProcess.on('exit', (code, signal) => {
     if (code === 0) {
       console.log(
         `${logPrefix} Executor completed successfully (task: ${templateVariables.task_id})`
       );
     } else {
       console.error(
-        `${logPrefix} Executor exited with code ${code} (task: ${templateVariables.task_id})`
+        `${logPrefix} Executor exited with code ${code}${signal ? ` signal ${signal}` : ''} (task: ${templateVariables.task_id})`
       );
     }
-    reportExit(code);
+    reportExit(code, signal);
   });
 
   sendExecutorPayload(executorProcess, payload, spawnReady, logPrefix, reportExit);
@@ -821,7 +829,11 @@ function resolveLocalExecutorEnvironment(
   // host runtime, never the daemon's entire credential-bearing process.env.
   const env = options.env ?? buildAllowlistedEnv();
   const source = options.preparedEnv ?? env;
-  return withDaemonExecutorEnv(source, getDaemonUrl());
+  const executorEnv = withDaemonExecutorEnv(source, getDaemonUrl());
+  // Local process env already contains user settings before payload filtering.
+  // Only a delegated launcher may supply Job-local scratch.
+  delete executorEnv[EXECUTOR_SCRATCH_ROOT_ENV];
+  return executorEnv;
 }
 
 function prepareLocalExecutorSpawn(
@@ -1274,6 +1286,7 @@ export async function requestExecutor(
   }
   const payloadWithConfig = {
     ...withResolvedConfig(payload),
+    admissionClass: executorAdmissionClassFor(payload.command),
     executorMode: 'request' as const,
     executorResponse: response.descriptor,
   };
@@ -1446,6 +1459,19 @@ function requestExecutorWithTemplate(
     });
   });
   child.on('exit', (code) => {
+    // An opted-in launcher refused admission before creating anything, so no
+    // executor will ever answer: fail now instead of waiting for the timeout.
+    if (
+      classifyExecutorExit({ mode: 'templated', code, nonzeroMayHaveDispatched: false }) ===
+      'refused'
+    ) {
+      console.error(`${logPrefix} Executor launcher refused admission`);
+      response.fail({
+        success: false,
+        error: { code: 'EXECUTOR_LAUNCH_REFUSED', message: EXECUTOR_LAUNCH_REFUSED_MESSAGE },
+      });
+      return;
+    }
     // A templated launcher may exit after submitting remote work. Its exit is
     // observed for process hygiene but is not the executor's terminal result.
     if (code && code !== 0) {

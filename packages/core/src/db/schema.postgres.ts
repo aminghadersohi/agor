@@ -562,6 +562,14 @@ export const messages = pgTable(
     // Parent tool use ID (for nested tool calls - e.g., Task tool spawning Read/Grep)
     parent_tool_use_id: text('parent_tool_use_id'),
 
+    // Indexed due-work projection for the bounded Slack MCP connect-card
+    // repair sweep. Mirrors `metadata.widget.slack_connect.next_repair_at` and
+    // is written by the same locked mutation, so it cannot drift from the JSON
+    // it projects. Null for every message that is not a Slack-delivered
+    // `oauth` widget — which is all but a handful — so the partial index stays
+    // tiny on a table this large.
+    mcp_slack_connect_due_at: t.timestamp('mcp_slack_connect_due_at'),
+
     // NOTE: queueing moved off `messages` and onto `tasks.status='queued'` as
     // of migration sqlite/0040 (postgres/0030). The legacy `status` and
     // `queue_position` columns are gone — see `tasks.queue_position` instead.
@@ -593,6 +601,9 @@ export const messages = pgTable(
       table.session_id,
       table.timestamp
     ),
+    mcpSlackConnectDueIdx: index('messages_mcp_slack_connect_due_idx')
+      .on(table.tenant_id, table.mcp_slack_connect_due_at, table.message_id)
+      .where(sql`${table.mcp_slack_connect_due_at} IS NOT NULL`),
   })
 );
 
@@ -699,6 +710,7 @@ export const repos = pgTable(
         // Async clone lifecycle: 'cloning' → 'ready' | 'failed'. Undefined for
         // legacy rows and for local-type repos. See packages/core/src/types/repo.ts.
         clone_status?: 'cloning' | 'ready' | 'failed';
+        clone_generation?: number;
         clone_error?: {
           exit_code: number;
           category: 'auth_failed' | 'not_found' | 'network' | 'git_unavailable' | 'unknown';
@@ -849,7 +861,7 @@ export const branches = pgTable(
       .$type<'none' | 'read' | 'write'>()
       .default('read'),
 
-    // Branch storage model — see context/explorations/clone-redesign.md.
+    // Branch storage model.
     // 'worktree' = native `git worktree add` (shared base .git/config — legacy default).
     // 'clone'    = self-standing `git clone` (own .git/ — closes cross-branch leak vectors).
     //
@@ -1160,7 +1172,7 @@ export const users = pgTable(
           copilot?: {
             COPILOT_GITHUB_TOKEN?: string;
           };
-          opencode?: Record<string, never>;
+          opencode?: Record<string, string>;
         };
         agentic_auth_methods?: import('../types/user').AgenticAuthMethods;
         agentic_credential_sources?: import('../types/user').AgenticCredentialSources;
@@ -1172,7 +1184,7 @@ export const users = pgTable(
         //
         // Writes always produce the object form. Scope validation lives in the app
         // layer — no SQL CHECK constraint — so adding future scope values stays
-        // schema-free. See `context/explorations/env-var-access.md`.
+        // schema-free.
         env_vars?: Record<
           string,
           | string // legacy
@@ -1204,6 +1216,7 @@ export const users = pgTable(
             codexSandboxMode?: string;
             codexApprovalPolicy?: string;
             codexNetworkAccess?: boolean;
+            codexIncludePlugins?: boolean;
           };
           gemini?: {
             modelConfig?: {
@@ -1736,6 +1749,8 @@ export const userApiKeys = pgTable(
     name: text('name').notNull(),
     prefix: text('prefix').notNull(), // first 12 chars: 'agor_sk_XXXX' for identification
     key_hash: text('key_hash').notNull(), // bcrypt hash of full key
+    // 'manual' (created in settings) | 'cli_login' (minted by `agor login`)
+    source: text('source').notNull().default('manual'),
     created_at: t.timestamp('created_at').notNull(),
     last_used_at: t.timestamp('last_used_at'),
   },
@@ -2651,7 +2666,7 @@ export const uploads = pgTable(
       .notNull()
       .default('active'),
     provenance: text('provenance', {
-      enum: ['browser', 'gateway-slack', 'mcp-slack'],
+      enum: ['browser', 'gateway-slack', 'gateway-discord', 'mcp-slack'],
     }).notNull(),
     created_at: t.timestamp('created_at').notNull(),
     expires_at: t.timestamp('expires_at'),
@@ -3640,6 +3655,38 @@ export const kbImportReceipts = pgTable(
       table.bundle,
       table.slug,
       table.entry_key
+    ),
+  })
+);
+
+/** Hosted OpenCode checkpoints; no FKs so deleted Sessions' rows survive until their files are cleaned. */
+export const opencodeCheckpointAttempts = pgTable(
+  'opencode_checkpoint_attempts',
+  {
+    tenant_id: text('tenant_id').notNull().default('default'),
+    attempt_id: varchar('attempt_id', { length: 36 }).primaryKey(),
+    session_id: varchar('session_id', { length: 36 }).notNull(),
+    task_id: varchar('task_id', { length: 36 }).notNull(),
+    owner_user_id: varchar('owner_user_id', { length: 36 }).notNull(),
+    holder_instance_id: varchar('holder_instance_id', { length: 36 }).notNull(),
+    input_task_id: varchar('input_task_id', { length: 36 }),
+    state: text('state', { enum: ['open', 'accepted', 'superseded'] }).notNull(),
+    manifest: t.json<import('@agor/core/types').OpenCodeCheckpointManifest>('manifest'),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+  },
+  (table) => ({
+    tenantIdx: index('opencode_checkpoint_attempts_tenant_idx').on(table.tenant_id),
+    taskUnique: uniqueIndex('opencode_checkpoint_attempts_task_unique').on(
+      table.tenant_id,
+      table.task_id
+    ),
+    acceptedUnique: uniqueIndex('opencode_checkpoint_attempts_accepted_unique')
+      .on(table.tenant_id, table.session_id)
+      .where(sql`${table.state} = 'accepted'`),
+    ownerIdx: index('opencode_checkpoint_attempts_owner_idx').on(
+      table.tenant_id,
+      table.owner_user_id
     ),
   })
 );

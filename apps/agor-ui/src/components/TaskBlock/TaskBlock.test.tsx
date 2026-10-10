@@ -8,16 +8,16 @@
  * list — WITHOUT disturbing non-widget order, message indices, or identity.
  */
 
-import { AUTHORIZATION_REVOKED_TERMINATION_MESSAGE } from '@agor/core/types';
-import type { Message, Task } from '@agor-live/client';
+import type { Message, Task, WidgetType } from '@agor-live/client';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { registerWidgetComponent } from '../MessageBlock/WidgetBlock';
 
 import {
   type Block,
+  canOfferRecoveryTurn,
   groupMessagesIntoBlocks,
-  isAuthorizationRevokedFailure,
-  isVerifiedRuntimeInterruption,
+  rejectedRateLimit,
   shouldRenderLiveTaskProgress,
   TaskBlock,
 } from './TaskBlock';
@@ -85,6 +85,57 @@ function blockId(block: Block): string {
 }
 
 describe('groupMessagesIntoBlocks — widget_request ordering', () => {
+  it('renders the widget after the answer, footer, and outcome', () => {
+    registerWidgetComponent('review_widget' as WidgetType, () => (
+      <button type="button">Complete widget</button>
+    ));
+    const task = {
+      task_id: 'task-1',
+      session_id: 'sess-1',
+      created_by: '',
+      full_prompt: '',
+      status: 'completed',
+      created_at: '2026-07-01T12:00:00.000Z',
+      git_state: { ref_at_start: 'main', sha_at_start: 'synthetic' },
+      computed_context_window: 22,
+      normalized_sdk_response: {
+        contextWindowLimit: 100,
+        tokenUsage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      },
+    } as unknown as Task;
+    const widgetRequestMessage = {
+      ...widgetRequest(1, 'w1'),
+      metadata: {
+        widget: {
+          widget_id: 'w1',
+          widget_type: 'review_widget',
+          schema_version: 1,
+          params: {},
+          status: 'pending',
+          requested_at: task.created_at,
+        },
+      },
+    } as unknown as Message;
+    const { container } = render(
+      <TaskBlock
+        task={task}
+        isLatestTask
+        taskMessages={[
+          userMessage(0, 'u0'),
+          widgetRequestMessage,
+          assistantText(2, 'a2', 'Closing text'),
+        ]}
+        taskMessagesLoaded
+        onLoadTaskMessages={vi.fn()}
+      />
+    );
+    const answer = screen.getByText('Closing text');
+    const footer = screen.getByTestId('turn-usage-label');
+    const widget = screen.getByRole('button', { name: 'Complete widget' });
+    expect(answer.compareDocumentPosition(footer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(footer.compareDocumentPosition(widget) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(container.lastElementChild?.lastElementChild).toContainElement(widget);
+  });
   it('moves a widget_request block to the end even when its index sorts mid-turn', () => {
     // Widget (index 1) fired BEFORE the agent's closing text (index 2).
     const messages = [
@@ -162,7 +213,7 @@ describe('groupMessagesIntoBlocks — assistant activity', () => {
   });
 });
 
-describe('verified runtime interruption projection', () => {
+describe('recovery turn eligibility', () => {
   const task = {
     status: 'failed',
     sdk_failure: { termination: 'verified' },
@@ -170,25 +221,37 @@ describe('verified runtime interruption projection', () => {
   } as unknown as Task;
 
   it('offers outcome-based recovery only for the latest verified interruption', () => {
-    expect(isVerifiedRuntimeInterruption(task, true)).toBe(true);
-    expect(isVerifiedRuntimeInterruption(task, false)).toBe(false);
+    expect(canOfferRecoveryTurn(task, true)).toBe(true);
+    expect(canOfferRecoveryTurn(task, false)).toBe(false);
+  });
+
+  it('offers recovery after a settled failure or timeout, never mid-termination', () => {
+    expect(canOfferRecoveryTurn({ status: 'failed' } as Task, true)).toBe(true);
+    expect(canOfferRecoveryTurn({ status: 'timed_out' } as Task, true)).toBe(true);
+    expect(canOfferRecoveryTurn({ status: 'stopped' } as Task, true)).toBe(false);
+    expect(
+      canOfferRecoveryTurn(
+        { ...task, sdk_failure: { ...task.sdk_failure!, termination: 'requested' } } as Task,
+        true
+      )
+    ).toBe(false);
   });
 
   it('keeps non-resumable outcomes out of Resume UX', () => {
     expect(
-      isVerifiedRuntimeInterruption(
+      canOfferRecoveryTurn(
         { ...task, sdk_failure: { ...task.sdk_failure!, termination: 'unverified' } } as Task,
         true
       )
     ).toBe(false);
     expect(
-      isVerifiedRuntimeInterruption(
+      canOfferRecoveryTurn(
         { ...task, termination_request: { ...task.termination_request!, cause: 'user_stop' } },
         true
       )
     ).toBe(false);
     expect(
-      isVerifiedRuntimeInterruption(
+      canOfferRecoveryTurn(
         {
           ...task,
           termination_request: {
@@ -202,60 +265,41 @@ describe('verified runtime interruption projection', () => {
   });
 });
 
-describe('authorization-revoked failure projection', () => {
-  it('shows durable revoked authority without synthesizing a transcript message', () => {
-    expect(
-      isAuthorizationRevokedFailure({
-        status: 'failed',
-        termination_request: { cause: 'authorization_revoked' },
-      } as Task)
-    ).toBe(true);
+describe('usage-limit rejection that ended the turn', () => {
+  const row = (index: number, role: string, content: Message['content']) =>
+    ({ message_id: `m${index}`, index, role, content }) as Message;
+  const rejected = (index: number) =>
+    row(index, 'system', [{ type: 'rate_limit', status: 'rejected', resetsAt: 100 }]);
+
+  // Shapes observed in real runs: Claude ends a limited run with its own text notice.
+  const notice = (index: number) =>
+    row(index, 'assistant', [
+      { type: 'text', text: "You've hit your session limit · resets 10:40am (America/Sao_Paulo)" },
+    ]);
+
+  it("counts a rejection followed only by the agent's limit notice as the end of the run", () => {
+    expect(rejectedRateLimit([row(0, 'user', 'Go'), rejected(1)])).toEqual({ resetsAt: 100 });
+    expect(rejectedRateLimit([row(0, 'user', 'Go'), rejected(1), notice(2)])).toEqual({
+      resetsAt: 100,
+    });
+    expect(rejectedRateLimit([rejected(1), row(2, 'system', 'Note')])).toEqual({ resetsAt: 100 });
+    expect(rejectedRateLimit([row(0, 'assistant', 'Hi')])).toBeUndefined();
   });
 
-  it('does not relabel an in-flight or unrelated failure', () => {
+  it('treats tool activity after the wait as a run that went on', () => {
     expect(
-      isAuthorizationRevokedFailure({
-        status: 'stopping',
-        termination_request: { cause: 'authorization_revoked' },
-      } as Task)
-    ).toBe(false);
+      rejectedRateLimit([
+        rejected(1),
+        row(2, 'user', [{ type: 'tool_result', tool_use_id: 't', content: 'ok' }]),
+        row(3, 'assistant', 'Done.'),
+      ])
+    ).toBeUndefined();
     expect(
-      isAuthorizationRevokedFailure({
-        status: 'failed',
-        termination_request: { cause: 'heartbeat_lost' },
-      } as Task)
-    ).toBe(false);
-  });
-
-  it('renders the durable sanitized reason inside the expanded Task', () => {
-    render(
-      <TaskBlock
-        task={
-          {
-            task_id: 'task-revoked',
-            session_id: 'session-1',
-            status: 'failed',
-            created_at: '2026-08-30T19:26:18.933Z',
-            created_by: 'user-1',
-            full_prompt: 'sleep 300',
-            error_message: AUTHORIZATION_REVOKED_TERMINATION_MESSAGE,
-            termination_request: { cause: 'authorization_revoked' },
-            git_state: { ref_at_start: 'main', sha_at_start: 'unknown' },
-            message_range: {
-              start_index: 0,
-              end_index: 0,
-              start_timestamp: '2026-08-30T19:26:18.933Z',
-            },
-          } as Task
-        }
-        taskMessages={[]}
-        taskMessagesLoaded
-        onLoadTaskMessages={vi.fn()}
-      />
-    );
-
-    expect(screen.getByText('Task access revoked')).toBeInTheDocument();
-    expect(screen.getByText(AUTHORIZATION_REVOKED_TERMINATION_MESSAGE)).toBeInTheDocument();
+      rejectedRateLimit([
+        rejected(1),
+        row(2, 'assistant', [{ type: 'tool_use', id: 't', name: 'Read', input: {} }]),
+      ])
+    ).toBeUndefined();
   });
 });
 

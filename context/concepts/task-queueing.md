@@ -46,9 +46,7 @@ client's earlier Session GET.
 
 Prompt-route admission executes once inside its owned admission
 transaction. No automatic replay is performed, including for `40P01` or
-`40001`: the incident cause is not established. Tenant write gating, current
-authority, Branch → Session admission locks and queue sequencing are unchanged.
-The diagnostic wrapper preserves caller-owned transaction errors so the owner
+`40001`. The diagnostic wrapper preserves caller-owned transaction errors so the owner
 can roll back. Launch preparation runs before admission without retaining its
 locks. Title work, transcript writes and provider calls remain outside this unit. The direct
 winner reuses prepared state and skips the second dispatch-claim transaction.
@@ -74,12 +72,28 @@ while retaining child Task/Session locks. Rollback discards the callback; there
 is no automatic retry or new durable outbox. Existing best-effort delivery can
 still be lost if the daemon exits after commit. Repository-origin maintenance
 also runs after commit with tenant identity but without a transaction spanning
-Git I/O. Completion callbacks/queue handoff retain their existing separate DB
-scopes; these changes are not a general lock-order redesign.
+Git I/O. Completion callbacks/queue handoff keep separate DB scopes.
 
 `created` remains supported for the explicit `POST /tasks/:id` then
 `POST /tasks/:id/run` workflow. It cannot jump an existing queued prompt or a
 different executing Task.
+
+## Agent queue management
+
+Public `tasks.cancelQueued` and `tasks.reorderQueued` share
+`TaskRepository.mutateQueued`: Session lock first, then queued Task locks,
+validation and mutation in one transaction. Single-task `tasks.remove` uses the
+same fence. Cancellation deletes only queued rows (no terminal transition or
+completion callback). Reorder compares the full expected ordered ID snapshot
+and requires an exact permutation, then compacts positions inside the lock so
+subsequent max+1 admission stays after the reordered tail. Unique-index-safe
+position clearing is transaction-private.
+
+Both commands reuse Task deletion's Member + Branch Manager authorization.
+MCP passes the acting user's external provider/tenant params to these public
+methods, not to a repository bypass. Standard removed/patched events and a
+promptable-only queue wakeup occur after commit. See [the MCP guide](../../apps/agor-docs/content/guide/internal-mcp.mdx#managing-a-sessions-pending-queue)
+for conflicts, result shape and examples.
 
 ## Fleet-wide draining and recovery
 

@@ -1,8 +1,13 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getCurrentTenantId, runWithTenantContext } from '@agor/core/db';
-import type { Application, Branch } from '@agor/core/types';
+import {
+  getCurrentTenantDatabaseScope,
+  getCurrentTenantId,
+  runWithTenantContext,
+} from '@agor/core/db';
+import type { Application } from '@agor/core/feathers';
+import type { AuthenticatedParams, Branch } from '@agor/core/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BranchesService, type BranchParams } from './branches';
 import { ReposService } from './repos';
@@ -37,13 +42,14 @@ vi.mock('@agor/core/config', async (importOriginal) => {
 
 const repositoryMocks = vi.hoisted(() => ({
   deleteRepo: vi.fn(),
+  claimClone: vi.fn(),
   findAllBranchesByRepoId: vi.fn(),
   lockRepoForBranchInventory: vi.fn(),
   resolveBranchUserAccess: vi.fn(),
 }));
 
 // Shared BranchRepository mock so tests can drive/assert the atomic CAS methods
-// (`claimFailedForProvisioningRetry` / `markProvisioningFailedIfCreating`) that
+// (`claimForProvisioning` / `markProvisioningFailedIfCreating`) that
 // the provisioning safety nets and retry go through. Every `new
 // BranchRepository()` in the service returns this same object.
 const branchRepoMock = vi.hoisted(() => ({
@@ -51,7 +57,7 @@ const branchRepoMock = vi.hoisted(() => ({
   findByRepoAndName: vi.fn(async () => null),
   getAllUsedUniqueIds: vi.fn(async () => [] as number[]),
   addOwner: vi.fn(async () => undefined),
-  claimFailedForProvisioningRetry: vi.fn(),
+  claimForProvisioning: vi.fn(),
   markProvisioningFailedIfCreating: vi.fn(),
   acknowledgeProvisioningAttempt: vi.fn(),
   findCreatingPage: vi.fn(),
@@ -85,6 +91,7 @@ vi.mock('@agor/core/db', async (importOriginal) => {
     RepoRepository: vi.fn().mockImplementation(function RepoRepository() {
       return {
         create: vi.fn(),
+        claimClone: repositoryMocks.claimClone,
         findById: vi.fn(),
         findAll: vi.fn(async () => []),
         update: vi.fn(),
@@ -107,6 +114,10 @@ const tenantScopeMocks = vi.hoisted(() => {
   );
   return { withFreshTenantWrite };
 });
+const sandboxMountMocks = vi.hoisted(() => ({ resolve: vi.fn(async () => ({})) }));
+vi.mock('../utils/branch-executor-sandbox.js', () => ({
+  resolveBranchExecutorSandboxMounts: sandboxMountMocks.resolve,
+}));
 vi.mock('../utils/executor-delegated-home.js', () => ({
   resolveDelegatedExecutionHomeKey: delegatedHomeMocks.resolve,
 }));
@@ -131,6 +142,7 @@ beforeEach(() => {
   executorMocks.requestExecutor.mockReset();
   executorMocks.spawnExecutorFireAndForget.mockReset();
   delegatedHomeMocks.resolve.mockReset().mockResolvedValue(undefined);
+  sandboxMountMocks.resolve.mockReset().mockResolvedValue({});
   repositoryMocks.resolveBranchUserAccess.mockReset().mockResolvedValue({
     can: 'all',
     fs_access: 'write',
@@ -190,8 +202,13 @@ describe('ReposService .agor.yml normalized branch access', () => {
   };
 
   function service() {
+    // Minimal handle for the real tenant-scope wrapper to open a unit on.
+    const db = {
+      run: vi.fn(),
+      transaction: vi.fn(async (work: (scoped: unknown) => Promise<unknown>) => work(db)),
+    };
     return new ReposService(
-      {} as never,
+      db as never,
       {
         get: () => ({}),
         service: vi.fn(),
@@ -218,15 +235,34 @@ describe('ReposService .agor.yml normalized branch access', () => {
       source: 'direct',
     });
     executorMocks.requestExecutor.mockResolvedValue({ success: true, data: {} });
+    const sandboxMounts = {
+      sandboxHomeStore: `/data/tenants/default/homes/${user.user_id}`,
+      sandboxWorktreesRoot: '/data/worktrees',
+      sandboxBaseRepoPath: '/data/repos/preset-io/agor',
+    };
+    // Export enters on a long route with tenant identity only; launch
+    // preparation must open its own short tenant database unit, and the
+    // executor must run outside it.
+    let resolvedInScope = false;
+    let executedInScope = true;
+    sandboxMountMocks.resolve.mockImplementation(async () => {
+      const scope = getCurrentTenantDatabaseScope();
+      resolvedInScope = scope?.kind === 'tenant' && scope.tenantId === 'default';
+      return sandboxMounts;
+    });
+    executorMocks.requestExecutor.mockImplementation(async () => {
+      executedInScope = getCurrentTenantDatabaseScope() !== undefined;
+      return { success: true, data: {} };
+    });
     const instance = service();
 
     await runWithTenantContext('default', () =>
       (
         instance as unknown as {
           runAgorYmlExecutorCommand(
-            repo: typeof repo,
-            branch: typeof branch,
-            command: typeof command,
+            repoInput: typeof repo,
+            branchInput: typeof branch,
+            commandInput: typeof command,
             params: Record<string, unknown>,
             serviceParams: unknown
           ): Promise<unknown>;
@@ -240,6 +276,8 @@ describe('ReposService .agor.yml normalized branch access', () => {
         params: expect.objectContaining({
           cwd: branch.path,
           principalBranchAccess: access.fs_access,
+          // A per-user sandbox refuses to launch without the caller's home store.
+          ...sandboxMounts,
         }),
       }),
       expect.objectContaining({
@@ -250,6 +288,11 @@ describe('ReposService .agor.yml normalized branch access', () => {
         },
       })
     );
+    expect(sandboxMountMocks.resolve).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: 'default', executionUserId: user.user_id, branch })
+    );
+    expect(resolvedInScope).toBe(true);
+    expect(executedInScope).toBe(false);
   });
 
   it('fails export closed when write access is missing', async () => {
@@ -262,17 +305,19 @@ describe('ReposService .agor.yml normalized branch access', () => {
     const instance = service();
 
     await expect(
-      (
-        instance as unknown as {
-          runAgorYmlExecutorCommand(
-            repo: typeof repo,
-            branch: typeof branch,
-            command: 'branch.agor-yml.export',
-            params: Record<string, unknown>,
-            serviceParams: unknown
-          ): Promise<unknown>;
-        }
-      ).runAgorYmlExecutorCommand(repo, branch, 'branch.agor-yml.export', {}, { user })
+      runWithTenantContext('default', () =>
+        (
+          instance as unknown as {
+            runAgorYmlExecutorCommand(
+              repoInput: typeof repo,
+              branchInput: typeof branch,
+              command: 'branch.agor-yml.export',
+              params: Record<string, unknown>,
+              serviceParams: unknown
+            ): Promise<unknown>;
+          }
+        ).runAgorYmlExecutorCommand(repo, branch, 'branch.agor-yml.export', {}, { user })
+      )
     ).rejects.toThrow('branch filesystem write access required');
     expect(executorMocks.requestExecutor).not.toHaveBeenCalled();
   });
@@ -625,6 +670,19 @@ describe('ReposService.createBranch Git lifecycle execution', () => {
 });
 
 describe('ReposService.cloneRepository Git lifecycle execution', () => {
+  beforeEach(() => {
+    repositoryMocks.claimClone.mockReset().mockImplementation(async (data) => ({
+      repo: {
+        ...data,
+        repo_id: '550e8400-e29b-41d4-a716-446655440001',
+        clone_status: 'cloning',
+        clone_generation: 1,
+      },
+      acquired: true,
+      created: true,
+    }));
+  });
+
   it('creates managed storage without delegated user routing', async () => {
     executorMocks.spawnExecutorFireAndForget.mockClear();
 
@@ -641,13 +699,9 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
       }),
     } as unknown as Application;
     const service = new ReposService({} as never, app);
-    vi.spyOn(service, 'create').mockResolvedValue({
-      repo_id: '550e8400-e29b-41d4-a716-446655440001',
-      slug: 'preset-io/agor-teammate',
-    } as never);
 
     await service.cloneRepository({ url: 'https://github.com/preset-io/agor-teammate.git' }, {
-      user: { user_id: '550e8400-e29b-41d4-a716-446655440004' },
+      user: { user_id: '550e8400-e29b-41d4-a716-446655440004', role: 'member' },
     } as never);
 
     expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledWith(
@@ -673,10 +727,6 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
       }),
     } as unknown as Application;
     const service = new ReposService({} as never, app);
-    vi.spyOn(service, 'create').mockResolvedValue({
-      repo_id: '550e8400-e29b-41d4-a716-446655440001',
-      slug: 'preset-io/agor-admin-clone',
-    } as never);
 
     await service.cloneRepository({ url: 'https://github.com/preset-io/agor-admin-clone.git' }, {
       provider: 'rest',
@@ -697,11 +747,12 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
 
   it('persists clone-exit failure in a fresh write-gated tenant unit', async () => {
     executorMocks.spawnExecutorFireAndForget.mockClear();
-    const db = { marker: 'base-db' };
+    const db = { marker: 'base-db', run: vi.fn() };
     const current = {
       repo_id: '550e8400-e29b-41d4-a716-446655440001',
       slug: 'preset-io/agor-failed-clone',
       clone_status: 'cloning',
+      clone_generation: 1,
     };
     const repos = {
       get: vi.fn(async () => current),
@@ -719,11 +770,10 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
       }),
     } as unknown as Application;
     const service = new ReposService(db as never, app);
-    vi.spyOn(service, 'create').mockResolvedValue(current as never);
 
     await service.cloneRepository({ url: 'https://github.com/preset-io/agor-failed-clone.git' }, {
       tenant: { tenant_id: 'tenant-a', source: 'explicit' },
-      user: { user_id: '550e8400-e29b-41d4-a716-446655440004' },
+      user: { user_id: '550e8400-e29b-41d4-a716-446655440004', role: 'member' },
     } as never);
     const spawnOptions = executorMocks.spawnExecutorFireAndForget.mock.calls.at(-1)?.[1] as
       | { onExit?: (code: number | null) => Promise<void> | void }
@@ -739,10 +789,11 @@ describe('ReposService.cloneRepository Git lifecycle execution', () => {
     expect(repos.get).toHaveBeenCalledWith(current.repo_id);
     expect(repos.patch).toHaveBeenCalledWith(current.repo_id, {
       clone_status: 'failed',
+      clone_generation: 1,
       clone_error: {
         exit_code: 17,
         category: 'unknown',
-        message: 'Clone exited with code 17 before reporting an error.',
+        message: 'Repository setup worker exited (17) before reporting an outcome.',
       },
     });
   });
@@ -916,7 +967,7 @@ describe('ReposService branch provisioning lifecycle', () => {
 
   beforeEach(() => {
     executorMocks.spawnExecutorFireAndForget.mockReset();
-    branchRepoMock.claimFailedForProvisioningRetry.mockReset();
+    branchRepoMock.claimForProvisioning.mockReset();
     branchRepoMock.markProvisioningFailedIfCreating.mockReset();
     branchRepoMock.findById.mockReset();
     branchRepoMock.resolveUserPermission.mockReset();
@@ -931,7 +982,7 @@ describe('ReposService branch provisioning lifecycle', () => {
       changed: false,
       branch: branch({ filesystem_status: 'failed' }),
     });
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
       claimed: false,
       branch: branch({ filesystem_status: 'creating' }),
     });
@@ -1042,9 +1093,9 @@ describe('ReposService branch provisioning lifecycle', () => {
   const externalParams = (over: Record<string, unknown> = {}) =>
     ({
       provider: 'rest',
-      user: { user_id: 'user-2', role: 'member' },
+      user: { user_id: 'user-2', email: 'fixture@example.test', role: 'member' },
       ...over,
-    }) as never;
+    }) as AuthenticatedParams;
 
   it('refuses a viewer/member without branch control (no CAS, no dispatch)', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
@@ -1054,7 +1105,7 @@ describe('ReposService branch provisioning lifecycle', () => {
     await expect(service.retryBranchProvisioning('b1', externalParams())).rejects.toThrow(
       /'all' branch permission or admin access/i
     );
-    expect(branchRepoMock.claimFailedForProvisioningRetry).not.toHaveBeenCalled();
+    expect(branchRepoMock.claimForProvisioning).not.toHaveBeenCalled();
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
@@ -1075,7 +1126,7 @@ describe('ReposService branch provisioning lifecycle', () => {
   it('allows a caller with `all` branch permission', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
     branchRepoMock.resolveUserPermission.mockResolvedValue('all');
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
       claimed: true,
       branch: branch({ filesystem_status: 'creating' }),
     });
@@ -1090,7 +1141,7 @@ describe('ReposService branch provisioning lifecycle', () => {
 
   it('allows a global admin without consulting branch permission', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
       claimed: true,
       branch: branch({ filesystem_status: 'creating' }),
     });
@@ -1119,7 +1170,7 @@ describe('ReposService branch provisioning lifecycle', () => {
 
   it('lets the executor service account through (internal plumbing)', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
       claimed: true,
       branch: branch({ filesystem_status: 'creating' }),
     });
@@ -1141,10 +1192,10 @@ describe('ReposService branch provisioning lifecycle', () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'ready' }));
     const { service } = makeService({ get, patch: vi.fn() });
 
-    const result = await service.retryBranchProvisioning('b1');
+    const result = await service.retryBranchProvisioning('b1', externalParams());
 
     expect(result.filesystem_status).toBe('ready');
-    expect(branchRepoMock.claimFailedForProvisioningRetry).not.toHaveBeenCalled();
+    expect(branchRepoMock.claimForProvisioning).not.toHaveBeenCalled();
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
@@ -1156,7 +1207,9 @@ describe('ReposService branch provisioning lifecycle', () => {
     );
     const { service } = makeService({ get, patch: vi.fn() });
 
-    await expect(service.retryBranchProvisioning('b1')).rejects.toThrow(/in progress/i);
+    await expect(service.retryBranchProvisioning('b1', externalParams())).rejects.toThrow(
+      /in progress/i
+    );
     expect(branchRepoMock.markProvisioningFailedIfCreating).not.toHaveBeenCalled();
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
@@ -1165,7 +1218,9 @@ describe('ReposService branch provisioning lifecycle', () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'creating', updated_at: 'garbage' }));
     const { service } = makeService({ get, patch: vi.fn() });
 
-    await expect(service.retryBranchProvisioning('b1')).rejects.toThrow(/in progress/i);
+    await expect(service.retryBranchProvisioning('b1', externalParams())).rejects.toThrow(
+      /in progress/i
+    );
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
@@ -1177,7 +1232,9 @@ describe('ReposService branch provisioning lifecycle', () => {
       branch({ filesystem_status: 'creating', updated_at: '2020-01-01T00:00:00.000Z' })
     );
     const { service } = makeService({ get, patch: vi.fn() });
-    await expect(service.retryBranchProvisioning('b1')).rejects.toThrow(/in progress/i);
+    await expect(service.retryBranchProvisioning('b1', externalParams())).rejects.toThrow(
+      /in progress/i
+    );
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
@@ -1187,8 +1244,8 @@ describe('ReposService branch provisioning lifecycle', () => {
     );
     const { service } = makeService({ get, patch: vi.fn() });
     const results = await Promise.allSettled([
-      service.retryBranchProvisioning('b1'),
-      service.retryBranchProvisioning('b1'),
+      service.retryBranchProvisioning('b1', externalParams()),
+      service.retryBranchProvisioning('b1', externalParams()),
     ]);
     expect(results.every((result) => result.status === 'rejected')).toBe(true);
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
@@ -1201,22 +1258,16 @@ describe('ReposService branch provisioning lifecycle', () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed', archived: true }));
     const { service } = makeService({ get, patch: vi.fn() });
 
-    await expect(service.retryBranchProvisioning('b1')).rejects.toThrow(/archived/i);
-    expect(branchRepoMock.claimFailedForProvisioningRetry).not.toHaveBeenCalled();
-    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
-  });
-
-  it('retry on a non-failed lifecycle state (e.g. preserved) is refused (not retryable)', async () => {
-    const get = vi.fn(async () => branch({ filesystem_status: 'preserved' }));
-    const { service } = makeService({ get, patch: vi.fn() });
-
-    await expect(service.retryBranchProvisioning('b1')).rejects.toThrow(/cannot be retried/i);
+    await expect(service.retryBranchProvisioning('b1', externalParams())).rejects.toThrow(
+      /archived/i
+    );
+    expect(branchRepoMock.claimForProvisioning).not.toHaveBeenCalled();
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
   it('retry on a failed branch atomically claims failed→creating and re-dispatches', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
       claimed: true,
       branch: branch({ filesystem_status: 'creating' }),
     });
@@ -1224,11 +1275,12 @@ describe('ReposService branch provisioning lifecycle', () => {
     (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
       vi.fn(async () => repo);
 
-    const result = await service.retryBranchProvisioning('b1');
+    const result = await service.retryBranchProvisioning('b1', externalParams());
 
-    expect(branchRepoMock.claimFailedForProvisioningRetry).toHaveBeenCalledWith(
+    expect(branchRepoMock.claimForProvisioning).toHaveBeenCalledWith(
       'b1',
-      expect.any(String)
+      expect.any(String),
+      expect.objectContaining({ validate: expect.any(Function) })
     );
     expect(result.filesystem_status).toBe('creating');
     expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledWith(
@@ -1249,7 +1301,7 @@ describe('ReposService branch provisioning lifecycle', () => {
     const get = vi.fn(async () =>
       branch({ filesystem_status: 'failed', provisioning_operation: 'restore' })
     );
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
       claimed: true,
       branch: branch({ filesystem_status: 'creating', provisioning_operation: 'restore' }),
     });
@@ -1257,7 +1309,7 @@ describe('ReposService branch provisioning lifecycle', () => {
     (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
       vi.fn(async () => repo);
 
-    await service.retryBranchProvisioning('b1');
+    await service.retryBranchProvisioning('b1', externalParams());
 
     expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1270,7 +1322,7 @@ describe('ReposService branch provisioning lifecycle', () => {
 
   it('retry of a failed create does not dispatch in restore mode', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
       claimed: true,
       branch: branch({ filesystem_status: 'creating', provisioning_operation: 'retry' }),
     });
@@ -1278,7 +1330,7 @@ describe('ReposService branch provisioning lifecycle', () => {
     (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
       vi.fn(async () => repo);
 
-    await service.retryBranchProvisioning('b1');
+    await service.retryBranchProvisioning('b1', externalParams());
 
     expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1288,31 +1340,35 @@ describe('ReposService branch provisioning lifecycle', () => {
     );
   });
 
-  it('retry surfaces the failed row when the executor spawn fails synchronously', async () => {
-    // Fire-and-forget means a synchronous spawn failure produces no process and
-    // therefore no onExit. dispatchBranchProvisioning patches the branch to
-    // `failed` for exactly that case; retry has to return THAT row. Returning
-    // the pre-dispatch `creating` claim would tell a REST/MCP caller a retry is
-    // in flight when nothing is running.
+  it('retry publishes a fenced failure if post-commit launch throws', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
-      claimed: true,
-      branch: branch({ filesystem_status: 'creating' }),
+    branchRepoMock.claimForProvisioning.mockResolvedValue({ claimed: true, branch: branch() });
+    branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
+      changed: true,
+      branch: branch({
+        filesystem_status: 'failed',
+        error_message: 'Failed to spawn executor: boom',
+      }),
     });
-    const patch = vi.fn(async () =>
-      branch({ filesystem_status: 'failed', error_message: 'Failed to spawn executor: boom' })
-    );
     executorMocks.spawnExecutorFireAndForget.mockImplementation(() => {
       throw new Error('boom');
     });
-    const { service } = makeService({ get, patch });
+    const branches = { get, patch: vi.fn(), emit: vi.fn() };
+    const { service } = makeService(branches);
     (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
       vi.fn(async () => repo);
-
-    const result = await service.retryBranchProvisioning('b1');
-
-    expect(result.filesystem_status).toBe('failed');
-    expect(result.error_message).toMatch(/failed to spawn executor/i);
+    const result = await service.retryBranchProvisioning('b1', externalParams());
+    expect(result.filesystem_status).toBe('creating');
+    expect(branchRepoMock.markProvisioningFailedIfCreating).toHaveBeenCalledWith(
+      'b1',
+      'Failed to spawn executor: boom',
+      'attempt-1'
+    );
+    expect(branches.emit).toHaveBeenCalledWith(
+      'patched',
+      expect.objectContaining({ filesystem_status: 'failed' }),
+      expect.anything()
+    );
   });
 
   it.each([true, false])(
@@ -1352,7 +1408,7 @@ describe('ReposService branch provisioning lifecycle', () => {
     // unit of work is removed.
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
     let tenantDuringClaim: string | undefined;
-    branchRepoMock.claimFailedForProvisioningRetry.mockImplementation(async () => {
+    branchRepoMock.claimForProvisioning.mockImplementation(async () => {
       tenantDuringClaim = getCurrentTenantId() as string | undefined;
       return { claimed: true, branch: branch({ filesystem_status: 'creating' }) };
     });
@@ -1361,6 +1417,7 @@ describe('ReposService branch provisioning lifecycle', () => {
       vi.fn(async () => repo);
 
     await service.retryBranchProvisioning('b1', {
+      ...externalParams(),
       tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
     } as never);
 
@@ -1382,7 +1439,7 @@ describe('ReposService branch provisioning lifecycle', () => {
       tenantDuringDispatch = getCurrentTenantId() as string | undefined;
       return undefined as never;
     });
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
       claimed: true,
       branch: branch({ filesystem_status: 'creating', provisioning_attempt_id: 'attempt-2' }),
     });
@@ -1396,6 +1453,7 @@ describe('ReposService branch provisioning lifecycle', () => {
       vi.fn(async () => repo);
 
     await service.retryBranchProvisioning('b1', {
+      ...externalParams(),
       tenant: { tenant_id: 'tenant-a', source: 'auth_claim' },
     } as never);
 
@@ -1418,7 +1476,7 @@ describe('ReposService branch provisioning lifecycle', () => {
   it('retry that loses the atomic claim (concurrent/double-click) does NOT dispatch a 2nd executor', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
     // Another caller already flipped it to creating and won the claim.
-    branchRepoMock.claimFailedForProvisioningRetry.mockResolvedValue({
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
       claimed: false,
       branch: branch({ filesystem_status: 'creating' }),
     });
@@ -1426,26 +1484,42 @@ describe('ReposService branch provisioning lifecycle', () => {
     (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
       vi.fn(async () => repo);
 
-    const result = await service.retryBranchProvisioning('b1');
+    await expect(service.retryBranchProvisioning('b1', externalParams())).rejects.toThrow(
+      'already in progress'
+    );
 
-    expect(branchRepoMock.claimFailedForProvisioningRetry).toHaveBeenCalledTimes(1);
-    expect(result.filesystem_status).toBe('creating');
+    expect(branchRepoMock.claimForProvisioning).toHaveBeenCalledTimes(1);
+    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
+  });
+
+  it('a racing retry that observes durable ready is a no-op', async () => {
+    const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
+      claimed: false,
+      branch: branch({ filesystem_status: 'ready' }),
+    });
+    const { service } = makeService({ get, patch: vi.fn() });
+    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
+      vi.fn(async () => repo);
+    expect(await service.retryBranchProvisioning('b1', externalParams())).toMatchObject({
+      filesystem_status: 'ready',
+    });
     expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
   });
 
   it('two concurrent retries against the same failed branch dispatch exactly once', async () => {
     const get = vi.fn(async () => branch({ filesystem_status: 'failed' }));
     // The repo-level CAS is the fence: first call wins the claim, second loses.
-    branchRepoMock.claimFailedForProvisioningRetry
+    branchRepoMock.claimForProvisioning
       .mockResolvedValueOnce({ claimed: true, branch: branch({ filesystem_status: 'creating' }) })
       .mockResolvedValueOnce({ claimed: false, branch: branch({ filesystem_status: 'creating' }) });
     const { service } = makeService({ get, patch: vi.fn() });
     (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
       vi.fn(async () => repo);
 
-    await Promise.all([
-      service.retryBranchProvisioning('b1'),
-      service.retryBranchProvisioning('b1'),
+    await Promise.allSettled([
+      service.retryBranchProvisioning('b1', externalParams()),
+      service.retryBranchProvisioning('b1', externalParams()),
     ]);
 
     expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledTimes(1);

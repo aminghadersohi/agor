@@ -6,14 +6,17 @@
  * startup calls `registerAllWidgets()` once at boot to populate the
  * registry that the submit/dismiss routes (and any future internal
  * callers) dispatch through.
- *
- * See `docs/internal/in-conversation-widgets-design-2026-05-19.md`.
  */
 
 import { registerEnvVarsWidget } from './env-vars/index.js';
 import { registerGatewayTokenWidget } from './gateway-token/index.js';
+import { registerOAuthWidget } from './oauth/index.js';
 
-export type { WidgetRegistryEntry, WidgetSubmitCtx } from './registry.js';
+export type {
+  WidgetDaemonVerifiedEvidence,
+  WidgetRegistryEntry,
+  WidgetSubmitCtx,
+} from './registry.js';
 export { getWidget, listWidgetTypes, registerWidget } from './registry.js';
 export type {
   AuthenticatedCaller,
@@ -31,4 +34,5 @@ export { canResolveWidget, resolveWidget } from './submissions.js';
 export function registerAllWidgets(): void {
   registerEnvVarsWidget();
   registerGatewayTokenWidget();
+  registerOAuthWidget();
 }

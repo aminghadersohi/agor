@@ -40,7 +40,7 @@ Things that still warrant caution:
 
 The Message Gateway connects external messaging platforms to Agor's agent sessions. Mention your Slack or Discord bot in a supported channel, mention `@agor` on a GitHub PR, or mention the configured assistant in a Shortcut story comment, and Agor spins up a coding session on the right branch with the right agent, then routes responses back to the platform. In Slack and Discord channel-like surfaces, every prompt requires an explicit bot mention.
 
-> Currently supports **Slack**, **Discord**, **GitHub**, **Shortcut**, and **Microsoft Teams**. WhatsApp and Telegram connectors are planned.
+> Currently supports **Slack**, **Discord**, **GitHub**, **Shortcut**, and **Microsoft Teams**.
 
 <img
   src="/screenshots/marketing/agor-marketing-slack-thread.png"
@@ -53,6 +53,15 @@ The Message Gateway connects external messaging platforms to Agor's agent sessio
     marginBottom: '28px',
   }}
 />
+
+## Managing channels
+
+Settings shows each channel's platform, creator, and configured enabled state in
+separate columns. The creator is not necessarily the **Post messages as** account
+configured in the editor. Enabled does not certify a live connection.
+Use **Edit** to change enabled state, inspect the target branch and last-message
+time, and use the platform-specific connection checks. Gateway changes require an
+administrator; deletion still requires confirmation.
 
 ## What is a Channel?
 
@@ -106,43 +115,26 @@ Slack DM                    Agor Daemon                    Agent
   │                              │                           │
 ```
 
-The outbound routing is a lightweight after-hook on message creation. For sessions without a gateway mapping (the vast majority), it's a single database lookup that returns immediately, effectively a no-op.
-
 ### Multi-tenant listener lifecycle
 
-Standalone SQLite installations require no new configuration and keep the
-historical process-local listener lifecycle.
+Standalone SQLite installations use process-local listeners.
 
 > **Provider limit in PostgreSQL mode:** Slack, GitHub, Shortcut, and Discord listeners
 > support distributed ownership. Microsoft Teams currently depends on a local
 > Bot Framework port and in-memory conversation references, so Agor fails its
 > listener closed on PostgreSQL. Teams remains available only in standalone
-> SQLite until its ingress and reply-routing contract is redesigned.
+> SQLite.
 
-On PostgreSQL, every daemon performs bounded recurring discovery. A durable,
-database-time lease on each gateway channel chooses one listener owner; daemon
-presence and Redis are not ownership signals. The owner renews a 30-second
-lease. A hard-dead owner becomes claimable after 30 seconds; discovery adds at
-most a 6-second jittered idle wait plus a bounded keyset pass (25 candidates per
-page, at most 250 ms between full pages) and provider connection time.
-Credential/config updates, disable, and delete revoke the old owner
-immediately. Provider callbacks, durable occurrence completion, and polling
-checkpoints are fenced by an opaque claim token. Graceful shutdown stops intake,
-waits up to five seconds for admitted callbacks, and releases only after both
-the transport and callbacks are drained; otherwise the lease expires normally.
+On PostgreSQL, a renewable 30-second lease selects one listener owner per
+channel. After an owner dies, failover also takes discovery and provider
+connection time. Configuration or credential changes, disabling, and deletion
+revoke the old owner. Graceful shutdown allows up to five seconds for admitted
+callbacks to drain; if draining is incomplete, the lease expires normally.
 
-Discovery returns only enabled channel and tenant IDs. The daemon then leaves
-system scope, reloads the full channel (including credentials) under that
-tenant's normal RLS scope, and starts the connector with an immutable tenant
-binding. Provider callbacks re-enter that captured tenant before reading
-mappings or creating sessions.
-
-Listener instances are tenant-qualified. PostgreSQL outbound routing does not
-use listener presence or a process-local channel cache as authority: any daemon
-that handles a durable Message reloads its mapping and fresh channel credentials
-inside the Message's tenant. A channel refresh in a tenant with no enabled
-channels cannot stop or suppress another tenant. Missing, stale, or inconsistent
-discovery metadata is skipped rather than falling back to the static tenant.
+Listeners, callbacks, and outbound replies remain bound to the channel’s tenant.
+Credentials and routing are revalidated in that tenant; missing or inconsistent
+metadata never falls back to a default tenant. A channel change in one tenant
+does not stop another tenant’s listeners.
 
 Stable provider event IDs suppress duplicate Slack, GitHub, Shortcut, and Discord
 deliveries. Slack keys the logical message by workspace, conversation, and
@@ -170,7 +162,8 @@ and no superuser daemon connection is required.
 
 Proactive outbound emits (`agor_gateway_emit_message`) and Slack thread history reads made from a session are bound to that session's own branch: the gateway channel's target branch must match the calling session's branch, and there is no admin-role bypass. `agor_gateway_outbound_targets_list` only returns channels a session can actually use. Calls made without session context (personal API keys) follow the regular user-permission model instead.
 
-Discord outbound emits use a `channel:<snowflake>` target. A Discord outbound
+Discord outbound emits use a `channel:<snowflake>` target, or `user:<snowflake>`
+for a direct message when **Direct messages** is enabled. A server-channel outbound
 seed is recorded durably; the first eligible human reply to any seed chunk
 consumes that seed and starts the mapped session. Replies to later response
 chunks continue the same session.
@@ -268,7 +261,8 @@ Notes:
 Discord is intentionally narrow and explicit:
 
 - Each enabled row names one bot application, one guild, and one or more
-  allowlisted public parent channels. A privileged **Message Content** intent
+  allowlisted public parent channels: text channels, or forum channels, where
+  the bot answers mentions inside posts. A privileged **Message Content** intent
   must be enabled in Discord and acknowledged in the Agor configuration. A
   structured mention outside inline or fenced code is the wake-up trigger;
   mention text is not a substitute for the intent.
@@ -279,17 +273,89 @@ Discord is intentionally narrow and explicit:
   The configured auto-archive setting applies to threads Agor creates.
 - The channel and author boundaries are separate. Public parent channels,
   Discord user IDs, and Discord role IDs are all explicit allowlists; at least
-  one author allowlist entry is required. DMs, private threads, wrong guild or
-  channel, bot/self messages, webhooks, attachments, embeds, components,
-  stickers, polls, and messages without a structured mention are ignored.
+  one author allowlist entry is required. Private threads, wrong guild or
+  channel, bot/self messages, webhooks, embeds, components, stickers, polls,
+  and server messages without a structured mention are ignored. DMs are off by default. Attachment handling
+  is controlled separately by the explicit `files` capability below.
+- `files:false` is the default text-only behavior. With the explicit
+  `files:true` capability, a live message may include image (PNG, JPEG, GIF,
+  WebP) and text (.txt, .log, .md, .csv, .json) attachments; each is downloaded
+  from Discord's signed CDN URL into the existing tenant/session/branch upload
+  staging and exposed to the remote executor through its normal
+  materialization tool. Attachments never drop a message: any file the agent
+  cannot read (unsupported type, `files:false`, or a failed, expired, or
+  oversized download) is named in the prompt so the agent tells the user.
+  Per-file and per-message count/size limits still apply.
 - Identity is either (a) aligned through a tenant-owned Discord user ID → Agor
   email map, where an unmapped author is rejected, or (b) one explicitly chosen
   fixed Agor user. These modes are mutually exclusive. There is no fallback
   from an absent map entry to a fixed user.
 
+### Direct messages
+
+Enable **Direct messages** in the Discord settings (`direct_messages_enabled:true`,
+or `directMessages:true` in the setup tool) to receive 1:1 DMs. This adds the
+non-privileged `DIRECT_MESSAGES` gateway intent; it needs no extra portal toggle.
+Group DMs and events without an explicit 1:1 DM type are ignored.
+
+The sender must currently belong to the configured server and match an allowed
+user or role. Membership and roles are looked up live for each message. A failed,
+rate-limited, or timed-out lookup silently rejects that message without stopping
+the listener. No mention is required. Identity alignment and the `files` setting
+work as in server channels.
+
+Each person's DM conversation uses one session on the target branch, without a
+public thread. **DM content is visible to people with access to that branch.**
+The first message posts the session link; follow-ups do not post routing notices.
+There is no conversation-reset command.
+
+For a proactive DM, call `agor_gateway_emit_message` with `target: "user:<snowflake>"`.
+The channel must allow outbound messages, the caller must have emit permission,
+and a calling session must belong to the target branch. The recipient must be a
+current member of the configured server; unlike inbound DMs, they need not match
+an author allowlist. Membership is checked live before opening the DM.
+
+Failures are content-free and distinct: `discord_direct_messages_disabled`,
+`discord_dm_target_not_member`, or `discord_dm_unreachable` (Discord refuses the
+DM, including closed DMs or no mutual server). Refused sends are not recorded as
+delivered or retried. Discord may rate-limit or block a bot that opens many DMs;
+that can affect the whole bot. There is no bulk-send API.
+
+The person's next eligible message, plain or a Discord reply, goes to their one
+DM session—not the session that sent the proactive message. Earlier proactive
+DM texts since the last admitted message are included from Agor's stored records
+as untrusted context. The oldest texts are dropped first to fit the configured
+prompt-byte limit, with the exact omitted count; the person's message is always
+admitted. Several proactive messages do not create competing reply sessions.
+
+Stored proactive context is included at most once after admission. A message
+sent but not yet recorded when the reply is admitted can be missing from that
+context; it remains in Discord and the sending session. Deleting the DM session
+can cause older stored texts to appear again in the next new session.
+
+DMs never use Discord history as prompt context. Messages sent while the listener
+was down, DMs were disabled, or the sender was not allowed must be resent. Reply
+delivery may read the latest 100 messages to recover a send by nonce; those texts
+are discarded, not stored or used as context. Each reply first confirms the DM
+recipient; if Discord cannot be reached for that check, delivery retries, while a
+recipient mismatch or refusal is not retried.
+
+As in channel sessions, assistant replies and prompts marked as coming from Agor
+are delivered to the DM, including UI/agent prompts and replies to callbacks or
+widget continuations. A child-session callback prompt itself is not echoed.
+Prompt labels name the task creator, not verified authorship. Anyone able to
+prompt that session can make it write to the person even with proactive outbound
+messaging disabled or after they leave the server. The gateway route method
+cannot directly target DM mappings. Every send verifies the recorded channel is
+still a 1:1 DM with that person; replies do not re-check server membership.
+
+Turning DMs off takes effect after listener refresh. Queued tasks still run in
+Agor, but their replies are not delivered to Discord. Existing sessions remain.
+The connection probe reports the switch, but cannot verify end-to-end DM delivery.
+
 ### Catch-up and durability
 
-The live mention is the only wake-up trigger. After the mapping's last admitted
+For server channels, the live mention is the only wake-up trigger. After the mapping's last admitted
 Discord message cursor, Agor uses Discord REST history to fetch the bounded
 interval through the live mention, oldest first. The defaults are 5 pages, 200
 messages, 32 KiB of prompt context, a 30-second request timeout, 2 rate-limit
@@ -309,17 +375,52 @@ Discord transport state is stateless from Agor's durable perspective. Gateway
 sequence/session checkpoints, repair/redrive controls, provider history, and
 provider actions are not operator configuration or MCP resources. Only routing
 facts, admitted cursors, mappings/aliases, and the narrow final-response
-delivery path are durable. Responses are text-only (`files:false`) and expose
-no agent tools (`agent_tools:[]`). Text is split into Discord-sized chunks;
+delivery path are durable. Responses remain text-only. Agent tools are off
+unless enabled per row (see Agent channel history below). Inbound images are opt-in (`files:true`) and are
+materialized through the normal executor boundary; they are not conversation
+history. Text is split into Discord-sized chunks;
 reply aliases resolve to the same Agor session. This is not a promise of live
 Discord delivery or end-to-end provider guarantees: the connection test is an
 advisory probe, and provider outages or permissions can still prevent delivery.
 
 Proactive sends are the one deliberate seed exception. An authorized agent may
-target only `channel:<allowlisted-parent-snowflake>`. The send is recorded as a
+target only `channel:<allowlisted-text-channel-snowflake>`; forum channels
+cannot receive proactive messages. The send is recorded as a
 durable seed; the first eligible human reply consumes that seed and starts the
 mapped session without creating a summon thread. Replies to later response
 chunks continue through the compatibility aliases.
+
+### Agent channel history
+
+To let session agents read recent Discord messages, enable **Let session agents
+read channel history** in Settings → Gateway Channels, or set `channelHistory`
+in `agor_gateway_discord_setup`. The capability is off by default
+(`agent_tools: { channel_history: true }` enables it).
+
+Agents use `agor_gateway_discord_channel_history_get`:
+
+- Reads are limited to allowlisted public parent channels and public threads
+  under them, including forum posts (a forum itself has no messages). The bot
+  needs View Channel and Read Message History permissions.
+- In a session created by this gateway channel, the default target is the parent
+  channel of the session's thread, or the post itself in a forum. Other sessions on its target branch pass
+  `gatewayChannelId` and `discordChannelId`. Callers without session context
+  need admin role or `all` branch permission.
+- Results are chronological, with 50 messages by default and at most 200. Page
+  with either a `before` or an `after` message-ID cursor. Bot and system messages
+  are omitted unless `includeBotMessages` is true. Reads are bounded by the
+  gateway channel's catch-up limits; use `next_cursor` when `has_more` is true.
+
+The same capability enables `agor_gateway_discord_forum_posts_list`, which lists
+an allowlisted forum's posts with title, tags, author, reply count, and
+archived/locked state. It returns active posts by default, or archived posts
+with `archived: true`, newest first; page with `next_cursor`. In a forum post's
+session it defaults to that post's forum.
+
+Enabling this gives eligible sessions access through the bot, regardless of the
+Agor user's own Discord access. The bot token stays private, and message text
+is labeled untrusted. Returned messages become part of the calling session's
+transcript; Agor keeps no separate copy of Discord history.
 
 ### Setting up Discord
 
@@ -331,11 +432,19 @@ creates a Discord application or calls Discord. Before enabling a row:
    intent, and copy the Application ID and target Guild ID.
 2. Invite the bot to each allowlisted public parent channel with only the View
    Channel, Read Message History, Send Messages, Create Public Threads, and
-   Send Messages in Threads permissions needed by the contract.
+   Send Messages in Threads permissions needed by the contract. A forum channel
+   needs only View Channel, Read Message History, and Send Messages in Threads.
 3. Configure the explicit channel and user/role allowlists, thread mode,
-   auto-archive setting, bounded catch-up values, identity mode, `files:false`,
-   `agent_tools:[]`, and optional proactive target. Enter the bot token through
+   auto-archive setting, bounded catch-up values, identity mode, `files:false`
+   (or opt in to bounded image and text attachments with `files:true`),
+   agent tools (off by default), and optional proactive target. Enter the bot token through
    the secure credential form; do not paste it into chat or MCP arguments.
+   To admit every current guild member, add the Guild ID itself to the role
+   allowlist: it is Discord's @everyone role, which Discord never lists among a
+   member's roles. With a fixed run-as user, that lets anyone who can join the
+   server (including through a public invite) run sessions with that user's
+   branch access, credentials, and channel history if enabled. Prefer aligned
+   identity mode, which still rejects unmapped authors.
 4. Keep the row disabled while translating an old implicit configuration. Run
    the connection test if useful, then enable only after the explicit contract
    validates. A passing probe does not verify future event delivery,
@@ -661,12 +770,12 @@ authoritative mutation transaction.
 
 ### Discord
 
-- **Bot does not respond.** Confirm the row is enabled, has a valid bot token, and passes the shared configuration checks. The bot must be in the configured guild and public text channel with permission to view, read history, and send messages.
+- **Bot does not respond.** Confirm the row is enabled, has a valid bot token, and passes the shared configuration checks. The bot must be in the configured guild and public text or forum channel with permission to view, read history, and send messages (in threads, for a forum).
 - **Mentions are ignored.** Confirm the privileged Message Content intent is enabled and acknowledged. The structured bot mention is required on every prompt. The author must also match an allowed user ID or hold an allowed role ID, and the message must be in the configured public parent channel.
-- **Content is ignored.** DMs, private threads, attachments, embeds, components, stickers, polls, webhooks, and bot/self messages are outside the explicit contract by design.
+- **Content is narrow and explicit.** DMs, private threads, embeds, components, stickers, polls, webhooks, and bot/self messages are outside the contract. `files:false` keeps the channel text-only; opt-in `files:true` passes image and text attachments to the agent, staged through the existing owner-bound upload/materialization path. Other attachments do not block the message; the agent names the files it could not read.
 - **Catch-up did not run.** REST catch-up is bounded and only runs after a live structured mention. A human reply without a mention does not create a Task; a failed history read or Task admission leaves the admitted cursor unchanged.
 - **Reconnects.** Discord Gateway sequence/session state is process-local. Agor does not expose durable Discord resume/checkpoint configuration; the next live mention uses bounded REST catch-up after the last admitted cursor.
-- **Proactive replies.** Use `channel:<snowflake>` for the configured parent channel. Replies to any response chunk use its durable alias and continue the same session; the first human reply to a proactive seed consumes that seed without creating a summon thread.
+- **Proactive replies.** Use `channel:<snowflake>` for a configured text channel; forums cannot be proactive targets. Replies to any response chunk use its durable alias and continue the same session; the first human reply to a proactive seed consumes that seed without creating a summon thread.
 - **Token safety.** Enter bot tokens through the secure credential UI or token widget. Do not put them in chat or MCP arguments.
 
 ### GitHub
@@ -701,4 +810,4 @@ authoritative mutation transaction.
 - [Branch Scheduler](./scheduler). Automate recurring work on branches (complements gateway for event-driven vs. time-driven automation).
 - [Agor MCP Server](./internal-mcp). Give gateway-spawned agents full self-awareness and orchestration capabilities.
 - [Agent SDK Comparison](./sdk-comparison). Choose the right coding agent for your channel's use case.
-- [Spawned Subsessions](./spawned-subsessions). Gateway-created sessions can themselves spawn child sessions for parallel work.
+- [Spawned Subsessions](/guide/sessions#spawned-subsessions-with-callbacks). Gateway-created sessions can themselves spawn child sessions for parallel work.

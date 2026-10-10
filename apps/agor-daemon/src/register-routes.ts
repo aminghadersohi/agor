@@ -1,5 +1,7 @@
 import { resolveClaudeOAuthCapability } from '@agor/core/config';
 import { getPostgresSqlState, isPostgresDatabaseHandle } from '@agor/core/db';
+import { BRANCH_WORKSPACE_NOTIFICATION_DISMISS_SERVICE } from '@agor/core/types';
+import { BranchWorkspaceNotificationService } from './services/branch-workspace-notification';
 import { sandboxManagedCredentialIsolationAvailable } from './utils/sandbox-wrap.js';
 /**
  * Authentication & Custom REST Routes Registration
@@ -17,6 +19,7 @@ import {
   ENV_VAR_CONSTRAINTS,
   environmentCommandCapabilities,
   isEnvVarAllowed,
+  permanentBranchDeletionCapability,
   type ResolvedDeploymentConfig,
   type ResolvedExternalLaunchProvider,
   requireDeploymentId,
@@ -50,6 +53,7 @@ import {
   setMcpMemberPolicy,
   shortId,
   TaskRepository,
+  TenantDisplayRepository,
   type TenantScopeAwareDatabase,
   type TenantScopedDatabase,
   UploadRepository,
@@ -69,9 +73,9 @@ import {
   NotFound,
 } from '@agor/core/feathers';
 import {
+  isMCPServerNotUsableError,
   isMCPServerUsableBy,
   MCP_RUNTIME_PROVIDER_CAPABILITIES,
-  MCPServerNotUsableError,
   mcpRuntimeProviderCapability,
 } from '@agor/core/mcp';
 import type {
@@ -79,6 +83,8 @@ import type {
   BoardComment,
   BoardCommentReposition,
   BranchArchiveOrDeleteOptions,
+  CreateUserApiKeyRequest,
+  CurrentUserIdentity,
   HookContext,
   MCPMemberPolicy,
   MCPMemberPolicySetting,
@@ -113,9 +119,11 @@ import {
   isBranchArchiveOrDeleteOptions,
   isCanonicalFullUuid,
   isTaskPendingDispatch,
+  isUserApiKeySource,
   MCP_MEMBER_POLICIES,
   MCP_MEMBER_POLICY_CHANGED_EVENT,
   MessageRole,
+  normalizeRole,
   ROLES,
   SessionStatus,
   TaskStatus,
@@ -124,6 +132,7 @@ import {
 import { isNotFoundError } from '@agor/core/utils/errors';
 import type { NextFunction, Request, Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
+import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import {
   gatewaySlackUploadExecutorCommandId,
@@ -157,6 +166,7 @@ import type {
 } from './declarations.js';
 import { registerExecutorResponseRoutes } from './executor-response-channel.js';
 import { probeDatabase, probePendingMigrations } from './health/db-probe.js';
+import { authenticatedHealthInstance, publicHealthInstance } from './health/instance.js';
 import {
   authenticatedHealthDb,
   healthMigrations,
@@ -192,15 +202,19 @@ import {
 } from './permissions/deliver-permission-decision.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
 import type { GatewayService } from './services/gateway.js';
+import { authorizeCatalogCaller } from './services/mcp-catalog-access.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
 import { createMCPCatalogStartSessionService } from './services/mcp-catalog-start-session.js';
 import { isMCPOAuthGrantAuthorizedForServer } from './services/mcp-oauth-grant-authority.js';
+import { notifyMcpSlackConnectCard } from './services/mcp-slack-connect-card.js';
+import { createMCPSlackConnectCardControl } from './services/mcp-slack-connect-control.js';
 import {
   ScheduleBusyError,
   ScheduleNotReadyError,
   type SchedulerService,
 } from './services/scheduler.js';
 import { runSessionInitializationStages } from './services/session-initialization.js';
+import { createSpawnPromptService } from './services/session-spawn-prompt';
 import {
   lockTenantAuthorizationFence,
   resolveCurrentTenantAuthorityActor,
@@ -213,7 +227,7 @@ import {
   markLocalAuthenticationLookup,
 } from './services/users.js';
 import { resolveWebTerminalCapability } from './terminal-capability.js';
-import { forceFailUnverifiedTask } from './termination-coordinator.js';
+import { beginExecutorTermination, forceFailUnverifiedTask } from './termination-coordinator.js';
 import { createFeathersTracingHook } from './tracing/feathers.js';
 import {
   REMOVED_AGENTIC_TOOL_RUNTIME_MESSAGE,
@@ -297,10 +311,17 @@ import {
   enforceTotalUploadSize,
   getUploadLimits,
   type StagedMulterFile,
+  uploadContentHeaders,
 } from './utils/upload.js';
-import { toUploadErrorResponse, type UploadFailureStage } from './utils/upload-http-error.js';
+import {
+  classifyUploadAuthFailure,
+  toUploadErrorResponse,
+  type UploadAuthFailureDiagnostics,
+  type UploadFailureStage,
+  uuidOrUndefined,
+} from './utils/upload-http-error.js';
 import { getUploadStagingStore } from './utils/upload-staging.js';
-import { WidgetResolutionStore } from './widgets/resolution-store.js';
+import { WIDGET_RESOLUTION_STORE_KEY, WidgetResolutionStore } from './widgets/resolution-store.js';
 import { resolveWidget } from './widgets/submissions.js';
 
 export function appendResponseHeaderValue(
@@ -737,6 +758,8 @@ export function createRegisteredMCPCatalogConnectService(
     return tenantId ? runWithTenantDatabaseScope(db, tenantId, work) : work();
   };
   return createMCPCatalogConnectService(app, {
+    authorizeCaller: (params) =>
+      runInTenantDatabaseScope(params, () => authorizeCatalogCaller(db, params)),
     runInTenantDatabaseScope,
     async listCandidates(userId, params) {
       const read = async () => new MCPCatalogCandidateRepository(db).listForUser(userId);
@@ -750,13 +773,18 @@ export function createRegisteredMCPCatalogConnectService(
       const userId = params.user?.user_id as UserID | undefined;
       if (!userId) return false;
       const read = async () => {
+        // Verify against the full saved row: the candidate projection redacts
+        // configured client secrets, which the grant binding covers.
+        const server = await new MCPServerRepository(db).findById(candidate.server.mcp_server_id);
+        if (!server) return false;
+        // Same subject rule as execution: a Shared server's grant is the
+        // shared one; otherwise only the caller's own per-user grant.
         const grant = await new UserMCPOAuthTokenRepository(db).getCatalogGrantAuthority(
-          userId,
-          candidate.server.mcp_server_id
+          server.auth?.oauth_mode === 'shared' ? null : userId,
+          server.mcp_server_id
         );
         return Boolean(
-          grant?.has_access_token &&
-            (await isMCPOAuthGrantAuthorizedForServer(db, candidate.server, grant))
+          grant?.has_access_token && (await isMCPOAuthGrantAuthorizedForServer(db, server, grant))
         );
       };
       return runInTenantDatabaseScope(params, read);
@@ -806,6 +834,14 @@ export async function authenticateBearerHttpRequest(input: {
   };
 }
 
+/** Expose a bounded auth-failure reason to the upload route's failure log. */
+// biome-ignore lint/suspicious/noExplicitAny: Express 5 response locals
+function recordUploadAuthFailure(res: any, diagnostics: UploadAuthFailureDiagnostics): void {
+  res.locals ??= {};
+  res.locals.uploadFailureCode = `AUTH_${diagnostics.reason.toUpperCase()}`;
+  res.locals.uploadAuthFailure = diagnostics;
+}
+
 export function createUploadAuthMiddleware(input: {
   authentication: {
     create(
@@ -821,19 +857,53 @@ export function createUploadAuthMiddleware(input: {
       const authHeader = req.headers.authorization;
       const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
       if (!token) {
+        recordUploadAuthFailure(res, { reason: 'missing_bearer' });
         return res.status(401).json({ error: 'Authentication required' });
       }
 
-      req.feathers = await authenticateBearerHttpRequest({
-        authentication: input.authentication,
-        multiTenancy: input.multiTenancy,
-        headers: req.headers,
-        token,
-      });
+      try {
+        req.feathers = await authenticateBearerHttpRequest({
+          authentication: input.authentication,
+          multiTenancy: input.multiTenancy,
+          headers: req.headers,
+          token,
+        });
+      } catch (error) {
+        // Decoded without verification purely so the failure log can report
+        // the token's claimed subject and expiry; it grants nothing.
+        const unverified = jwt.decode(token, { json: true });
+        recordUploadAuthFailure(res, classifyUploadAuthFailure(error, unverified));
+        return res.status(401).json({ error: 'Authentication required' });
+      }
       next();
-    } catch {
+    } catch (error) {
+      recordUploadAuthFailure(res, classifyUploadAuthFailure(error));
       res.status(401).json({ error: 'Authentication required' });
     }
+  };
+}
+
+/** Called only after the Stop route's session lifecycle authorization and in trusted tenant scope. */
+export async function resolveCleanupRetryTarget(input: {
+  sessionId: SessionID;
+  body: Record<string, unknown>;
+  findTask: (taskId: string) => Promise<Task>;
+}): Promise<{ taskId: TaskID; requestedAt: string; revision: string }> {
+  const body = input.body;
+  if (
+    !isCanonicalFullUuid(body.expected_task_id) ||
+    typeof body.termination_requested_at !== 'string' ||
+    typeof body.recovery_revision !== 'string'
+  ) {
+    throw new BadRequest('An exact task and recovery request are required.');
+  }
+  const task = await input.findTask(body.expected_task_id as string);
+  if (task.session_id !== input.sessionId)
+    throw new Forbidden('This task belongs to another session.');
+  return {
+    taskId: task.task_id,
+    requestedAt: body.termination_requested_at,
+    revision: body.recovery_revision,
   };
 }
 
@@ -1770,8 +1840,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
    *     before the executor process is forked. Without this, any crash
    *     during executor startup loses the prompt from the chat transcript
    *     even though `tasks.full_prompt` still has the text. Gated by
-   *     `config.execution.daemon_writes_user_message` (kill switch — see
-   *     §5.E of `docs/never-lose-prompt-design.md`).
+   *     `config.execution.daemon_writes_user_message` (kill switch).
    *   - `task.metadata.is_agor_callback` / `task.metadata.source` are
    *     re-stamped onto the new message so the UI's callback styling
    *     (`MessageBlock.tsx`) survives the queue → run transition.
@@ -2531,52 +2600,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   registerAuthenticatedRoute(
     app,
     '/sessions/:id/spawn-prompt',
-    {
-      async create(
-        data: {
-          userPrompt?: string;
-          /**
-           * Permission mode for the *parent* session's prompt. The spawn
-           * config's `permissionMode` (child's intended mode) is rendered into
-           * the meta-prompt; this field governs how the parent prompt is sent.
-           */
-          parentPermissionMode?: import('@agor/core/types').PermissionMode;
-          // Remaining fields are spawn-subsession context (incl. the *child*
-          // session's permissionMode/modelConfig/etc) — see
-          // `SpawnSubsessionContext` in @agor/core for the shape.
-          [key: string]: unknown;
-        },
-        params: RouteParams
-      ) {
-        const id = params.route?.id;
-        if (!id) throw new BadRequest('Session ID required');
-        if (typeof data?.userPrompt !== 'string') {
-          throw new BadRequest('userPrompt (string) is required');
-        }
-
-        const { renderSpawnSubsessionPrompt } = await import(
-          '@agor/core/templates/spawn-subsession-template'
-        );
-        // Render the meta-prompt against the child-session config (the rest
-        // of `data`). `parentPermissionMode` is intentionally excluded — it's
-        // the parent's send-mode, not part of the template.
-        const { parentPermissionMode, ...spawnContext } = data;
-        const metaPrompt = renderSpawnSubsessionPrompt(
-          spawnContext as unknown as import('@agor/core/templates/spawn-subsession-template').SpawnSubsessionContext
-        );
-
-        const promptService = app.service('/sessions/:id/prompt');
-        return promptService.create(
-          {
-            prompt: metaPrompt,
-            permissionMode: parentPermissionMode,
-            messageSource: 'agor',
-            metadata: { system_authored: true },
-          },
-          { ...params, provider: undefined, route: { id } }
-        );
-      },
-    },
+    createSpawnPromptService(app),
     {
       create: { role: ROLES.MEMBER, action: 'send spawn-subsession prompts' },
     },
@@ -2943,6 +2967,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           code: res.locals.uploadFailureCode ?? `HTTP_${res.statusCode}`,
           status: res.statusCode,
           type: res.locals.uploadFailureType ?? 'request',
+          route: '/sessions/:sessionId/upload',
+          session_id: uuidOrUndefined(req.params?.sessionId),
+          // Verified identity once authentication succeeded; otherwise the
+          // rejected token's claimed (unverified) subject and expiry.
+          user_id: (req as { feathers?: AuthenticatedParams }).feathers?.user?.user_id,
+          auth_reason: res.locals.uploadAuthFailure?.reason,
+          token_sub_unverified: res.locals.uploadAuthFailure?.claimedSubject,
+          token_expires_at_unverified: res.locals.uploadAuthFailure?.claimedExpiresAt,
         })
       );
     });
@@ -3087,22 +3119,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           res.setHeader('Content-Range', `bytes ${offset}-${offset + length - 1}/${upload.size}`);
         }
         const stream = await store.read({ ...readOwner, offset, ...(length ? { length } : {}) });
-        res.setHeader('Content-Type', upload.mimeType || 'application/octet-stream');
+        // Never echo an arbitrary client-declared MIME: see uploadContentHeaders.
+        for (const [name, value] of Object.entries(uploadContentHeaders(upload))) {
+          res.setHeader(name, value);
+        }
         res.setHeader('Content-Length', String(length ?? upload.size));
         res.setHeader('Accept-Ranges', 'bytes');
-        res.setHeader('Cache-Control', 'private, no-store');
-        res.setHeader('X-Content-Type-Options', 'nosniff');
-        const safeInline = new Set([
-          'image/png',
-          'image/jpeg',
-          'image/gif',
-          'image/webp',
-          'application/pdf',
-        ]);
-        res.setHeader(
-          'Content-Disposition',
-          `${safeInline.has(upload.mimeType) ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(upload.displayName)}`
-        );
         stream.once('error', (error) => res.destroy(error as Error));
         res.once('close', () =>
           (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.()
@@ -3289,6 +3311,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                 app,
                 taskId: target.task.task_id,
                 terminationRequestedAt: target.terminationRequestedAt,
+                recoveryRevision:
+                  typeof body.recovery_revision === 'string' ? body.recovery_revision : undefined,
                 confirmation: target.confirmation,
                 params,
               })
@@ -3310,6 +3334,52 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           });
           triggerPreservedQueue();
           return result;
+        }
+
+        if (body.retry_cleanup === true) {
+          const tasksService = app.service('tasks') as unknown as TasksServiceImpl;
+          const { target, retry } = await runInFreshTerminationTenantWriteDatabase(async () => {
+            const target = await resolveCleanupRetryTarget({
+              sessionId: session.session_id,
+              body,
+              findTask: (taskId) => app.service('tasks').get(taskId, params),
+            });
+            const retry = await tasksService.retryTermination(
+              target.taskId,
+              target.requestedAt,
+              target.revision,
+              { ...params, provider: undefined }
+            );
+            return { target, retry };
+          });
+          const taskId = target.taskId;
+          if (!retry?.termination_request)
+            return {
+              success: false,
+              outcome: 'condition_changed',
+              reason: 'Recovery has already changed. Check the latest session status.',
+              stoppedTaskId: taskId,
+            };
+          // The retry marker commits before this begins; realtime owns progress, not a long UI request.
+          await beginExecutorTermination({
+            app,
+            taskId,
+            cause: retry.termination_request.cause,
+            errorMessage:
+              retry.termination_request.error_message ?? 'The agent stopped responding.',
+            params,
+            remoteConnectDeadlineExpired: true,
+            allowUnownedLocalContainment: true,
+            runInFreshTenantWriteDatabase: runInFreshTerminationTenantWriteDatabase,
+          });
+          return {
+            success: false,
+            outcome: 'pending',
+            status: SessionStatus.STOPPING,
+            pendingCode: 'coordination_in_progress',
+            reason: 'Retrying cleanup.',
+            stoppedTaskId: taskId,
+          };
         }
 
         const stopReason = typeof body.reason === 'string' ? body.reason : undefined;
@@ -3670,25 +3740,36 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // ============================================================================
   // Widget submission / dismissal endpoints
   //
-  // See `docs/internal/in-conversation-widgets-design-2026-05-19.md`. The
-  // resolver handles auth, idempotency, registry dispatch, message patching,
+  // The resolver handles auth, idempotency, registry dispatch, message patching,
   // auto-resume task queueing, and the `widget:resolved` broadcast.
   // ============================================================================
 
   const widgetResolutionMessages = bindRepositoryToTenantUnitOfWork(db, new MessagesRepository(db));
   const widgetResolutionBranches = bindRepositoryToTenantUnitOfWork(db, new BranchRepository(db));
+  const widgetResolutionStore = new WidgetResolutionStore(widgetResolutionMessages, (message) => {
+    emitServiceEvent(app, {
+      path: 'messages',
+      event: 'patched',
+      data: message,
+      id: message.message_id,
+    });
+    // A widget that also has a Slack card must retire, redraw, or complete it
+    // in the same breath. This is the one writer of widget lifecycle state, so
+    // hooking it here means no transition — resolve, fail, supersede — can
+    // leave a live Connect button in a thread behind a settled row.
+    notifyMcpSlackConnectCard(app, message);
+  });
+  // Every writer of widget lifecycle state goes through this one store, so it
+  // is published where an in-process caller that is not a route can reach it —
+  // notably the MCP tool that supersedes a replaced Connect button. The
+  // repository is bound to the tenant unit of work, so it resolves its tenant
+  // from the caller's ambient scope rather than from whoever constructed it.
+  app.set(WIDGET_RESOLUTION_STORE_KEY, widgetResolutionStore);
   const widgetResolverDeps = {
     // biome-ignore lint/suspicious/noExplicitAny: Feathers Application shape
     app: app as any,
     runInTenantDatabaseScope: inCurrentTenantDatabaseScope,
-    resolutionStore: new WidgetResolutionStore(widgetResolutionMessages, (message) =>
-      emitServiceEvent(app, {
-        path: 'messages',
-        event: 'patched',
-        data: message,
-        id: message.message_id,
-      })
-    ),
+    resolutionStore: widgetResolutionStore,
     publishResolved: (payload: Record<string, unknown>) =>
       emitServiceEvent(app, {
         path: 'messages',
@@ -3731,6 +3812,35 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     },
     {
       create: { role: ROLES.MEMBER, action: 'submit widgets' },
+    },
+    requireAuth
+  );
+
+  // The OAuth lane. The browser has finished the provider flow and is asking
+  // the daemon to check; it supplies no server id and no payload worth
+  // trusting, so everything that decides the outcome is read server-side from
+  // the pinned widget params and the persisted grant.
+  registerLongAuthenticatedRoute(
+    app,
+    '/widgets/:id/oauth-resolve',
+    {
+      async create(data: { attempt_id?: unknown } | undefined, params: RouteParams) {
+        const widgetId = params.route?.id;
+        if (!widgetId) throw new Error('Widget ID required');
+        if (!params.user?.user_id) {
+          throw new NotAuthenticated('Authentication required to resolve a widget');
+        }
+        const attemptId = typeof data?.attempt_id === 'string' ? data.attempt_id : undefined;
+        return resolveWidget(
+          widgetId,
+          { kind: 'oauth_callback', evidence: { attempt_id: attemptId } },
+          { user_id: params.user.user_id as UUID, role: params.user.role as string | undefined },
+          widgetResolverDeps
+        );
+      },
+    },
+    {
+      create: { role: ROLES.MEMBER, action: 'resolve OAuth widgets' },
     },
     requireAuth
   );
@@ -3865,7 +3975,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
            *  passes the viewport center so the new card lands where the
            *  user invoked the dialog. */
           position?: { x: number; y: number };
-          // Branch storage model — see context/explorations/clone-redesign.md.
+          // Branch storage model.
           storage_mode?: 'worktree' | 'clone';
           clone_depth?: number;
         },
@@ -3904,7 +4014,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
-  registerAuthenticatedRoute(
+  // Long route: `.agor.yml` is read by an executor, so tenant identity is armed
+  // without a request-long transaction and the service opens a short unit per
+  // database access (see ReposService.importFromAgorYml).
+  registerLongAuthenticatedRoute(
     app,
     '/repos/:id/import-agor-yml',
     {
@@ -3949,12 +4062,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
 
   registerAuthenticatedRoute(
     app,
+    // Literal on purpose: the realtime-publish and tenant-classification source
+    // scans read registered paths from this file (USER_API_KEYS_SERVICE_PATH).
     '/api/v1/user/api-keys',
     {
       async find(params: AuthenticatedParams) {
         return userApiKeysService.find(params);
       },
-      async create(data: { name: string }, params: AuthenticatedParams) {
+      async create(data: CreateUserApiKeyRequest, params: AuthenticatedParams) {
         return userApiKeysService.create(data, params);
       },
       async patch(id: string, data: { name?: string }, params: AuthenticatedParams) {
@@ -3972,6 +4087,43 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       patch: { role: ROLES.MEMBER, action: 'update API keys' },
       remove: { role: ROLES.MEMBER, action: 'delete API keys' },
     },
+    requireAuth
+  );
+
+  // Credential self-check for non-browser clients (`agor login --api-key`).
+  // Returns only the caller's own identity and the tenant the request was
+  // authenticated in, so a raw key can be validated without exchanging it for
+  // refresh-capable browser tokens.
+  registerAuthenticatedRoute(
+    app,
+    '/api/v1/user/me', // USER_IDENTITY_SERVICE_PATH; literal for the source scans
+    {
+      async find(params: AuthenticatedParams): Promise<CurrentUserIdentity> {
+        const user = params.user;
+        if (!user) throw new NotAuthenticated('Authentication required');
+        const authentication = params.authentication as
+          | { strategy?: string; api_key_id?: unknown; api_key_source?: unknown }
+          | undefined;
+        return {
+          user_id: user.user_id as UserID,
+          email: user.email,
+          name: (user as { name?: string }).name,
+          role: normalizeRole(user.role),
+          tenant_id: params.tenant?.tenant_id,
+          auth_strategy: authentication?.strategy,
+          ...(authentication?.strategy === 'api-key' &&
+          typeof authentication.api_key_id === 'string'
+            ? {
+                api_key_id: authentication.api_key_id,
+                api_key_source: isUserApiKeySource(authentication.api_key_source)
+                  ? authentication.api_key_source
+                  : 'manual',
+              }
+            : {}),
+        };
+      },
+    },
+    { find: { role: ROLES.VIEWER, action: 'read own identity' } },
     requireAuth
   );
 
@@ -4177,7 +4329,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   );
 
   // Explicit, non-destructive repair for a branch whose filesystem provisioning
-  // landed in 'failed'. A stranded 'creating' attempt is not retryable. Shares
+  // landed in 'failed', or an active stale archive outcome. Creating is not retryable. Shares
   // the exact same service implementation the MCP tool and UI use, so REST, MCP
   // and UI can never drift. A live 'creating' attempt conflicts, 'ready' no-ops;
   // the transition is an atomic claim. Returns the (possibly-updated) branch row.
@@ -4200,11 +4352,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       // in the service (not here) is what keeps REST, MCP and the UI on one
       // check.
       //
-      // Identity split (intentional): the caller must hold branch control, but
-      // the executor runs as `branch.created_by`, not as the caller. That
-      // mirrors the create path (the directory must be materialized as its
-      // owner to be usable) and re-runs provisioning the owner already
-      // initiated, so it grants no capability the owner had not exercised.
+      // Recovery uses the authorized caller's execution identity and credentials.
       create: { role: ROLES.MEMBER, action: 'retry branch provisioning' },
     },
     requireAuth
@@ -4265,6 +4413,30 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
+  registerAuthenticatedRoute(
+    app,
+    BRANCH_WORKSPACE_NOTIFICATION_DISMISS_SERVICE,
+    new BranchWorkspaceNotificationService(db),
+    { create: { role: ROLES.VIEWER, action: 'dismiss branch workspace notifications' } },
+    requireAuth
+  );
+  app.service(BRANCH_WORKSPACE_NOTIFICATION_DISMISS_SERVICE).hooks({
+    after: {
+      create: [
+        async (context: HookContext) => {
+          emitServiceEvent(app, {
+            path: 'branches',
+            event: 'patched',
+            data: context.result,
+            params: context.params,
+            id: (context.result as import('@agor/core/types').Branch).branch_id,
+          });
+          return context;
+        },
+      ],
+    },
+  });
+
   app.use('/branches/:id/clean', {
     async create(data: unknown, params: RouteParams) {
       if (
@@ -4284,6 +4456,28 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   app.service('/branches/:id/clean').hooks({
     around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
     before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'clean branches')] },
+  });
+
+  // Explicit, metadata-only retirement: same tenant/write boundary as cleanup.
+  app.use('/branches/:id/retire-teammate', {
+    async create(data: unknown, params: RouteParams) {
+      if (
+        !params.route?.id ||
+        !data ||
+        typeof data !== 'object' ||
+        Array.isArray(data) ||
+        Object.keys(data).length
+      )
+        throw new BadRequest('Retirement accepts an empty body and branch route ID only');
+      return branchesService.retireTeammate(
+        params.route.id as import('@agor/core/types').BranchID,
+        params
+      );
+    },
+  });
+  app.service('/branches/:id/retire-teammate').hooks({
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
+    before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'retire teammates')] },
   });
 
   // Archive/delete branch
@@ -5122,6 +5316,17 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         const session = await authorizeAndLoadSessionForMcpConfig(id, params, {
           allowExecutorProjection: true,
         });
+        if (params.query?.available === true || params.query?.available === 'true') {
+          // Configuration choices are not administrative inventory. Even admins
+          // may attach private rows only to their owner's sessions, and a shared
+          // session must not offer credentials belonging to a different caller.
+          await authorizeAndLoadSessionForMcpConfig(id, params);
+          const candidates = await sessionMCPServersService.listAvailableServers(
+            session,
+            params.user?.user_id as UserID | undefined
+          );
+          return candidates.map(redactMCPServerSecrets);
+        }
         const enabledOnly =
           params.query?.enabledOnly === 'true' || params.query?.enabledOnly === true;
         const includeGlobal =
@@ -5277,7 +5482,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             params
           );
         } catch (error) {
-          if (error instanceof MCPServerNotUsableError) {
+          if (isMCPServerNotUsableError(error)) {
             throw new Forbidden('That MCP server is private to another user');
           }
           throw error;
@@ -5338,7 +5543,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             )
           );
         } catch (error) {
-          if (error instanceof MCPServerNotUsableError) {
+          if (isMCPServerNotUsableError(error)) {
             throw new Forbidden('That MCP server is private to another user');
           }
           throw error;
@@ -6183,6 +6388,44 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     requireAuth
   );
 
+  /**
+   * The Slack MCP connect card's kill switch, as something an operator can
+   * actually reach.
+   *
+   * It was a setting with a setter and no caller: `setMCPSlackConnectCardEnabled`
+   * is plumbing, and "write an app variable by hand" is not an incident
+   * procedure. This is the narrow control surface that makes the switch
+   * operable — read it, change it, and read back what took effect, for the
+   * caller's tenant and no other.
+   *
+   * Narrow on purpose:
+   *
+   *  - Admin for BOTH methods. Unlike `/mcp-egress/status`, nothing here is a
+   *    statement about the caller's own capabilities, so there is no answer a
+   *    non-admin needs. A member who cannot see the switch is not shown a
+   *    control that fails.
+   *  - One tenant per call, because the setting is one app variable per tenant
+   *    and a deployment-wide incident is one write per tenant — exactly as
+   *    `mcp_egress_gateway.mode` is. The response names the tenant it acted on
+   *    so an operator working through several can prove which.
+   *  - No third state. `enabled` is a boolean; an unreadable or mistyped value
+   *    leaves the card ON (`isMCPSlackConnectCardEnabled`), deliberately, and
+   *    this route never writes one.
+   *
+   * The operator runbook — including what happens to work stranded while it
+   * is off — is in the MCP Administration guide (`mcp-administration.mdx`).
+   */
+  registerAuthenticatedRoute(
+    app,
+    '/mcp-slack-connect/card',
+    createMCPSlackConnectCardControl(db),
+    {
+      find: { role: ROLES.ADMIN, action: 'read the Slack MCP connect card switch' },
+      patch: { role: ROLES.ADMIN, action: 'change the Slack MCP connect card switch' },
+    },
+    requireAuth
+  );
+
   // ============================================================================
   // MCP marketplace connect
   // ============================================================================
@@ -6427,7 +6670,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             try {
               await sessionMCPServersService.setServers(session.session_id, serverIds, params);
             } catch (error) {
-              if (error instanceof MCPServerNotUsableError) {
+              if (isMCPServerNotUsableError(error)) {
                 throw new Forbidden('An MCP server is private to another user');
               }
               throw error;
@@ -6513,16 +6756,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           identity: identityAuthority,
           passwordPolicy,
         },
-        instance: {
-          label: config.daemon?.instanceLabel,
-          description: config.daemon?.instanceDescription,
-        },
+        instance: publicHealthInstance(config),
         realtime: realtimeRuntime
           ? { required: true, ready: realtimeRuntime.isReady() }
           : { required: false, ready: true },
         features: {
           environmentDisclaimerMarkdown: config.environment_disclaimer_markdown,
           environmentCommands: environmentCommandCapabilities(config),
+          permanentBranchDeletion: permanentBranchDeletionCapability(config),
           teammateFrameworkRepoUrl: resolveTeammateFrameworkRepoUrl(config),
           // Web terminal availability: UI should hide terminal buttons when false.
           // Server-side gate in register-hooks.ts is the source of truth; this
@@ -6585,6 +6826,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           getMCPEgressGatewayMode(tenantDb)
         );
         const mcpEgressRuntime = mcpEgressGateway.status(healthTenantId);
+        const instance = await authenticatedHealthInstance(config, () =>
+          runWithTenantDatabaseScope(db, healthTenantId, (tenantDb) =>
+            new TenantDisplayRepository(tenantDb).find()
+          )
+        );
 
         return {
           ...publicResponse,
@@ -6592,6 +6838,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           // (never in the public payload).
           db: authenticatedHealthDb(dbProbe),
           migrations: healthMigrations(migrations),
+          instance,
           database: databaseInfo,
           auth: {
             ...publicResponse.auth,

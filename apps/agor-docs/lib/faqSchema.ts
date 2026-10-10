@@ -26,7 +26,7 @@ const faqItems: Array<{ question: string; answer: string }> = [
   {
     question: 'Why a spatial layout for AI coding sessions?',
     answer:
-      'Because your brain thinks spatially and complex work is inherently non-linear. A 2D board gives every branch and session a "place" (location-based memory), lets workflows organize organically, supports zones as visual workflow stages, and makes real-time multiplayer collaboration natural — like Figma for AI coding.',
+      'Because your brain thinks spatially and complex work is inherently non-linear. A 2D board gives every branch and session a "place" (location-based memory), lets workflows organize organically, supports zones as visual workflow stages, and makes real-time collaboration between people and agents natural.',
   },
   {
     question: 'Zones? Zone "triggers"?',
@@ -51,7 +51,7 @@ const faqItems: Array<{ question: string; answer: string }> = [
   {
     question: 'What should I know before sharing my sessions?',
     answer:
-      "Session sharing also shares the session owner's execution home. Prompts remain attributed to the caller and use the caller's Agor-managed environment variables and credentials, but the caller and their agents may be able to inspect or change anything already stored in the owner's home, including unrelated session metadata, dotfiles, and tool credential files such as ~/.codex/auth.json. Use it only between highly trusted parties or with a deliberately shared service identity. A safer alternative is read access to the original session plus a new caller-owned session. Per-session homes are planned; until then, continuing another person's native session requires sharing its home.",
+      "Session sharing applies only to branch-home Sessions, after a workspace admin enables it and a Board or Branch Manager opts in. Collaborators and Managers continue the shared conversation and branch SDK state, but each task uses the actual caller's execution home, managed variables, credentials, and private MCP visibility. Execution-home Sessions remain private. People who can prompt can read and influence the conversation. Disabling workspace sharing clears all board and branch opt-ins.",
   },
   {
     question: 'When should I fork a session vs create a new branch?',
