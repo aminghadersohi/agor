@@ -292,6 +292,16 @@ describe('useAppNavigation.goToTeammates', () => {
   });
 });
 
+describe('useAppNavigation.goToChatWorkspace', () => {
+  it('pushes the workspace for a session, and its bare rail without one', () => {
+    const { result } = renderHook(() => useTestNav({}), { wrapper: wrap('/') });
+    act(() => result.current.nav.goToChatWorkspace('01a012d8-4f50-7c32-9daa-6e3f70819b2c'));
+    expect(result.current.pathname).toBe('/chats/01a012d84f507c329daa6e3f/');
+    act(() => result.current.nav.goToChatWorkspace());
+    expect(result.current.pathname).toBe('/chats/');
+  });
+});
+
 describe('useAppNavigation.goBack', () => {
   it('pops to Home when opened from it, and goes Home on the current shell otherwise', () => {
     const fromHome = renderHook(() => useTestNav({}), { wrapper: wrap('/') });

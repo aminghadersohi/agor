@@ -17,6 +17,7 @@ import type {
   Message,
   PermissionScope,
   SessionID,
+  Task,
   User,
 } from '@agor-live/client';
 import { shortId, TaskStatus } from '@agor-live/client';
@@ -30,6 +31,7 @@ import { useCopyToClipboard } from '../../utils/clipboard';
 import { BrandMark } from '../BrandMark';
 import { HistoryTextChoices } from '../MessageBlock/HistoryMarkdown';
 import { TaskBlock } from '../TaskBlock';
+import { useConversationHistory } from './useConversationHistory';
 
 const { Text } = Typography;
 const EMPTY_STREAMING_MESSAGES = new Map();
@@ -40,6 +42,26 @@ const EMPTY_USER_MAP = new Map<string, User>();
 // reference for tasks whose messages haven't been loaded — otherwise `|| []`
 // would mint a fresh array on every render and thrash TaskBlock's React.memo.
 const EMPTY_MESSAGES: Message[] = [];
+const MAX_REMEMBERED_CONVERSATION_SCROLLS = 100;
+/** In-memory reading positions for the chat workspace; never persisted, bounded LRU. */
+const rememberedConversationScrolls = new Map<
+  SessionID,
+  { atBottom: boolean; scrollTop: number }
+>();
+
+function rememberConversationScroll(
+  sessionId: SessionID,
+  value: { atBottom: boolean; scrollTop: number }
+): void {
+  rememberedConversationScrolls.delete(sessionId);
+  rememberedConversationScrolls.set(sessionId, value);
+  const oldest = rememberedConversationScrolls.keys().next().value;
+  if (rememberedConversationScrolls.size > MAX_REMEMBERED_CONVERSATION_SCROLLS && oldest) {
+    rememberedConversationScrolls.delete(oldest);
+  }
+}
+
+const EMPTY_TASKS: Task[] = [];
 
 export interface ConversationViewProps {
   /**
@@ -140,6 +162,9 @@ export interface ConversationViewProps {
 
   /** Hide operational detail and keep the transcript conversation-first. */
   simple?: boolean;
+
+  /** Remember deliberate scroll-away positions while switching among workspace chats. */
+  rememberScrollPosition?: boolean;
 }
 
 const ConversationViewInner = React.memo<ConversationViewProps>(
@@ -163,6 +188,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     onOpenAgenticToolSettings,
     compact = false,
     simple = false,
+    rememberScrollPosition = false,
   }) => {
     const { token } = theme.useToken();
     const [copied, copy] = useCopyToClipboard();
@@ -243,25 +269,6 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
       scrollToBottom({ animation: 'instant' });
     }, [state, scrollToBottom]);
 
-    // Scroll to top. While content is still streaming/growing, the library's
-    // persistent observer can re-pin to the bottom before our scrollTop write
-    // takes effect, snapping the user right back down. `stopScroll()`
-    // synchronously releases the bottom lock (and cancels any in-flight scroll
-    // animation) so the scrollTop = 0 sticks.
-    const scrollToTop = useCallback(() => {
-      stopScroll();
-      if (scrollRef.current) {
-        scrollRef.current.scrollTop = 0;
-      }
-    }, [scrollRef, stopScroll]);
-
-    // Expose scroll functions to parent
-    useEffect(() => {
-      if (onScrollRef) {
-        onScrollRef(handleScrollToBottom, scrollToTop);
-      }
-    }, [onScrollRef, handleScrollToBottom, scrollToTop]);
-
     const { handle: reactiveSession, state: reactiveState } = useSharedReactiveSession(
       client,
       sessionId,
@@ -314,6 +321,22 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     // is monotonic for this mount, including messages arriving late in a turn.
     if (newlyProtected.length) setProtectedTurns(new Set([...protectedTurns, ...newlyProtected]));
 
+    // Bound the mounted transcript. A reopened conversation whose shared
+    // reactive session already holds a long reached history mounts only its
+    // newest page of task blocks; older ones stay behind "Show older tasks".
+    const { visibleTasks, olderCount, revealOlder, revealAllAtTop } = useConversationHistory(
+      sessionId,
+      initialHydrationPending ? EMPTY_TASKS : tasks,
+      scrollRef,
+      stopScroll
+    );
+
+    // Expose scroll functions to parent. Explicit top navigation reaches the
+    // complete fetched conversation, not just the bounded tail.
+    useEffect(() => {
+      onScrollRef?.(handleScrollToBottom, revealAllAtTop);
+    }, [onScrollRef, handleScrollToBottom, revealAllAtTop]);
+
     // Land at the bottom on panel open / session switch — but only once real
     // content is mounted. On a cold open ConversationView early-returns <Spin/>
     // (scrollRef/contentRef unmounted), so firing before tasks exist is a no-op
@@ -321,11 +344,43 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     // mounts. handleScrollToBottom also clears the escape so the library's
     // persistent observer reliably follows lazy/streamed growth from there.
     const hasContent = tasks.length > 0 && !initialHydrationPending;
+
+    // Capture the outgoing chat before its transcript DOM goes away (a session
+    // switch remounts this view). Only in-memory viewport state is kept: chats
+    // left at the tail reopen at the new tail, while a chat deliberately
+    // scrolled away from the bottom returns to that reading position.
+    useLayoutEffect(() => {
+      if (!rememberScrollPosition || !sessionId) return;
+      return () => {
+        const scroller = scrollRef.current;
+        if (!scroller) return;
+        rememberConversationScroll(sessionId, {
+          atBottom: state.isAtBottom && !state.escapedFromLock,
+          scrollTop: scroller.scrollTop,
+        });
+      };
+    }, [rememberScrollPosition, scrollRef, sessionId, state]);
+
     useEffect(() => {
-      if (isActive && sessionId && hasContent) {
-        handleScrollToBottom();
+      if (!isActive || !sessionId || !hasContent) return;
+      const remembered = rememberScrollPosition
+        ? rememberedConversationScrolls.get(sessionId)
+        : undefined;
+      if (remembered && !remembered.atBottom) {
+        stopScroll();
+        if (scrollRef.current) scrollRef.current.scrollTop = remembered.scrollTop;
+        return;
       }
-    }, [isActive, sessionId, hasContent, handleScrollToBottom]);
+      handleScrollToBottom();
+    }, [
+      isActive,
+      sessionId,
+      hasContent,
+      handleScrollToBottom,
+      rememberScrollPosition,
+      scrollRef,
+      stopScroll,
+    ]);
 
     const loading = currentReactiveState ? currentReactiveState.loading : !!sessionId;
     const error = currentReactiveState?.error || null;
@@ -362,6 +417,8 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
     }, [reactiveSession]);
     const loadOlder = useCallback(async () => {
       if (!reactiveSession || olderInflight.current || !currentReactiveState?.hasOlderTasks) return;
+      // Already-fetched tasks still hidden by the render bound come first.
+      if (olderCount > 0) return;
       const viewport = scrollRef.current;
       if (!viewport) return;
       stopScroll();
@@ -387,7 +444,14 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
           setLoadingOlder(false);
         }
       }
-    }, [reactiveSession, currentReactiveState?.hasOlderTasks, scrollRef, stopScroll, sessionId]);
+    }, [
+      reactiveSession,
+      currentReactiveState?.hasOlderTasks,
+      olderCount,
+      scrollRef,
+      stopScroll,
+      sessionId,
+    ]);
     useLayoutEffect(() => {
       const anchor = olderAnchor.current;
       if (!anchor || loadingOlder || !scrollRef.current) return;
@@ -557,13 +621,18 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
             {!simple && <GenealogyBanner />}
 
             {error && <Alert type="error" title={error} />}
-            {currentReactiveState?.hasOlderTasks && (
+            {olderCount > 0 && (
+              <Button onClick={revealOlder} block>
+                Show older tasks ({olderCount} remaining)
+              </Button>
+            )}
+            {olderCount === 0 && currentReactiveState?.hasOlderTasks && (
               <Button loading={loadingOlder} onClick={() => void loadOlder()}>
                 Load older history
               </Button>
             )}
             {/* Task-organized conversation */}
-            {tasks.map((task, taskIndex) => (
+            {visibleTasks.map((task, taskIndex) => (
               <TaskBlock
                 key={task.task_id}
                 task={task}
@@ -585,7 +654,7 @@ const ConversationViewInner = React.memo<ConversationViewProps>(
                 onLoadTaskMessages={handleLoadTaskMessages}
                 teammateEmoji={teammateEmoji}
                 teammateAvatarUrl={teammateAvatarUrl}
-                isLatestTask={taskIndex === tasks.length - 1}
+                isLatestTask={taskIndex === visibleTasks.length - 1}
                 client={client}
                 onOpenAgenticToolSettings={onOpenAgenticToolSettings}
                 compact={compact}

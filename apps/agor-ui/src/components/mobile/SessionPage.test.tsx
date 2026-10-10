@@ -44,7 +44,7 @@ function renderAt(
   actions: Pick<AppActionsContextValue, 'onOpenBranch' | 'onOpenAgenticToolSettings'> &
     Pick<
       React.ComponentProps<typeof SessionPage>,
-      'onUpdateSessionMcpServers' | 'onUpdateSessionEnvSelections'
+      'onUpdateSessionMcpServers' | 'onUpdateSessionEnvSelections' | 'onPinToChatCollection'
     > = {}
 ) {
   return render(
@@ -116,6 +116,23 @@ describe('SessionPage', () => {
     expect(settingsModalProps.onUpdateSessionMcpServers).toBe(handlers.onUpdateSessionMcpServers);
     expect(settingsModalProps.onUpdateSessionEnvSelections).toBe(
       handlers.onUpdateSessionEnvSelections
+    );
+  });
+
+  it('forwards the chat collection action to SessionPanel', () => {
+    const sessionId = '01a012d8-4f50-7c32-9daa-6e3f70819b2c';
+    const onPinToChatCollection = vi.fn();
+    sessionPanelProps.mockClear();
+    renderAt(
+      `/m/session/${sessionId}`,
+      new Map([[sessionId, { session_id: sessionId, status: 'idle' } as Session]]),
+      { onPinToChatCollection }
+    );
+
+    // The chat-collection action lives in SessionPanel's own header and actions
+    // menu, so this page's contract is forwarding the handler to it.
+    expect(sessionPanelProps).toHaveBeenCalledWith(
+      expect.objectContaining({ onPinToChatCollection })
     );
   });
 

@@ -112,6 +112,8 @@ export interface SessionFooterProps {
   promptInputSlot: React.ReactNode;
   /** Minimal composer presentation for conversation-first mode. */
   simple?: boolean;
+  /** Keep the pinned session actions in the bar even in simple mode (the chat workspace). */
+  showSessionActions?: boolean;
 }
 
 // Height of the mobile info-bar chips (MCP / effort / model) so they line up.
@@ -162,6 +164,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   onCodexPermissionChange,
   promptInputSlot,
   simple = false,
+  showSessionActions = false,
 }) => {
   const managedByPreset = Boolean(session.agentic_tool_preset_id);
   const supportsLiveEffort = Boolean(toolCaps?.reasoningEffortLevels?.length);
@@ -188,6 +191,8 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
   const pinnedItems = prefs.pinnedItems;
   // The phone bar keeps only Attach; the other pinned actions stay in the controls sheet.
   const barPinnedItems = isMobile ? pinnedItems.filter((item) => item === 'upload') : pinnedItems;
+  // Focus chat hides the pinned actions unless the host keeps them (the chat workspace).
+  const showPinnedItems = !simple || showSessionActions;
   const togglePin = (id: string) => {
     setPref({
       pinnedItems: pinnedItems.includes(id)
@@ -1640,7 +1645,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
         >
           {/* Left group */}
           <Space size={4}>
-            {!simple && barPinnedItems.includes('upload') && (
+            {showPinnedItems && barPinnedItems.includes('upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1663,7 +1668,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {!simple && barPinnedItems.includes('advanced-upload') && (
+            {showPinnedItems && barPinnedItems.includes('advanced-upload') && (
               <Tooltip
                 title={
                   composerAttachmentUploading
@@ -1685,7 +1690,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 />
               </Tooltip>
             )}
-            {!simple &&
+            {showPinnedItems &&
               barPinnedItems.includes('fork') &&
               toolCaps?.supportsSessionFork !== false && (
                 <Tooltip title={connectionDisabled ? 'Disconnected from daemon' : 'Fork Session'}>
@@ -1702,7 +1707,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                 </Tooltip>
               )}
             {/* Dynamically pinned items */}
-            {!simple &&
+            {showPinnedItems &&
               barPinnedItems.includes('btw-fork') &&
               toolCaps?.supportsSessionFork !== false && (
                 <Tooltip title="BTW fork">
@@ -1718,7 +1723,7 @@ const SessionFooterInner: React.FC<SessionFooterProps> = ({
                   />
                 </Tooltip>
               )}
-            {!simple &&
+            {showPinnedItems &&
               barPinnedItems.includes('spawn') &&
               toolCaps?.supportsChildSpawn !== false && (
                 <Tooltip title="Spawn subsession">

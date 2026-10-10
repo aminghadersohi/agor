@@ -25,6 +25,7 @@ import type {
 } from '@agor-live/client';
 import {
   boardPath,
+  CHAT_WORKSPACE_PATH_SEGMENT,
   ENTITY_PATH_SEGMENTS,
   hasMinimumRole,
   isAgenticToolName,
@@ -51,7 +52,7 @@ import { type OnboardingCompletionResult, OnboardingWizard } from './components/
 import { buildPromptWithAttachments } from './components/SessionPanel/composerAttachments';
 import { SettingsModal } from './components/SettingsModal';
 import { StreamdownPortalApp } from './components/StreamdownPortalApp';
-import { getDaemonUrl } from './config/daemon';
+import { describeUnreachableDaemonOrigin, getDaemonUrl } from './config/daemon';
 import { CanvasNavigationProvider } from './contexts/CanvasNavigationContext';
 import { ConnectionProvider } from './contexts/ConnectionContext';
 import { MCPCatalogModalProvider } from './contexts/MCPCatalogModalContext';
@@ -1107,6 +1108,15 @@ function AppContent() {
   // If we already have a config cached, continue with that even if there's an error
   if (authConfigError && !authConfig) {
     const unsupportedIdentityContract = identityContractState === IdentityContractState.UNSUPPORTED;
+    // A loopback daemon URL served to a remote browser can never connect, no
+    // matter how healthy the daemon is. Say so, instead of a generic retry.
+    const unreachableDaemonHint =
+      typeof window === 'undefined'
+        ? null
+        : describeUnreachableDaemonOrigin({
+            daemonUrl: getDaemonUrl(),
+            pageOrigin: window.location.origin,
+          });
     return (
       <div
         style={{
@@ -1119,6 +1129,7 @@ function AppContent() {
       >
         <DaemonConfigurationAlert
           unsupportedIdentityContract={unsupportedIdentityContract}
+          unreachableDaemonHint={unreachableDaemonHint}
           onRetry={retryAuthConfig}
         />
       </div>
@@ -2416,6 +2427,13 @@ function AppContent() {
             />
             <Route
               path={`/${ENTITY_PATH_SEGMENTS.artifact}/:artifactShortId/`}
+              element={desktopAppElement}
+            />
+            {/* Chat workspace: the same session target as `/s/`, with the
+                pinned-chat rail in place of the board canvas. */}
+            <Route path={`/${CHAT_WORKSPACE_PATH_SEGMENT}/`} element={desktopAppElement} />
+            <Route
+              path={`/${CHAT_WORKSPACE_PATH_SEGMENT}/:sessionShortId/`}
               element={desktopAppElement}
             />
 

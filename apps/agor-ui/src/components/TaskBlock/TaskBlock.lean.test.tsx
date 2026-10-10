@@ -506,3 +506,16 @@ it('focus chat keeps the conversation and approvals but drops tool and turn chro
   expect(screen.queryByText('Synthetic report')).toBeNull();
   expect(screen.queryByText('Synthetic commit')).toBeNull();
 });
+
+it('focus chat keeps child-session callbacks visible but subdued', () => {
+  const callback = { ...task, metadata: { is_agor_callback: true } } as Task;
+  const { container, rerender } = render(view({ simple: true, task: callback }));
+  const block = () => container.querySelector<HTMLElement>('[data-task-block]');
+  expect(screen.getByText('Visible answer')).toBeVisible();
+  expect(Number(block()?.style.opacity)).toBeLessThan(1);
+
+  rerender(view({ simple: false, task: callback }));
+  expect(block()?.style.opacity).toBe('');
+  rerender(view({ simple: true }));
+  expect(block()?.style.opacity).toBe('');
+});

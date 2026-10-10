@@ -251,3 +251,28 @@ describe('conversation history text defaults', () => {
     expect(screen.getByText(prose.content.trim())).toBeInTheDocument();
   });
 });
+
+describe('bounded conversation rendering', () => {
+  const longTasks: Task[] = Array.from({ length: 45 }, (_, index) => ({
+    ...tasks[0],
+    task_id: generateId(),
+    full_prompt: `Synthetic prompt ${index}`,
+  }));
+
+  it('mounts only the newest page of a long reached history and reveals older tasks before paging', () => {
+    state = { ...state, tasks: longTasks, messagesByTask: new Map(), hasOlderTasks: true };
+    const view = render(<ConversationView client={null} sessionId={sessionId} />);
+    const blocks = () => view.container.querySelectorAll('[data-task-block]');
+    expect(blocks()).toHaveLength(30);
+    expect(blocks()[0].getAttribute('data-task-block')).toBe(longTasks[15].task_id);
+    expect(screen.queryByRole('button', { name: 'Load older history' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show older tasks (15 remaining)' }));
+    expect(blocks()).toHaveLength(45);
+    expect(screen.getByRole('button', { name: 'Load older history' })).toBeInTheDocument();
+
+    // A realtime arrival is shown without evicting anything already mounted.
+    update({ tasks: [...longTasks, { ...tasks[0], task_id: generateId() }] });
+    expect(blocks()).toHaveLength(46);
+  });
+});

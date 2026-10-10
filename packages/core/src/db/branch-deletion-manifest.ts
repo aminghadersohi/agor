@@ -96,6 +96,9 @@ export const BRANCH_DELETION_RELATIONS: Readonly<Record<string, BranchDeletionRe
   'session_mcp_servers.session_id': owned(
     'Delete attachment, preserve shared server and OAuth grants.'
   ),
+  'session_attention_states.session_id': owned(
+    'Per-user acknowledgements belong to the removed Session, not the User.'
+  ),
   'session_memories.session_id': owned('Private working memory belongs to its Session.'),
   'session_reminders.session_id': owned('Drain reminders before their owning Session and Tasks.'),
   'session_reminders.task_id': classify(

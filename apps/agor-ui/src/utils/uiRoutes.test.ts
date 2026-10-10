@@ -3,6 +3,8 @@ import {
   backOr,
   getRouterBasename,
   hasInAppHistory,
+  isChatWorkspacePathFor,
+  isChatWorkspaceRoute,
   isMobileShellPath,
   isTeammatesRoute,
   responsiveRoutePath,
@@ -53,6 +55,25 @@ describe('isMobileShellPath', () => {
   });
 });
 
+describe('isChatWorkspaceRoute', () => {
+  it('matches the workspace root and one session, with or without a trailing slash', () => {
+    for (const path of ['/chats', '/chats/', '/chats/01a012d8', '/chats/01a012d8/']) {
+      expect(isChatWorkspaceRoute(path)).toBe(true);
+    }
+    for (const path of ['/', '/chatsx', '/chats/a/b', '/s/01a012d8/', '/m/chats']) {
+      expect(isChatWorkspaceRoute(path)).toBe(false);
+    }
+  });
+
+  it('treats the workspace spelling of the open session as already canonical', () => {
+    const sessionId = '01a012d8-4f50-7c32-9daa-6e3f70819b2c';
+    expect(isChatWorkspacePathFor('/chats/01a012d84f507c329daa6e3f', sessionId)).toBe(true);
+    expect(isChatWorkspacePathFor('/chats/01a012d84f507c329daa6e3f/', null)).toBe(false);
+    expect(isChatWorkspacePathFor('/chats', null)).toBe(true);
+    expect(isChatWorkspacePathFor('/s/01a012d84f507c329daa6e3f/', sessionId)).toBe(false);
+  });
+});
+
 describe('responsiveRoutePath', () => {
   it('keeps the teammates directory across the shell breakpoint', () => {
     const none = { boards: [], sessions: [] };
@@ -74,6 +95,13 @@ describe('responsiveRoutePath', () => {
     expect(
       responsiveRoutePath('/m/board/01a012d8-1b9b-7909-b6f4-2024dfc7c51e', 'desktop', entities)
     ).toBe('/b/default/');
+  });
+
+  it('opens a chat workspace session full screen on phones', () => {
+    expect(responsiveRoutePath('/chats/01a012d84f507c329daa6e3f/', 'mobile', entities)).toBe(
+      '/m/session/01a012d8-4f50-7c32-9daa-6e3f70819b2c'
+    );
+    expect(responsiveRoutePath('/chats/', 'mobile', entities)).toBe('/m');
   });
 
   it('preserves session context in both directions', () => {

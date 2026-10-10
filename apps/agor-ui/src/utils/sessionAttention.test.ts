@@ -22,7 +22,7 @@ function clientSpy() {
 afterEach(() => agorStore.getState().reset());
 
 describe('clearOpenedSessionFlags', () => {
-  it('clears an unopened result and its branch attention', () => {
+  it('clears branch attention but leaves the shared ready flag to promptability', () => {
     agorStore.setState({
       ...EMPTY_MAPS,
       ...buildSessionMaps([session('done', { ready_for_prompt: true })]),
@@ -30,10 +30,8 @@ describe('clearOpenedSessionFlags', () => {
     } as never);
     const { client, patches } = clientSpy();
     clearOpenedSessionFlags(client, 'done');
-    expect(patches).toEqual([
-      ['sessions', 'done', { ready_for_prompt: false }],
-      ['branches', 'b1', { needs_attention: false }],
-    ]);
+    // The unread result is acknowledged per viewer by the open-session hook.
+    expect(patches).toEqual([['branches', 'b1', { needs_attention: false }]]);
   });
 
   it('writes nothing when nothing is flagged', () => {
