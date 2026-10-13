@@ -990,7 +990,7 @@ export class SlackConnector implements GatewayConnector {
   /** Cache: Slack user ID → profile (email + display name, or null if unavailable). */
   private userProfileCache = new Map<
     string,
-    { email: string | null; displayName: string | null; expiresAt: number }
+    { email: string | null; displayName: string | null; isBot: boolean | null; expiresAt: number }
   >();
   private inboundEventDedup = new Map<string, number>();
 
@@ -1005,9 +1005,12 @@ export class SlackConnector implements GatewayConnector {
    * spam must not queue a burst of Tasks: one prompt per
    * (message, user, emoji, added/removed) per cooldown, and at most
    * INBOUND_REACTION_THREAD_MAX prompts per thread per window. Entries are
-   * recorded before routing and released if routing fails, so a retried
+   * recorded before routing and released if routing fails or rejects, so a retried
    * delivery is not mistaken for spam.
    */
+  // Connector instances belong to one tenant-owned gateway channel. Pending
+  // occurrences must finish before any durable redelivery can be acknowledged.
+  private inboundReactionOccurrences = new Map<string, Promise<void>>();
   private inboundReactionCooldowns = new Map<string, number>();
   private inboundReactionThreadWindows = new Map<string, number[]>();
   private static INBOUND_REACTION_COOLDOWN_MS = 60 * 1000;
@@ -1219,11 +1222,11 @@ export class SlackConnector implements GatewayConnector {
    * (so transient failures recover quickly). Evicts expired entries on
    * each call to prevent unbounded cache growth.
    *
-   * Returns `{ email: null, displayName: null }` if unavailable.
+   * Returns null profile fields (including bot identity) if unavailable.
    */
   async lookupUserProfile(
     slackUserId: string
-  ): Promise<{ email: string | null; displayName: string | null }> {
+  ): Promise<{ email: string | null; displayName: string | null; isBot: boolean | null }> {
     const now = Date.now();
 
     // Evict expired entries to prevent unbounded growth
@@ -1233,12 +1236,13 @@ export class SlackConnector implements GatewayConnector {
 
     const cached = this.userProfileCache.get(slackUserId);
     if (cached && cached.expiresAt > now) {
-      return { email: cached.email, displayName: cached.displayName };
+      return { email: cached.email, displayName: cached.displayName, isBot: cached.isBot };
     }
 
     try {
       const result = await this.web.users.info({ user: slackUserId });
       const email = result.user?.profile?.email ?? null;
+      const isBot = result.user?.is_bot ?? null;
       const displayName =
         result.user?.profile?.display_name ||
         result.user?.profile?.real_name ||
@@ -1248,6 +1252,7 @@ export class SlackConnector implements GatewayConnector {
       this.userProfileCache.set(slackUserId, {
         email,
         displayName,
+        isBot,
         expiresAt: now + SlackConnector.USER_CACHE_TTL_MS,
       });
 
@@ -1257,7 +1262,7 @@ export class SlackConnector implements GatewayConnector {
         );
       }
 
-      return { email, displayName };
+      return { email, displayName, isBot };
     } catch (error) {
       console.warn(
         `[slack] Failed to look up profile for user ${slackUserId}: ${sanitizeGatewayProviderError(error)}`
@@ -1266,9 +1271,10 @@ export class SlackConnector implements GatewayConnector {
       this.userProfileCache.set(slackUserId, {
         email: null,
         displayName: null,
+        isBot: null,
         expiresAt: now + SlackConnector.USER_CACHE_ERROR_TTL_MS,
       });
-      return { email: null, displayName: null };
+      return { email: null, displayName: null, isBot: null };
     }
   }
 
@@ -1463,7 +1469,7 @@ export class SlackConnector implements GatewayConnector {
   /**
    * Admit one reaction against both limits, or return null when either is
    * exhausted. The returned function releases the admission (used when
-   * routing fails so Slack's redelivery is not rate limited).
+   * routing fails or rejects so Slack's redelivery is not rate limited).
    */
   private admitInboundReaction(key: string, threadId: string): (() => void) | null {
     const now = Date.now();
@@ -1498,8 +1504,8 @@ export class SlackConnector implements GatewayConnector {
    * Reaction events only carry the reacted message's channel and ts, which
    * may be a thread root, a reply, or a standalone message. The message's own
    * `thread_ts` identifies the thread (absent on a standalone message, whose
-   * ts is its own thread root). Returns null when Slack cannot be read; the
-   * caller then assumes the message is a thread root.
+   * ts is its own thread root). Returns null when Slack cannot be read; callers
+   * must not assume a reply is a root and split the per-thread budget.
    */
   private async lookupReactedMessage(
     channel: string,
@@ -1558,6 +1564,42 @@ export class SlackConnector implements GatewayConnector {
     options: GatewayListenerOptions;
     surfaces: SlackInboundSurfaces;
   }): Promise<void> {
+    if (!args.options.durableEventIdempotency) {
+      return this.processInboundReactionEvent(args);
+    }
+    const event = (args.body.event ?? {}) as Record<string, unknown>;
+    // event_id is stable across Slack retries. If absent, the provider event
+    // timestamp plus its payload identifies the same occurrence.
+    const occurrence =
+      typeof args.body.event_id === 'string'
+        ? args.body.event_id
+        : typeof event.event_ts === 'string'
+          ? JSON.stringify([args.body.team_id, args.eventType, event])
+          : undefined;
+    const pending = occurrence ? this.inboundReactionOccurrences.get(occurrence) : undefined;
+    if (pending) {
+      await pending;
+      await args.ack();
+      return;
+    }
+    const processing = this.processInboundReactionEvent({ ...args, ack: async () => {} });
+    if (occurrence) this.inboundReactionOccurrences.set(occurrence, processing);
+    try {
+      await processing;
+      await args.ack();
+    } finally {
+      if (occurrence) this.inboundReactionOccurrences.delete(occurrence);
+    }
+  }
+
+  private async processInboundReactionEvent(args: {
+    body: Record<string, unknown>;
+    ack: () => Promise<void>;
+    eventType: SlackInboundReactionEventType;
+    callback: GatewayInboundCallback;
+    options: GatewayListenerOptions;
+    surfaces: SlackInboundSurfaces;
+  }): Promise<void> {
     const { body, ack, eventType, callback, options, surfaces } = args;
     let acknowledged = false;
     if (!options.durableEventIdempotency) {
@@ -1601,7 +1643,18 @@ export class SlackConnector implements GatewayConnector {
       }
 
       const reacted = await this.lookupReactedMessage(channel, itemTs);
-      const threadTs = reacted?.threadTs ?? itemTs;
+      if (!reacted) {
+        // No root means no reliable thread budget. Durable delivery retries
+        // transient lookup failures instead of admitting separate reply keys.
+        if (options.durableEventIdempotency) {
+          throw new Error('Slack reaction thread could not be resolved');
+        }
+        return;
+      }
+      const profile = await this.lookupUserProfile(reactingUser);
+      // Fail closed if the profile lookup cannot verify a human reactor.
+      if (profile.isBot !== false) return;
+      const threadTs = reacted.threadTs;
       const threadId = `${channel}-${threadTs}`;
       releaseAdmission = this.admitInboundReaction(cooldownKey, threadId);
       if (!releaseAdmission) {
@@ -1622,7 +1675,6 @@ export class SlackConnector implements GatewayConnector {
             : undefined;
       const itemUser = typeof event.item_user === 'string' ? event.item_user : undefined;
       const eventTs = typeof event.event_ts === 'string' ? event.event_ts : undefined;
-      const profile = await this.lookupUserProfile(reactingUser);
       const slackChannelName = channelType !== 'im' ? await this.lookupChannelName(channel) : null;
 
       console.log(
@@ -1630,7 +1682,7 @@ export class SlackConnector implements GatewayConnector {
       );
 
       routed = true;
-      await callback({
+      const outcome = await callback({
         providerEventId: eventTs
           ? `slack:reaction:${slackTeamId ?? 'unknown'}:${channel}:${itemTs}:${reactingUser}:${reaction}:${action}:${eventTs}`
           : typeof body.event_id === 'string'
@@ -1663,6 +1715,7 @@ export class SlackConnector implements GatewayConnector {
           ...(this.config.align_slack_users ? { align_slack_users: true } : {}),
         },
       });
+      if (outcome?.accepted === false) releaseAdmission();
       releaseAdmission = null;
       if (!acknowledged) {
         await ack();
