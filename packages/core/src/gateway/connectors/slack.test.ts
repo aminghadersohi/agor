@@ -311,6 +311,53 @@ describe('SlackConnector inbound reactions', () => {
     warn.mockRestore();
   });
 
+  it.each([
+    { data: { error: 'missing_scope' } },
+    { data: { error: 'user_not_found' } },
+    { statusCode: 403 },
+  ])('acks and drops a permanent durable user lookup failure: %j', async (error) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { callback, emit, web, replies } = await startReactionListener({ durable: true });
+    web.users.info.mockRejectedValue(error);
+
+    const ack = await emit(reactionEvent());
+    expect(ack).toHaveBeenCalledOnce();
+    expect(callback).not.toHaveBeenCalled();
+    expect(replies).not.toHaveBeenCalled();
+    expect(web.users.info).toHaveBeenCalledOnce();
+
+    // Even an unexpected redelivery or a new reaction must remain terminal
+    // without retrying the permanent lookup refusal inside the cache TTL.
+    const redeliveryAck = await emit(reactionEvent());
+    const nextAck = await emit(reactionEvent({ reaction: 'two', event_ts: '300.000002' }));
+    expect(redeliveryAck).toHaveBeenCalledOnce();
+    expect(nextAck).toHaveBeenCalledOnce();
+    expect(callback).not.toHaveBeenCalled();
+    expect(replies).not.toHaveBeenCalled();
+    expect(web.users.info).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it.each(['org_login_required', 'team_added_to_org'])(
+    'retries temporary organization migration user lookup failures: %s',
+    async (code) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const { callback, emit, web } = await startReactionListener({ durable: true });
+      web.users.info.mockRejectedValueOnce({ data: { error: code } });
+      const ack = vi.fn(async () => undefined);
+      await expect(emit(reactionEvent(), ack)).rejects.toThrow(
+        'user profile could not be resolved'
+      );
+      expect(ack).not.toHaveBeenCalled();
+      expect(callback).not.toHaveBeenCalled();
+      await emit(reactionEvent(), ack);
+      expect(web.users.info).toHaveBeenCalledTimes(2);
+      expect(ack).toHaveBeenCalledOnce();
+      expect(callback).toHaveBeenCalledOnce();
+      warn.mockRestore();
+    }
+  );
+
   it('retries a failed durable human lookup immediately and acks only after routing succeeds', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { callback, emit, web, replies } = await startReactionListener({ durable: true });
@@ -386,6 +433,8 @@ describe('SlackConnector inbound reactions', () => {
     { code: 'slack_webapi_rate_limited_error', retryAfter: 1 },
     { data: { error: 'ratelimited' } },
     { data: { error: 'internal_error' } },
+    { data: { error: 'org_login_required' } },
+    { data: { error: 'team_added_to_org' } },
     { statusCode: 503 },
     { statusCode: 429 },
   ])('retries transient thread lookup failures without acking: %j', async (error) => {
