@@ -1621,7 +1621,11 @@ export function registerBranchTools(server: McpServer, ctx: McpContext): void {
           const { fireAlwaysNewZoneTrigger } = await import('../../services/zone-trigger.js');
           const { session: newSession, task } = await fireAlwaysNewZoneTrigger({
             app: ctx.app,
-            params: ctx.baseServiceParams,
+            params: withPromptProvenanceTool(
+              ctx.baseServiceParams,
+              'agor_branches_set_zone',
+              'always_new'
+            ),
             branch,
             board,
             zone,

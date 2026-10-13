@@ -2255,17 +2255,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         const promptProvenanceStamp =
           !params.provider && !data.idempotencyTaskId ? params._promptProvenance : undefined;
         const provenance = promptProvenanceStamp
-          ? await runWithTenantDatabaseScope(db, promptTenantId, (operationDb) =>
-              resolvePromptProvenance({
-                stamp: promptProvenanceStamp,
-                body: escapedBody.text,
-                escapedSentinels: escapedBody.escaped,
-                recipientSession: session,
-                branchRepo: new BranchRepository(operationDb),
-                findUserRole: async (userId) =>
-                  (await new UsersRepository(operationDb).findById(userId))?.role,
-              })
-            )
+          ? resolvePromptProvenance({
+              stamp: promptProvenanceStamp,
+              body: escapedBody.text,
+              escapedSentinels: escapedBody.escaped,
+            })
           : undefined;
         const admittedPrompt = provenance?.prompt ?? escapedBody.text;
 

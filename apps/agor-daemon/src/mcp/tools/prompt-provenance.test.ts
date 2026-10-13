@@ -89,4 +89,12 @@ describe('MCP tool prompt provenance', () => {
       /\.\.\.(ctx\.baseServiceParams|callbackParams|withPromptProvenanceTool\(|freshMcpServiceParams\()/
     );
   });
+
+  // A spread alone is not enough: `{ ...ctx.baseServiceParams, _promptProvenance: undefined }`
+  // would pass the check above and drop the stamp. Only `withPromptProvenanceTool`
+  // may touch the field; behavioral coverage lives in `sessions.test.ts` and
+  // `branches.test.ts`, which assert the stamp the prompt service receives.
+  it.each(callSites)('$id never overrides the stamp it passes through', ({ call }) => {
+    expect(call).not.toMatch(/_promptProvenance\s*:/);
+  });
 });

@@ -346,9 +346,11 @@ export interface TaskMetadata {
    * key also authenticates REST, so absence alone is not proof that a human
    * typed the prompt.
    *
-   * IDs only, deliberately. Display names are resolved and RBAC-gated at
-   * render time against the recipient Session owner's branch access, so this
-   * row cannot become a channel for a branch name the reader may not see.
+   * IDs only, deliberately, and `rendered_block` likewise names the origin
+   * only by Session ID. Every reader of the recipient Session can read this
+   * row and `full_prompt`, so neither may carry an origin branch or teammate
+   * name; a reader resolves those through `agor_sessions_get` under their own
+   * branch access.
    */
   prompt_provenance?: {
     version: 1;
