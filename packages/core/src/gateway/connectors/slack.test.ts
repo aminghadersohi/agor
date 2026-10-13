@@ -266,7 +266,7 @@ describe('SlackConnector inbound reactions', () => {
 
   it.each([false, true])('never admits an unresolved reply root (durable=%s)', async (durable) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const replies = vi.fn().mockRejectedValue(new Error('missing_scope'));
+    const replies = vi.fn().mockRejectedValue(new Error('network unavailable'));
     const { callback, emit } = await startReactionListener({ replies, durable });
     const ack = vi.fn(async () => undefined);
 
@@ -308,6 +308,100 @@ describe('SlackConnector inbound reactions', () => {
     web.users.info.mockRejectedValueOnce(new Error('unavailable'));
     await emit(reactionEvent());
     expect(callback).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('retries a failed durable human lookup immediately and acks only after routing succeeds', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { callback, emit, web, replies } = await startReactionListener({ durable: true });
+    const ack = vi.fn(async () => undefined);
+    web.users.info.mockRejectedValueOnce(new Error('network unavailable'));
+
+    await expect(emit(reactionEvent(), ack)).rejects.toThrow('user profile could not be resolved');
+    expect(ack).not.toHaveBeenCalled();
+    expect(callback).not.toHaveBeenCalled();
+    expect(replies).not.toHaveBeenCalled();
+
+    callback.mockImplementation(async () => {
+      expect(ack).not.toHaveBeenCalled();
+    });
+    await emit(reactionEvent(), ack);
+    await emit(reactionEvent(), ack);
+    expect(web.users.info).toHaveBeenCalledTimes(2);
+    expect(callback).toHaveBeenCalledOnce();
+    expect(ack).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
+
+  it('does not reuse an optional metadata lookup failure for a durable reaction', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { connector, callback, emit, web } = await startReactionListener({ durable: true });
+    web.users.info.mockRejectedValueOnce(new Error('network unavailable'));
+    await connector.lookupUserProfile('UADA');
+    const ack = await emit(reactionEvent());
+    expect(web.users.info).toHaveBeenCalledTimes(2);
+    expect(callback).toHaveBeenCalledOnce();
+    expect(ack).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it('keeps failed identity caches isolated between gateway channel connectors', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const first = await startReactionListener({ durable: true });
+    const other = await startReactionListener({ durable: true, isBot: true });
+    first.web.users.info.mockRejectedValueOnce(new Error('network unavailable'));
+    await expect(first.emit(reactionEvent())).rejects.toThrow('user profile could not be resolved');
+    await other.emit(reactionEvent());
+    await first.emit(reactionEvent());
+    // The same Slack ID in another channel/tenant must use its own credentials
+    // and bot identity, never the recovered human profile from the first connector.
+    await other.emit(reactionEvent({ reaction: 'two', event_ts: '300.000002' }));
+    expect(first.callback).toHaveBeenCalledOnce();
+    expect(other.callback).not.toHaveBeenCalled();
+    expect(other.replies).not.toHaveBeenCalled();
+    expect(other.web.users.info).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it.each([
+    { data: { error: 'missing_scope' } },
+    { data: { error: 'message_not_found' } },
+    { data: { error: 'channel_not_found' } },
+    { statusCode: 403 },
+    null,
+  ])('acks and drops a permanent thread lookup failure: %j', async (error) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const replies = error
+      ? vi.fn().mockRejectedValue(error)
+      : vi.fn().mockResolvedValue({ messages: [] });
+    const { callback, emit } = await startReactionListener({ replies, durable: true });
+    const ack = await emit(reactionEvent());
+    expect(ack).toHaveBeenCalledOnce();
+    expect(callback).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it.each([
+    new Error('network unavailable'),
+    { code: 'slack_webapi_rate_limited_error', retryAfter: 1 },
+    { data: { error: 'ratelimited' } },
+    { data: { error: 'internal_error' } },
+    { statusCode: 503 },
+    { statusCode: 429 },
+  ])('retries transient thread lookup failures without acking: %j', async (error) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const replies = vi
+      .fn()
+      .mockRejectedValueOnce(error)
+      .mockResolvedValue({ messages: [reactedReply] });
+    const { callback, emit } = await startReactionListener({ replies, durable: true });
+    const ack = vi.fn(async () => undefined);
+    await expect(emit(reactionEvent(), ack)).rejects.toThrow('thread could not be resolved');
+    expect(ack).not.toHaveBeenCalled();
+    expect(callback).not.toHaveBeenCalled();
+    await emit(reactionEvent(), ack);
+    expect(ack).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledOnce();
     warn.mockRestore();
   });
 

@@ -990,7 +990,13 @@ export class SlackConnector implements GatewayConnector {
   /** Cache: Slack user ID → profile (email + display name, or null if unavailable). */
   private userProfileCache = new Map<
     string,
-    { email: string | null; displayName: string | null; isBot: boolean | null; expiresAt: number }
+    {
+      email: string | null;
+      displayName: string | null;
+      isBot: boolean | null;
+      expiresAt: number;
+      lookupFailed?: boolean;
+    }
   >();
   private inboundEventDedup = new Map<string, number>();
 
@@ -1223,9 +1229,12 @@ export class SlackConnector implements GatewayConnector {
    * each call to prevent unbounded cache growth.
    *
    * Returns null profile fields (including bot identity) if unavailable.
+   * Durable reactions opt into throwing on lookup failure and bypassing cached
+   * failures so redelivery can recover immediately without admitting bots.
    */
   async lookupUserProfile(
-    slackUserId: string
+    slackUserId: string,
+    retryOnFailure = false
   ): Promise<{ email: string | null; displayName: string | null; isBot: boolean | null }> {
     const now = Date.now();
 
@@ -1235,7 +1244,7 @@ export class SlackConnector implements GatewayConnector {
     }
 
     const cached = this.userProfileCache.get(slackUserId);
-    if (cached && cached.expiresAt > now) {
+    if (cached && cached.expiresAt > now && !(retryOnFailure && cached.lookupFailed)) {
       return { email: cached.email, displayName: cached.displayName, isBot: cached.isBot };
     }
 
@@ -1267,12 +1276,19 @@ export class SlackConnector implements GatewayConnector {
       console.warn(
         `[slack] Failed to look up profile for user ${slackUserId}: ${sanitizeGatewayProviderError(error)}`
       );
-      // Short TTL for errors so transient failures (rate limits, network) recover quickly
+      // Durable reactions must not ack a failed identity lookup or retain a
+      // negative cache entry that hides recovery on Slack's next retry.
+      if (retryOnFailure) {
+        this.userProfileCache.delete(slackUserId);
+        throw new Error('Slack reaction user profile could not be resolved');
+      }
+      // Short TTL for optional metadata lookups outside durable reactions.
       this.userProfileCache.set(slackUserId, {
         email: null,
         displayName: null,
         isBot: null,
         expiresAt: now + SlackConnector.USER_CACHE_ERROR_TTL_MS,
+        lookupFailed: true,
       });
       return { email: null, displayName: null, isBot: null };
     }
@@ -1510,7 +1526,10 @@ export class SlackConnector implements GatewayConnector {
   private async lookupReactedMessage(
     channel: string,
     ts: string
-  ): Promise<{ threadTs: string; text: string | null } | null> {
+  ): Promise<
+    | { status: 'resolved'; threadTs: string; text: string | null }
+    | { status: 'unavailable'; retryable: boolean }
+  > {
     try {
       const result = await this.web.conversations.replies({
         channel,
@@ -1523,6 +1542,7 @@ export class SlackConnector implements GatewayConnector {
       const target = messages.find((message) => message.ts === ts);
       if (target) {
         return {
+          status: 'resolved',
           threadTs: typeof target.thread_ts === 'string' ? target.thread_ts : ts,
           text:
             typeof target.text === 'string'
@@ -1538,12 +1558,32 @@ export class SlackConnector implements GatewayConnector {
           : typeof parent?.ts === 'string'
             ? parent.ts
             : undefined;
-      return parentTs ? { threadTs: parentTs, text: null } : null;
+      return parentTs
+        ? { status: 'resolved', threadTs: parentTs, text: null }
+        : { status: 'unavailable', retryable: false };
     } catch (error) {
       console.warn(
         `[slack] Failed to resolve reacted message thread: ${sanitizeGatewayProviderError(error)}`
       );
-      return null;
+      const code = extractSlackErrorCode(error);
+      const statusCode =
+        typeof error === 'object' && error !== null && 'statusCode' in error
+          ? error.statusCode
+          : undefined;
+      // Platform refusals are terminal unless Slack explicitly reports a
+      // temporary condition. Transport failures and rate limits remain retryable.
+      const retryable = code
+        ? [
+            'ratelimited',
+            'internal_error',
+            'fatal_error',
+            'request_timeout',
+            'service_unavailable',
+          ].includes(code)
+        : typeof statusCode === 'number'
+          ? statusCode === 408 || statusCode === 429 || statusCode >= 500
+          : true;
+      return { status: 'unavailable', retryable };
     }
   }
 
@@ -1642,18 +1682,18 @@ export class SlackConnector implements GatewayConnector {
         return;
       }
 
+      const profile = await this.lookupUserProfile(reactingUser, options.durableEventIdempotency);
+      // Verify human identity before spending a thread lookup on another bot.
+      if (profile.isBot !== false) return;
       const reacted = await this.lookupReactedMessage(channel, itemTs);
-      if (!reacted) {
-        // No root means no reliable thread budget. Durable delivery retries
-        // transient lookup failures instead of admitting separate reply keys.
-        if (options.durableEventIdempotency) {
+      if (reacted.status === 'unavailable') {
+        // No root means no reliable thread budget. Only transient failures
+        // warrant redelivery; missing messages and permanent refusals are dropped.
+        if (options.durableEventIdempotency && reacted.retryable) {
           throw new Error('Slack reaction thread could not be resolved');
         }
         return;
       }
-      const profile = await this.lookupUserProfile(reactingUser);
-      // Fail closed if the profile lookup cannot verify a human reactor.
-      if (profile.isBot !== false) return;
       const threadTs = reacted.threadTs;
       const threadId = `${channel}-${threadTs}`;
       releaseAdmission = this.admitInboundReaction(cooldownKey, threadId);
