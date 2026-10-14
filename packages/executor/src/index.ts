@@ -33,6 +33,7 @@ import {
   TaskStatus,
 } from '@agor/core/types';
 import { patchConsole } from '@agor/core/utils/logger';
+import { setAgorSkillsIndex } from './agor-skills-index.js';
 import { type ExecutorHeartbeatHandle, startExecutorHeartbeat } from './executor-heartbeat.js';
 import { requestMCPRuntimeRefresh } from './mcp-runtime-refresh.js';
 import type { ResolvedConfigSlice } from './payload-types.js';
@@ -81,6 +82,8 @@ export interface ExecutorConfig {
   daemonUrl: string;
   messageSource?: MessageSource;
   promptOrigin?: PromptOrigin;
+  /** Daemon-resolved team skills index, appended to the Agor system prompt. */
+  skillsIndex?: string;
   /** Opaque, daemon-authorized context interpreted by the selected integration. */
   agenticToolContext?: Record<string, unknown>;
   /** Daemon-resolved config slice. See payload-types.ResolvedConfigSliceSchema. */
@@ -105,6 +108,7 @@ export class AgorExecutor {
 
   constructor(private config: ExecutorConfig) {
     this.abortController = new AbortController();
+    setAgorSkillsIndex(config.skillsIndex);
   }
 
   /**

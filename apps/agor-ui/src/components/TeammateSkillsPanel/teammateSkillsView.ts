@@ -1,4 +1,5 @@
 import type {
+  SkillPinStatus,
   TeammateSkill,
   TeammateSkillGap,
   TeammateSkillSource,
@@ -23,9 +24,35 @@ export const SKILL_SOURCE_COLORS: Record<TeammateSkillSource, string | undefined
 
 export type SkillSourceFilter = TeammateSkillSource | 'all';
 
-/** A skill that needs attention: content that differs across teammates, or an unreviewed import. */
+/**
+ * A skill that needs attention: content that differs across teammates, an
+ * unreviewed import, or a release pin whose content is gone or changed.
+ */
 export function isProblemSkill(skill: TeammateSkill): boolean {
-  return skill.status === 'drift' || skill.status === 'unreviewed';
+  return (
+    skill.status === 'drift' ||
+    skill.status === 'unreviewed' ||
+    skill.pin?.status === 'missing' ||
+    skill.pin?.status === 'hash_mismatch'
+  );
+}
+
+export const PIN_STATUS_LABELS: Record<SkillPinStatus, string> = {
+  current: 'pinned',
+  update_available: 'update available',
+  missing: 'missing',
+  hash_mismatch: 'hash mismatch',
+};
+
+/** `r3 pins v2`, plus `· v4 is newer` when the skill moved on. */
+export function pinLabel(skill: TeammateSkill): string | undefined {
+  const pin = skill.pin;
+  if (!pin) return undefined;
+  const newer =
+    pin.status === 'update_available' && pin.latest_version_number
+      ? ` · v${pin.latest_version_number} is newer`
+      : '';
+  return `r${pin.release} pins v${pin.version_number}${newer}`;
 }
 
 export function statusLabel(skill: TeammateSkill): string {

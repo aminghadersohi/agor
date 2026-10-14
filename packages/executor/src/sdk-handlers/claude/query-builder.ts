@@ -36,6 +36,7 @@ import {
   resolveScopedMCPAuthHeaders,
   sanitizeMCPExternalError,
 } from '@agor/core/mcp';
+import { withAgorSkillsIndex } from '../../agor-skills-index.js';
 import { getDaemonUrl } from '../../config.js';
 import type {
   BranchRepository,
@@ -268,7 +269,7 @@ export async function setupQuery(
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',
-      append: `${agorSystemPrompt}\n\n${renderAgorSessionIdentity(sessionId)}`,
+      append: `${withAgorSkillsIndex(agorSystemPrompt)}\n\n${renderAgorSessionIdentity(sessionId)}`,
     },
     settingSources: ['user', 'project', 'local'], // Load user + project + local permissions, auto-loads CLAUDE.md
     // SDK 0.3.233+ omits task-list tools on newer model families unless the

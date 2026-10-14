@@ -9,9 +9,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  BranchRepository,
   createDatabase,
   type Database,
   initializeDatabase,
+  KnowledgeNamespaceRepository,
   SessionRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
@@ -25,9 +27,14 @@ import {
 } from '@agor/core/types';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type FrontDeskFixture, frontDeskFixture } from '../../test/front-desk-fixture';
+import { KnowledgeSkillProvider } from '../skills/knowledge-skill-provider';
+import { SkillSets } from '../skills/skillsets';
 import { slugify } from '../teammate-skills/assign';
 import { requestExecutor } from '../utils/spawn-executor.js';
 import { createBranchSkillsRoute } from './branch-skills';
+import { KnowledgeDocumentsService } from './knowledge-documents';
+import { KnowledgeNamespacesService } from './knowledge-namespaces';
+import { KnowledgeVersionsService } from './knowledge-versions';
 import { ensureTeammateKnowledgeNamespace } from './teammate-knowledge';
 
 vi.mock('../utils/spawn-executor.js', () => ({
@@ -164,6 +171,8 @@ function fakeApp(knowledge: { current: KnowledgeStub }): Application {
     service: (path: string) => {
       if (path === 'kb/namespaces') return knowledge.current.namespaces;
       if (path === 'kb/documents') return knowledge.current.documents;
+      const versions = (knowledge.current as { versions?: unknown }).versions;
+      if (path === 'kb/versions' && versions) return versions;
       throw new Error(`Unexpected service ${path}`);
     },
   } as unknown as Application;
@@ -423,5 +432,134 @@ describe('branches/:id/skills sources', () => {
     });
     expect(report.gaps.status).toBe('missing');
     expect(knowledge.documents.get).not.toHaveBeenCalled();
+  });
+});
+
+describe('branches/:id/skills skill set release', () => {
+  it('shows the release, each pin, and what the last session was given', async () => {
+    const { f, branch, find, useKnowledge } = await setup(undefined, 'Professor Frink');
+    executorAnswers(new Map());
+    // Real Knowledge services over the fixture's tenant-scoped database.
+    const real = {
+      namespaces: new KnowledgeNamespacesService(f.db),
+      documents: new KnowledgeDocumentsService(f.db),
+      versions: new KnowledgeVersionsService(f.db),
+    };
+    useKnowledge(real as unknown as KnowledgeStub);
+    const ownerParams = { user: f.owner, authenticated: true } as never;
+    const ns = await f.inTenant((db) =>
+      new KnowledgeNamespaceRepository(db).create({
+        slug: 'team-skills',
+        display_name: 'Team skills',
+        kind: 'team',
+        owner_user_id: f.owner.user_id as UserID,
+        others_can: 'read',
+        visibility_default: 'public',
+        metadata: { skills_provider: true },
+      })
+    );
+    const put = (path: string, content: string) =>
+      f.inTenant(() =>
+        real.documents.putDocument(
+          { namespace_slug: ns.slug, path, kind: 'skill', content_text: content } as never,
+          ownerParams
+        )
+      );
+    const skill = (name: string, version: string) =>
+      `---\nname: ${name}\ndescription: Use for ${name}.\nmetadata:\n  version: "${version}"\n---\n# ${name}\n`;
+    await put('skills/frink/research-loop.md', skill('research-loop', '1.0.0'));
+    await put('skills/_shared/standing-facts.md', skill('standing-facts', '1.0.0'));
+
+    const provider = new KnowledgeSkillProvider(
+      fakeApp({ current: real as unknown as KnowledgeStub }),
+      ownerParams
+    );
+    const sets = new SkillSets(provider);
+    const teammate = { name: 'Professor Frink', keys: ['professor', 'frink', 'professor-frink'] };
+    await f.inTenant(async () => {
+      const [namespace] = await provider.providerNamespaces();
+      await sets.commit(await sets.plan(namespace, teammate, { actor: f.owner.user_id }));
+    });
+    const record = await f.inTenant(async () =>
+      sets.find((await provider.providerNamespaces())[0], teammate)
+    );
+    // A session was given r1, then research-loop moved on.
+    const session = await f.createSession({
+      branchId: branch.branch_id,
+      updatedAt: new Date('2026-10-03T00:00:00.000Z'),
+    });
+    const pinnedLoop = record.manifest!.skills.find((s) => s.name === 'research-loop')!;
+    await f.inTenant((db) =>
+      new SessionRepository(db).update(session.session_id, {
+        custom_context: {
+          skills_receipt: {
+            teammate: 'Professor Frink',
+            release: 1,
+            namespace: ns.slug,
+            skillset_path: record.path,
+            manifest_document_id: record.document!.document_id,
+            manifest_version_id: record.document!.current_version!.version_id,
+            skills: [
+              {
+                name: 'research-loop',
+                version_id: pinnedLoop.version_id,
+                sha256: pinnedLoop.sha256,
+              },
+            ],
+            delivered_at: '2026-10-03T00:00:00.000Z',
+            harness: 'codex',
+          },
+        },
+      })
+    );
+    await put('skills/frink/research-loop.md', skill('research-loop', '1.1.0'));
+
+    const report = await find(f.owner);
+    expect(report.release).toMatchObject({
+      status: 'ok',
+      enabled: true,
+      namespace_slug: 'team-skills',
+      path: 'skillsets/frink.md',
+      release: 1,
+      manifest_version_number: 1,
+      counts: { current: 1, update_available: 1 },
+      unreleased: 0,
+      delivered: {
+        session_id: session.session_id,
+        release: 1,
+        delivered_at: '2026-10-03T00:00:00.000Z',
+        harness: 'codex',
+        skills: 1,
+      },
+    });
+    const byName = Object.fromEntries(report.skills.map((s) => [s.name, s]));
+    // _shared skills in a provider namespace reach every teammate.
+    expect(byName['standing-facts']).toMatchObject({
+      pin: { release: 1, version_number: 1, status: 'current', latest_version_number: 1 },
+    });
+    expect(byName['standing-facts'].delivered).toBeUndefined();
+    expect(byName['research-loop']).toMatchObject({
+      version_number: 2,
+      pin: { release: 1, version_number: 1, status: 'update_available', latest_version_number: 2 },
+      delivered: true,
+    });
+  });
+
+  it('reports no release and the opt-out flag', async () => {
+    const { f, branch, find } = await setup(undefined, 'Professor Frink');
+    executorAnswers(new Map());
+    expect((await find(f.owner)).release).toEqual({ status: 'none', enabled: true });
+    await f.inTenant((db) =>
+      new BranchRepository(db).update(branch.branch_id, {
+        custom_context: {
+          teammate: {
+            kind: 'teammate',
+            displayName: 'Professor Frink',
+            skills: { enabled: false },
+          },
+        },
+      })
+    );
+    expect((await find(f.owner)).release).toEqual({ status: 'none', enabled: false });
   });
 });

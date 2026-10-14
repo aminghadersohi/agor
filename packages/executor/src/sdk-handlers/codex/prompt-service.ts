@@ -59,6 +59,7 @@ import {
 } from '@agor/core/types';
 import { mapToCodexPermissionConfig } from '@agor/core/utils/permission-mode-mapper';
 import type * as CodexSdk from '@openai/codex-sdk';
+import { withAgorSkillsIndex } from '../../agor-skills-index.js';
 import { getDaemonUrl } from '../../config.js';
 import type {
   BranchRepository,
@@ -688,7 +689,7 @@ export class CodexPromptService {
    * config.toml stay where they are.
    */
   private async ensureCodexInstructionsFile(sessionId: SessionID): Promise<string> {
-    const agorSystemPrompt = await renderAgorSystemPrompt();
+    const agorSystemPrompt = withAgorSkillsIndex(await renderAgorSystemPrompt());
 
     const fileName = `agor-codex-instructions-${sessionId}.md`;
 

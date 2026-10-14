@@ -1,6 +1,7 @@
 import type {
   AgorClient,
   Branch,
+  SkillPinStatus,
   TeammateSkill,
   TeammateSkillGap,
   TeammateSkillGapList,
@@ -17,6 +18,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   CloseOutlined,
+  CloudDownloadOutlined,
   ExclamationCircleOutlined,
   InfoCircleOutlined,
   ReloadOutlined,
@@ -48,6 +50,8 @@ import { Tag } from '../Tag';
 import {
   filterTeammateSkillGaps,
   filterTeammateSkills,
+  PIN_STATUS_LABELS,
+  pinLabel,
   SKILL_SOURCE_COLORS,
   SKILL_SOURCE_LABELS,
   type SkillSourceFilter,
@@ -153,6 +157,100 @@ const UpdatedText: React.FC<{ value?: string }> = ({ value }) => {
     <Tooltip title={formatAbsoluteTime(value)}>
       <span>{relative}</span>
     </Tooltip>
+  );
+};
+
+const PIN_STATUS_COLORS: Record<SkillPinStatus, string | undefined> = {
+  current: undefined,
+  update_available: 'warning',
+  missing: 'error',
+  hash_mismatch: 'error',
+};
+
+const PinTag: React.FC<{ skill: TeammateSkill }> = ({ skill }) =>
+  skill.pin ? (
+    <Tooltip title={pinLabel(skill)}>
+      <Tag
+        color={PIN_STATUS_COLORS[skill.pin.status]}
+        style={{ marginInlineEnd: 0 }}
+        data-testid="teammate-skill-pin"
+      >
+        {skill.pin.status === 'current'
+          ? `r${skill.pin.release} · v${skill.pin.version_number}`
+          : PIN_STATUS_LABELS[skill.pin.status]}
+      </Tag>
+    </Tooltip>
+  ) : null;
+
+const DeliveredMark: React.FC<{ skill: TeammateSkill }> = ({ skill }) => {
+  const { token } = theme.useToken();
+  return skill.delivered ? (
+    <Tooltip title="Delivered in last session">
+      <CloudDownloadOutlined
+        aria-label="Delivered in last session"
+        data-testid="teammate-skill-delivered"
+        style={{ color: token.colorSuccess, flexShrink: 0 }}
+      />
+    </Tooltip>
+  ) : null;
+};
+
+/** The equipped skill set release, its pin problems, and what the last session was given. */
+const ReleaseLine: React.FC<{ report: TeammateSkillsReport }> = ({ report }) => {
+  const { token } = theme.useToken();
+  const release = report.release;
+  if (!release) return null;
+  const small = { fontSize: token.fontSizeSM };
+  const delivered = release.delivered;
+  return (
+    <Flex wrap align="center" gap={token.marginXS} data-testid="teammate-skills-release">
+      {!release.enabled && (
+        <Tag style={{ marginInlineEnd: 0 }}>Skills delivery off for this teammate</Tag>
+      )}
+      {release.status === 'none' && (
+        <Typography.Text type="secondary" style={small}>
+          No skill set release yet.
+        </Typography.Text>
+      )}
+      {release.status === 'unavailable' && (
+        <Typography.Text type="warning" style={small}>
+          {release.reason ?? 'The skill set release could not be read.'}
+        </Typography.Text>
+      )}
+      {release.status === 'ok' && (
+        <>
+          <Tooltip title={`${release.namespace_slug ?? ''}/${release.path ?? ''}`}>
+            <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+              Release r{release.release}
+            </Tag>
+          </Tooltip>
+          {release.created_at && (
+            <Typography.Text type="secondary" style={small}>
+              cut <UpdatedText value={release.created_at} />
+            </Typography.Text>
+          )}
+          {(['update_available', 'hash_mismatch', 'missing'] as const).map((status) =>
+            release.counts?.[status] ? (
+              <Tag key={status} color={PIN_STATUS_COLORS[status]} style={{ marginInlineEnd: 0 }}>
+                {release.counts[status]} {PIN_STATUS_LABELS[status]}
+              </Tag>
+            ) : null
+          )}
+          {release.unreleased ? (
+            <Typography.Text type="secondary" style={small}>
+              · {release.unreleased} not in a release yet
+            </Typography.Text>
+          ) : null}
+        </>
+      )}
+      {delivered && (
+        <Typography.Text type="secondary" style={small} data-testid="teammate-skills-delivered">
+          · Last session got r{delivered.release} ({delivered.skills}{' '}
+          {delivered.skills === 1 ? 'skill' : 'skills'}, {delivered.harness}){' '}
+          <UpdatedText value={delivered.delivered_at} />
+        </Typography.Text>
+      )}
+    </Flex>
   );
 };
 
@@ -345,10 +443,12 @@ const SkillRow: React.FC<{ skill: TeammateSkill; onOpen: () => void }> = ({ skil
             </Typography.Text>
           </Button>
           <SourceTag source={skill.source} />
+          <DeliveredMark skill={skill} />
           <span style={{ flex: 1 }} />
-          <span style={{ flexShrink: 0 }}>
+          <Flex gap={token.marginXXS} style={{ flexShrink: 0 }}>
+            <PinTag skill={skill} />
             <StatusTag skill={skill} />
-          </span>
+          </Flex>
         </Flex>
         <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
           {skill.version_label} · <UpdatedText value={skill.updated_at} />
@@ -403,6 +503,7 @@ const SkillDrawer: React.FC<{
           <Flex align="center" gap={token.marginXS} wrap>
             <SourceTag source={skill.source} />
             <StatusTag skill={skill} />
+            <PinTag skill={skill} />
           </Flex>
           {skill.description ? (
             <Typography.Paragraph style={{ margin: 0 }}>{skill.description}</Typography.Paragraph>
@@ -430,6 +531,17 @@ const SkillDrawer: React.FC<{
                     <Typography.Text code>{skill.namespace_slug}</Typography.Text>
                   </>
                 )}
+              </Descriptions.Item>
+            )}
+            {skill.pin && (
+              <Descriptions.Item label="Release">
+                {pinLabel(skill)} ({PIN_STATUS_LABELS[skill.pin.status]})
+              </Descriptions.Item>
+            )}
+            {skill.delivered && report.release?.delivered && (
+              <Descriptions.Item label="Delivered">
+                In the last session, as part of r{report.release.delivered.release} (
+                {formatAbsoluteTime(report.release.delivered.delivered_at)})
               </Descriptions.Item>
             )}
             <Descriptions.Item label="Updated">
@@ -607,6 +719,7 @@ export const TeammateSkillsPanel: React.FC<TeammateSkillsPanelProps> = ({
       return (
         <Flex vertical gap={token.marginXS}>
           <SkillsSummary report={report} driftLoading={driftLoading} />
+          <ReleaseLine report={report} />
           <GapsBody report={report} gaps={gaps} limit={COMPACT_GAP_LIMIT} />
         </Flex>
       );
@@ -616,6 +729,7 @@ export const TeammateSkillsPanel: React.FC<TeammateSkillsPanelProps> = ({
     return (
       <Flex vertical gap={token.marginSM}>
         <SkillsSummary report={report} driftLoading={driftLoading} />
+        <ReleaseLine report={report} />
         {notices.map((notice) => (
           <CompactNotice key={notice} type="info" message={notice} />
         ))}

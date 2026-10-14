@@ -48,6 +48,7 @@ const configMocks = vi.hoisted(() => ({
 }));
 
 import { expectSignalQuiescence } from '../../../test/helpers/signal-quiescence.js';
+import { setAgorSkillsIndex } from '../../agor-skills-index.js';
 import { isExecutorCleanupUnverified } from '../../termination-state.js';
 import { CodexTool } from './codex-tool.js';
 import { CodexPromptService, type CodexStreamEvent } from './prompt-service.js';
@@ -278,6 +279,43 @@ describe('CodexPromptService - SDK Instance Caching (issue #133)', () => {
     serviceWithPrivate.refreshClient('new-key');
     await serviceWithPrivate.ensureCodexClient({ model_instructions_file: '/tmp/a.md' });
     expect(mockInstanceCount).toBe(countAfterInit + 2);
+  });
+});
+
+describe('CodexPromptService - instructions file', () => {
+  it('writes the Agor prompt followed by the team skills index', async () => {
+    const service = new CodexPromptService(
+      mockMessagesRepo,
+      mockSessionsRepo,
+      mockSessionMCPServerRepo,
+      mockBranchesRepo,
+      mockReposRepo,
+      'test-api-key',
+      mockDb
+    );
+    const write = (
+      service as unknown as {
+        ensureCodexInstructionsFile: (id: SessionID) => Promise<string>;
+      }
+    ).ensureCodexInstructionsFile.bind(service);
+
+    setAgorSkillsIndex(
+      '## Team skills (Frink r2)\n- research-loop v1 [ns/skills/frink/research-loop.md]'
+    );
+    try {
+      const withIndex = await fs.readFile(await write('skills-session' as SessionID), 'utf8');
+      expect(withIndex).toContain('agor_sessions_get_current_context');
+      expect(
+        withIndex.endsWith(
+          '\n\n## Team skills (Frink r2)\n- research-loop v1 [ns/skills/frink/research-loop.md]'
+        )
+      ).toBe(true);
+    } finally {
+      setAgorSkillsIndex(undefined);
+    }
+    const without = await fs.readFile(await write('skills-session' as SessionID), 'utf8');
+    expect(without).not.toContain('Team skills');
+    await fs.rm(await write('skills-session' as SessionID), { force: true });
   });
 });
 
