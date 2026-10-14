@@ -89,20 +89,50 @@ describe('KnowledgeSkillProvider', () => {
     ]);
   });
 
-  dbTest('ignores namespaces without skills_provider: true', async ({ db }) => {
+  dbTest('trusts only configured namespaces, never a metadata flag', async ({ db }) => {
     const fixture = skillsKnowledgeApp(db);
     const owner = await seedSkillsUser(db, 'owner');
-    const plain = await seedSkillsNamespace(db, owner, { provider: false });
+    const outsider = await seedSkillsUser(db, 'outsider');
+    // A member creates a readable namespace and flags it as a provider: ignored.
+    const hostile = await seedSkillsNamespace(db, outsider, {
+      slug: 'aa-hostile',
+      provider: false,
+      othersCan: 'read',
+      metadata: { skills_provider: true },
+    });
+    await putSkillDoc(
+      fixture,
+      outsider,
+      hostile,
+      'skills/frink/override.md',
+      skillMarkdown('override')
+    );
+    const asOwner = new KnowledgeSkillProvider(fixture.app, userParams(owner));
+    expect(await asOwner.providerNamespaces()).toEqual([]);
+    expect(await asOwner.list()).toEqual([]);
+
+    const trusted = await seedSkillsNamespace(db, owner, { slug: 'team-skills' });
     await putSkillDoc(
       fixture,
       owner,
-      plain,
+      trusted,
       'skills/frink/research-loop.md',
       skillMarkdown('research-loop')
     );
     const provider = new KnowledgeSkillProvider(fixture.app, userParams(owner));
-    expect(await provider.providerNamespaces()).toEqual([]);
-    expect(await provider.list()).toEqual([]);
+    expect((await provider.providerNamespaces()).map((ns) => ns.slug)).toEqual(['team-skills']);
+    expect((await provider.list()).map((skill) => skill.name)).toEqual(['research-loop']);
+    expect(provider.providerFor('team-skills')?.curator_branch_id).toMatch(/^01a0/);
+    // A configured slug that does not exist is skipped.
+    fixture.config.skills.providers.unshift({
+      namespace: 'missing-ns',
+      curator_branch_id: '01a00000-0000-7000-8000-000000000001',
+    });
+    expect(
+      (await new KnowledgeSkillProvider(fixture.app, userParams(owner)).providerNamespaces()).map(
+        (ns) => ns.slug
+      )
+    ).toEqual(['team-skills']);
   });
 
   dbTest('shows a caller only provider namespaces it can read', async ({ db }) => {

@@ -10,7 +10,7 @@ import {
   SKILL_DESCRIPTION_MAX_LENGTH,
   SKILL_NAME_MAX_LENGTH,
   SKILL_NAME_PATTERN,
-  SKILLS_PROVIDER_NAMESPACE_FLAG,
+  SKILL_VERSION_MAX_LENGTH,
   type SkillFrontmatter,
 } from '../types/skills';
 import type { TeammateSkillOrigin } from '../types/teammate-skills';
@@ -88,6 +88,10 @@ export function parseSkillDocument(content: string): ParsedSkillDocument {
   return { frontmatter, fields: readSkillFrontmatter(frontmatter), body };
 }
 
+const SKILL_VERSION_PATTERN = new RegExp(
+  `^[A-Za-z0-9][A-Za-z0-9.+_-]{0,${SKILL_VERSION_MAX_LENGTH - 1}}$`
+);
+
 function pathSegments(path: string): string[] {
   return path.split('/').filter(Boolean);
 }
@@ -109,11 +113,31 @@ export function expectedSkillName(path: string): string | undefined {
   return last.replace(/\.md$/i, '') || undefined;
 }
 
-/** True when a namespace's metadata marks it as a skills provider. */
-export function isSkillsProviderNamespace(
-  namespace: { metadata?: Record<string, unknown> | null } | null | undefined
-): boolean {
-  return namespace?.metadata?.[SKILLS_PROVIDER_NAMESPACE_FLAG] === true;
+/** Markdown that changes a line's structure when it starts it: headings, quotes, lists, rules, fences, tables. */
+const LEADING_MARKDOWN = /^(?:[#>*+=|~`_-]+|\d+[.)](?=\s|$))+\s*/;
+
+/**
+ * Knowledge-authored text made safe to interpolate into model-visible text:
+ * one line (control characters and line breaks become spaces), no leading
+ * markdown structure, backticks and brackets neutralized, cut to `max`
+ * characters with an ellipsis. Returns '' for anything that is not a string
+ * or number.
+ */
+export function skillTextField(value: unknown, max: number): string {
+  if (typeof value !== 'string' && typeof value !== 'number') return '';
+  let text = String(value)
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the point
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  let previous: string;
+  do {
+    previous = text;
+    text = text.replace(LEADING_MARKDOWN, '').trim();
+  } while (text !== previous);
+  text = text.replace(/[`[\]]/g, "'");
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
 }
 
 export interface SkillValidationInput {
@@ -126,7 +150,8 @@ export interface SkillValidationInput {
  * - a frontmatter block exists and parses;
  * - `name` is kebab-case, at most 64 characters, and equals the file stem
  *   (or the folder for `SKILL.md`);
- * - `description` is non-empty and at most 1024 characters.
+ * - `description` is non-empty and at most 1024 characters;
+ * - `metadata.version`, when present, is a single short token such as `1.2.0`.
  *
  * Returns human-readable problems; an empty list means valid.
  */
@@ -164,6 +189,16 @@ export function validateSkillDocument({ path, content }: SkillValidationInput): 
     issues.push(
       `\`description\` is ${rawDescription.trim().length} characters; the limit is ${SKILL_DESCRIPTION_MAX_LENGTH}`
     );
+  }
+  const metadata = asRecord(frontmatter.metadata);
+  const rawVersion = metadata?.version;
+  if (rawVersion !== undefined && rawVersion !== null) {
+    const version = typeof rawVersion === 'number' ? String(rawVersion) : rawVersion;
+    if (typeof version !== 'string' || !SKILL_VERSION_PATTERN.test(version)) {
+      issues.push(
+        `\`metadata.version\` must be one line of at most ${SKILL_VERSION_MAX_LENGTH} letters, digits, dots, hyphens, plus signs or underscores`
+      );
+    }
   }
   return issues;
 }

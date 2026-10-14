@@ -507,6 +507,47 @@ describe('assertValidEffectiveExecutionConfig', () => {
   });
 });
 
+describe('skills.providers config', () => {
+  const branchId = '019f1c2d-6e34-7111-951e-30948bd3c18c';
+  const check = (skills: unknown) => () => assertValidRawConfig({ skills } as AgorConfig);
+
+  it('accepts trusted providers with a curator branch', () => {
+    expect(
+      check({
+        providers: [
+          { namespace: 'assistant-019f1c2d6e347111951e3094', curator_branch_id: branchId },
+        ],
+      })
+    ).not.toThrow();
+    expect(check({})).not.toThrow();
+  });
+
+  it('rejects malformed provider entries', () => {
+    expect(check({ providers: 'team' })).toThrow("'skills.providers' must be an array");
+    expect(check({ providers: [{ namespace: 'team' }] })).toThrow(
+      "'skills.providers[0].curator_branch_id' must be a non-empty string"
+    );
+    expect(
+      check({ providers: [{ namespace: 'Team Skills', curator_branch_id: branchId }] })
+    ).toThrow('must be a Knowledge namespace slug');
+    expect(check({ providers: [{ namespace: 'team', curator_branch_id: '019f1c2d' }] })).toThrow(
+      'must be a full branch id'
+    );
+    expect(
+      check({
+        providers: [
+          { namespace: 'team', curator_branch_id: branchId },
+          { namespace: 'team', curator_branch_id: branchId },
+        ],
+      })
+    ).toThrow('repeats team');
+    expect(
+      check({ providers: [{ namespace: 'team', curator_branch_id: branchId, extra: 1 }] })
+    ).toThrow('skills.providers[0].extra');
+    expect(check({ curators: [] })).toThrow('skills.curators');
+  });
+});
+
 describe('resolveTeammateFrameworkRepoUrl', () => {
   it('uses the operator-owned teammate setting', () => {
     expect(

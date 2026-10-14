@@ -6,6 +6,7 @@
  * document visibility, versioning and `expected_version` checks.
  */
 
+import type { AgorSkillsProviderSettings } from '@agor/core/config';
 import {
   type Database,
   generateId,
@@ -33,11 +34,21 @@ export interface SkillsKnowledgeFixture {
   versions: KnowledgeVersionsService;
   /** Extra services a test registers (e.g. `sessions`, `branches`). */
   services: Map<string, unknown>;
+  /** The daemon config `app.get('config')` returns; `skills.providers` is the trust list. */
+  config: { skills: { providers: AgorSkillsProviderSettings[] } };
 }
+
+/** Configs by database, so `seedSkillsNamespace(db, …)` can register a provider. */
+const configsByDb = new WeakMap<object, SkillsKnowledgeFixture['config']>();
+
+export const DEFAULT_CURATOR_BRANCH_ID = '01a00000-0000-7000-8000-00000000c0de';
 
 export function skillsKnowledgeApp(db: Database): SkillsKnowledgeFixture {
   const services = new Map<string, unknown>();
+  const config = configsByDb.get(db) ?? { skills: { providers: [] } };
+  configsByDb.set(db, config);
   const app = {
+    get: (key: string) => (key === 'config' ? config : undefined),
     service(path: string) {
       const service = services.get(path);
       if (!service) throw new Error(`No service registered at ${path}`);
@@ -50,7 +61,7 @@ export function skillsKnowledgeApp(db: Database): SkillsKnowledgeFixture {
   services.set('kb/documents', documents);
   services.set('kb/namespaces', namespaces);
   services.set('kb/versions', versions);
-  return { app, documents, namespaces, versions, services };
+  return { app, documents, namespaces, versions, services, config };
 }
 
 export async function seedSkillsUser(
@@ -75,23 +86,35 @@ export async function seedSkillsNamespace(
   owner: User,
   options: {
     slug?: string;
+    /** Register it in `skills.providers` (default true). */
     provider?: boolean;
     othersCan?: KnowledgeNamespaceOthersCan;
-    branchId?: string;
+    /** `curator_branch_id` of the provider entry. */
+    curatorBranchId?: string;
+    /** Extra namespace metadata, e.g. a stale `skills_provider` flag that must be ignored. */
+    metadata?: Record<string, unknown>;
   } = {}
 ): Promise<KnowledgeNamespace> {
   const slug = options.slug ?? `skills-${generateId().replace(/-/g, '').slice(-12)}`;
-  return new KnowledgeNamespaceRepository(db).create({
+  const namespace = await new KnowledgeNamespaceRepository(db).create({
     slug,
     display_name: slug,
-    kind: options.branchId ? 'branch' : 'team',
+    kind: 'team',
     owner_user_id: owner.user_id as UserID,
     created_by: owner.user_id as UserID,
     others_can: options.othersCan ?? 'read',
     visibility_default: 'public',
-    ...(options.branchId ? { branch_id: options.branchId as KnowledgeNamespace['branch_id'] } : {}),
-    metadata: options.provider === false ? {} : { skills_provider: true },
+    metadata: options.metadata ?? {},
   });
+  if (options.provider !== false) {
+    const config = configsByDb.get(db) ?? { skills: { providers: [] } };
+    configsByDb.set(db, config);
+    config.skills.providers.push({
+      namespace: slug,
+      curator_branch_id: options.curatorBranchId ?? DEFAULT_CURATOR_BRANCH_ID,
+    });
+  }
+  return namespace;
 }
 
 export function skillMarkdown(
