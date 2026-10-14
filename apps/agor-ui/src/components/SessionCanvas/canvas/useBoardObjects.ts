@@ -11,6 +11,7 @@ import {
   useBoardMutationGuard,
 } from '../../../hooks/useBoardMutationGuard';
 import type { BoardWriteTicket } from '../../../store/boardMutationGuard';
+import { formatActionError } from '../../../utils/connectionErrors';
 import { useThemedMessage } from '../../../utils/message';
 import {
   computeLayerChanges,
@@ -44,6 +45,11 @@ interface UseBoardObjectsProps {
    * pass the one of their queue. A write without a current ticket is refused.
    */
   guard: BoardMutationGuard;
+  /**
+   * A write failed after its optimistic change: redraw the canvas from the
+   * store's board (and again after the reconnect, when the reply was lost).
+   */
+  onWriteFailed?: (error: unknown) => void;
 }
 
 type ZoneEntry = [string, Extract<BoardObject, { type: 'zone' }>];
@@ -72,6 +78,7 @@ export const useBoardObjects = ({
   currentUserId,
   onZoneDraftLost,
   guard,
+  onWriteFailed,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
@@ -96,6 +103,8 @@ export const useBoardObjects = ({
   const openSession = useCallback((sessionId: string) => {
     onOpenSessionRef.current?.(sessionId);
   }, []);
+  const onWriteFailedRef = useRef(onWriteFailed);
+  onWriteFailedRef.current = onWriteFailed;
 
   // Use the board object's reference directly. The store already preserves
   // unchanged board references, and serializing every object on every canvas
@@ -128,8 +137,7 @@ export const useBoardObjects = ({
         } as unknown as Partial<Board>);
         return true;
       } catch (error) {
-        console.error('Failed to update object:', error);
-        showError('Failed to save board object');
+        showError(formatActionError('save your change', error, { idempotent: true }));
         return false;
       }
     },
@@ -200,8 +208,7 @@ export const useBoardObjects = ({
           } as unknown as Partial<Board>)
         );
       } catch (error) {
-        console.error('Failed to reorder object:', error);
-        showError('Failed to reorder zone');
+        showError(formatActionError('reorder the zone', error, { idempotent: true }));
       }
     },
     [client, showError]
@@ -241,13 +248,12 @@ export const useBoardObjects = ({
           deletedObjectsRef.current.delete(objectId);
         }, 1000);
       } catch (error) {
-        console.error('Failed to delete zone:', error);
-        // Rollback: remove from deleted set
         deletedObjectsRef.current.delete(objectId);
-        // Note: WebSocket update should restore the actual state
+        showError(formatActionError('delete the zone', error, { idempotent: true }));
+        onWriteFailedRef.current?.(error);
       }
     },
-    [client, setNodes, deletedObjectsRef]
+    [client, setNodes, deletedObjectsRef, showError]
   );
 
   /**
@@ -262,6 +268,13 @@ export const useBoardObjects = ({
         return;
       }
 
+      const type = boardRef.current?.objects?.[objectId]?.type;
+      const action =
+        type === 'zone'
+          ? 'delete the zone'
+          : type === 'markdown'
+            ? 'delete the note'
+            : 'delete the artifact';
       // Mark as deleted to prevent re-appearance during WebSocket updates
       deletedObjectsRef.current.add(objectId);
 
@@ -280,12 +293,12 @@ export const useBoardObjects = ({
           deletedObjectsRef.current.delete(objectId);
         }, 1000);
       } catch (error) {
-        console.error('Failed to delete object:', error);
-        // Rollback: remove from deleted set
         deletedObjectsRef.current.delete(objectId);
+        showError(formatActionError(action, error, { idempotent: true }));
+        onWriteFailedRef.current?.(error);
       }
     },
-    [client, setNodes, deletedObjectsRef] // Removed board dependency
+    [client, setNodes, deletedObjectsRef, showError]
   );
 
   /**
@@ -316,11 +329,12 @@ export const useBoardObjects = ({
           deletedObjectsRef.current.delete(objectId);
         }, 1000);
       } catch (error) {
-        console.error('Failed to delete artifact:', error);
         deletedObjectsRef.current.delete(objectId);
+        showError(formatActionError('delete the artifact', error, { idempotent: true }));
+        onWriteFailedRef.current?.(error);
       }
     },
-    [client, setNodes, deletedObjectsRef]
+    [client, setNodes, deletedObjectsRef, showError]
   );
 
   /**
@@ -588,12 +602,12 @@ export const useBoardObjects = ({
           objectData,
         } as unknown as Partial<Board>);
       } catch (error) {
-        console.error('Failed to add zone node:', error);
-        // Rollback
-        setNodes((nodes) => nodes.filter((n) => n.id !== objectId));
+        showError(formatActionError('add the zone', error, { idempotent: false }));
+        // A lost reply may still have created it: the redraw shows what the store has.
+        onWriteFailedRef.current?.(error);
       }
     },
-    [client, setNodes, buildObjectNode] // Removed board dependency
+    [client, setNodes, buildObjectNode, showError]
   );
 
   /**
@@ -641,11 +655,12 @@ export const useBoardObjects = ({
           objects,
         } as unknown as Partial<Board>);
       } catch (error) {
-        console.error('Failed to persist object positions:', error);
+        showError(formatActionError('save the new layout', error, { idempotent: true }));
+        onWriteFailedRef.current?.(error);
       }
       return true;
     },
-    [client, deletedObjectsRef] // Removed board dependency
+    [client, deletedObjectsRef, showError]
   );
 
   return {

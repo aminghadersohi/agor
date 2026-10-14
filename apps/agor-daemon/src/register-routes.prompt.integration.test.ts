@@ -403,8 +403,6 @@ describe('prompt route provenance envelope', () => {
 
   it('titles the session from the sender text, not from Agor’s own attestation', async () => {
     const f = await fixture();
-    const autoTitle = vi.mocked(f as unknown as { tasksService?: never } as never);
-    void autoTitle;
     const task = await f.prompt({ prompt: 'rebase onto main and rerun the suite' }, stamp());
     expect(deriveTitleFromPrompt(task.full_prompt)).toBe('rebase onto main and rerun the suite');
   });

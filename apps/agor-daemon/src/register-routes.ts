@@ -2772,24 +2772,18 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         // Two deliberate exclusions. A `provider`-carrying transport is a
         // browser/REST caller, not an Agor session relaying on someone's
         // behalf, and must never be able to hand this route a stamp.
-        // Idempotent internal producers (scheduler, session reminders, widget
+        // Idempotent producers (a durable `idempotencyTaskId`, e.g. widget
         // auto-resume) reconcile on exact prompt text across more than one
         // call path, so a per-caller block would break their convergence
         // rather than attest anything - and none of them relays caller text.
         const promptProvenanceStamp =
           !params.provider && !data.idempotencyTaskId ? params._promptProvenance : undefined;
         const provenance = promptProvenanceStamp
-          ? await runWithTenantDatabaseScope(db, promptTenantId, (operationDb) =>
-              resolvePromptProvenance({
-                stamp: promptProvenanceStamp,
-                body: escapedBody.text,
-                escapedSentinels: escapedBody.escaped,
-                recipientSession: session,
-                branchRepo: new BranchRepository(operationDb),
-                findUserRole: async (userId) =>
-                  (await new UsersRepository(operationDb).findById(userId))?.role,
-              })
-            )
+          ? resolvePromptProvenance({
+              stamp: promptProvenanceStamp,
+              body: escapedBody.text,
+              escapedSentinels: escapedBody.escaped,
+            })
           : undefined;
         const admittedPrompt = provenance?.prompt ?? escapedBody.text;
 

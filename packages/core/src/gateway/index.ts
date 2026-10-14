@@ -7,6 +7,7 @@
 
 export type {
   GatewayConnector,
+  GatewayInboundResult,
   GatewayProviderHistoryMessage,
   GatewayProviderHistoryRequest,
   GatewayProviderHistoryResult,

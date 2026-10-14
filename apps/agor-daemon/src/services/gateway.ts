@@ -53,6 +53,7 @@ import { type Application, Forbidden, NotAuthenticated } from '@agor/core/feathe
 import type {
   GatewayConnector,
   GatewayContext,
+  GatewayInboundResult,
   InboundFile,
   InboundMessage,
   InboundSkippedFile,
@@ -6480,9 +6481,16 @@ export class GatewayService {
         });
       }
     } catch (error) {
-      if (error instanceof GatewayPromptAuthorizationError) {
+      if (
+        error instanceof GatewayPromptAuthorizationError ||
+        (isSlackReaction && error instanceof Forbidden)
+      ) {
         if (!isSlackReaction && !discordUnaddressed) {
-          await this.sendPromptAuthorizationDenied(channel, data, error.userMessage);
+          await this.sendPromptAuthorizationDenied(
+            channel,
+            data,
+            error instanceof GatewayPromptAuthorizationError ? error.userMessage : error.message
+          );
         }
         this.updateProgressAfterCommit({
           session_id: sessionId,
@@ -6498,7 +6506,7 @@ export class GatewayService {
       console.error(
         `[gateway] Failed to send prompt to session: channel_id=${channel.id} code=${safeError}`
       );
-      if (!discordUnaddressed) {
+      if (!isSlackReaction && !discordUnaddressed) {
         this.sendSystemMessage(channel, data.thread_id, `Error sending prompt: ${safeError}`);
       }
       this.updateProgressAfterCommit({
@@ -7537,11 +7545,12 @@ export class GatewayService {
     tenantId: TenantID | string | undefined,
     msg: InboundMessage,
     lease?: GatewayListenerLease
-  ): Promise<void> {
+  ): Promise<GatewayInboundResult | undefined> {
     if (!tenantId) {
       throw new Error(`Missing tenant context for gateway listener channel ${channel.id}`);
     }
 
+    let accepted = true;
     const queueKey = this.listenerKey(tenantId, `${channel.id}\0${msg.threadId}`);
     const prior = this.inboundThreadQueues.get(queueKey) ?? Promise.resolve();
     const current = prior
@@ -7568,7 +7577,10 @@ export class GatewayService {
               leaseDurationMs: GATEWAY_EVENT_PROCESSING_LEASE_MS,
               requireListenerClaim: true,
             });
-            if (admitted.outcome === 'completed_duplicate') return;
+            if (admitted.outcome === 'completed_duplicate') {
+              accepted = !!admitted.event.task_id;
+              return;
+            }
             if (admitted.outcome === 'in_progress_elsewhere') {
               throw new Error(
                 'Gateway inbound event is still being processed by the previous listener owner'
@@ -7707,6 +7719,7 @@ export class GatewayService {
                   : {}),
               });
 
+          accepted = result.success;
           if (eventId && lease) {
             const completed = await this.inboundEventRepo.complete({
               eventId,
@@ -7725,6 +7738,12 @@ export class GatewayService {
     this.inboundThreadQueues.set(queueKey, current);
     try {
       await current;
+      if (
+        channel.channel_type === 'slack' &&
+        isSlackInboundReactionEventType(msg.metadata?.slack_event_type)
+      ) {
+        return { accepted };
+      }
     } finally {
       if (this.inboundThreadQueues.get(queueKey) === current) {
         this.inboundThreadQueues.delete(queueKey);

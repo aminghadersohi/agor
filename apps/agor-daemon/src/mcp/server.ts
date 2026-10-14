@@ -108,10 +108,7 @@ export interface McpContext {
    *
    * `_promptProvenance` rides here rather than being passed per call site so
    * an MCP-originated prompt cannot be admitted unstamped by a tool that
-   * forgot to opt in. That failure mode is not hypothetical: exactly one of
-   * the eight MCP prompt call sites once omitted `system_authored`, and the
-   * consequence was a relayed agent message reaching the destination SDK
-   * labeled as human-typed.
+   * forgot to opt in.
    */
   baseServiceParams: Pick<AuthenticatedParams, 'user' | 'authenticated' | 'provider' | 'tenant'> & {
     /**

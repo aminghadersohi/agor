@@ -40,11 +40,11 @@ function clientFor({ reject, findResult }: { reject?: unknown; findResult?: unkn
   } as unknown as AgorClient;
 }
 
-function renderSwitcher(client = clientFor(), user: User = owner) {
+function renderSwitcher(client = clientFor(), user: User = owner, boards: Board[] = [board]) {
   const onBoardChange = vi.fn();
   const view = render(
     <BoardSwitcher
-      boards={[board]}
+      boards={boards}
       currentBoardId={board.board_id}
       onBoardChange={onBoardChange}
       branchById={new Map()}
@@ -292,5 +292,26 @@ describe('BoardSwitcher branch-count badges (Step 3)', () => {
     const item = await screen.findByRole('menuitem');
     expect(within(item).getByRole('img', { name: '3 worktrees' })).toBeInTheDocument();
     expect(within(item).getByRole('img', { name: '4 active sessions' })).toBeInTheDocument();
+  });
+});
+
+describe('BoardSwitcher empty states', () => {
+  const manyBoards = Array.from(
+    { length: 8 },
+    (_, index) => ({ ...board, board_id: `board-${index}`, name: `Board ${index}` }) as Board
+  );
+
+  it.each([
+    { boards: [], filter: null, text: 'No boards yet.' },
+    { boards: manyBoards, filter: 'zebra', text: 'No boards match “zebra”.' },
+  ])('says "$text"', async ({ boards, filter, text }) => {
+    const { container } = renderSwitcher(clientFor(), owner, boards);
+    fireEvent.click(container.querySelector('button.ant-dropdown-trigger') as HTMLButtonElement);
+    if (filter) {
+      fireEvent.change(await screen.findByRole('textbox', { name: 'Filter boards' }), {
+        target: { value: filter },
+      });
+    }
+    expect(await screen.findByText(text)).toBeInTheDocument();
   });
 });

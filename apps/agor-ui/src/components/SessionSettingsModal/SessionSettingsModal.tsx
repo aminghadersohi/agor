@@ -269,14 +269,29 @@ function buildUpdates(values: FormValues, session: Session, initial: FormValues)
   }
 
   if (values.callbackConfig) {
-    updates.callback_config = {
-      ...session.callback_config,
-      enabled: values.callbackConfig.enabled ?? true,
-      callback_mode: values.callbackConfig.mode ?? 'persistent',
-      delivery: values.callbackConfig.delivery ?? 'direct',
-      include_last_message: values.callbackConfig.includeLastMessage ?? true,
-      template: values.callbackConfig.template || undefined,
-    };
+    // Diff against the form's seed, not the live session: untouched fields
+    // must not undo concurrent mode/target edits or re-enable a consumed Once
+    // callback. The repository deep-merges this patch, preserving routing and
+    // the server-stamped principal without echoing them back to the server.
+    const callbackPatch: NonNullable<Session['callback_config']> = {};
+    if (values.callbackConfig.mode !== initial.callbackConfig.mode) {
+      callbackPatch.callback_mode = values.callbackConfig.mode;
+    }
+    if (values.callbackConfig.delivery !== initial.callbackConfig.delivery) {
+      callbackPatch.delivery = values.callbackConfig.delivery;
+    }
+    if (values.callbackConfig.enabled !== initial.callbackConfig.enabled) {
+      callbackPatch.enabled = values.callbackConfig.enabled;
+    }
+    if (values.callbackConfig.includeLastMessage !== initial.callbackConfig.includeLastMessage) {
+      callbackPatch.include_last_message = values.callbackConfig.includeLastMessage;
+    }
+    if ((values.callbackConfig.template ?? '') !== (initial.callbackConfig.template ?? '')) {
+      // An empty string selects the default template; undefined is skipped by
+      // the deep merge and would leave the previous custom template in place.
+      callbackPatch.template = values.callbackConfig.template ?? '';
+    }
+    if (Object.keys(callbackPatch).length > 0) updates.callback_config = callbackPatch;
   }
 
   if (values.autoArchive !== session.auto_archive) {
@@ -681,7 +696,7 @@ export const SessionSettingsModal: React.FC<SessionSettingsModalProps> = ({
             description="Custom context stays read-only: this view omits scheduled-run and SDK command/skill fields until the full record loads."
             action={
               <Button size="small" onClick={fullDetails.retry}>
-                Retry
+                Try again
               </Button>
             }
           />

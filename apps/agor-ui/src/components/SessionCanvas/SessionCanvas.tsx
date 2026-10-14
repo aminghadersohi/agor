@@ -63,6 +63,7 @@ import {
   ControlButton,
   Controls,
   type Edge,
+  getNodesBounds,
   MarkerType,
   MiniMap,
   type Node,
@@ -72,6 +73,7 @@ import {
   type ReactFlowInstance,
   useEdgesState,
   useNodesState,
+  type Viewport,
 } from 'reactflow';
 import {
   type EntityPlacementIntent,
@@ -106,6 +108,14 @@ import {
   selectUserById,
 } from '../../store/selectors';
 import type { AgenticToolOption } from '../../types';
+import {
+  type ActionErrorCopy,
+  describeActionError,
+  formatActionError,
+  isInFlightConnectionLossError,
+  notConnectedMessage,
+  sessionStartedMessageNotSent,
+} from '../../utils/connectionErrors';
 import { useThemedMessage } from '../../utils/message';
 import { REACT_FLOW_DRAG_HANDLE_SELECTOR } from '../../utils/reactFlowDragClasses';
 import { buildScopedBoardCss } from '../../utils/sanitizeCss';
@@ -115,6 +125,7 @@ import BranchCard from '../BranchCard';
 import CardModal from '../CardModal';
 import type { CardNodeData } from '../CardNode';
 import CardNode from '../CardNode';
+import { ActionErrorNotice } from '../CompactNotice';
 import { MarkdownRenderer } from '../MarkdownRenderer/MarkdownRenderer';
 import SessionCard from '../SessionCard';
 import { BoardPartitionStatus } from './BoardPartitionStatus';
@@ -208,6 +219,8 @@ interface SessionCanvasProps {
   staticCursorScale?: number;
   /** Optional host-controlled height for embedded/demo canvases. Defaults to full viewport. */
   height?: React.CSSProperties['height'];
+  /** View only (mobile): pan, zoom and open items; no tools, dragging, edits or cursor broadcast. */
+  readOnly?: boolean;
 }
 
 export interface SessionCanvasRef {
@@ -261,7 +274,7 @@ const SessionNode = React.memo(({ data }: { data: SessionNodeData }) => {
 
 interface BranchNodeData {
   branch: Branch;
-  repo: Repo;
+  repo?: Repo;
   boardId?: string | null;
   currentUserId?: string;
   onTaskClick?: (taskId: string) => void;
@@ -288,6 +301,7 @@ interface BranchNodeData {
   zoneColor?: string;
   selectedSessionId?: string | null;
   isActiveUrlTarget?: boolean;
+  showDragHandle: boolean;
   client: AgorClient | null;
 }
 
@@ -362,6 +376,7 @@ const BranchNode = React.memo(
           zoneName={data.zoneName}
           client={data.client}
           zoneColor={data.zoneColor}
+          showDragHandle={data.showDragHandle}
         />
       </div>
     );
@@ -383,6 +398,7 @@ const BranchNode = React.memo(
       p.isPinned === n.isPinned &&
       p.zoneName === n.zoneName &&
       p.zoneColor === n.zoneColor &&
+      p.showDragHandle === n.showDragHandle &&
       p.client === n.client &&
       p.onTaskClick === n.onTaskClick &&
       p.onSessionClick === n.onSessionClick &&
@@ -402,6 +418,34 @@ const BranchNode = React.memo(
     );
   }
 );
+
+/** View-only (phone) canvases open at a zoom where card titles stay readable. */
+const READ_ONLY_MIN_ZOOM = 0.6;
+const READ_ONLY_FIT_PADDING = 0.1;
+/** View-only canvases remember their viewport per board for the browser session, so Back returns to it. */
+const viewportKey = (boardId: string) => `agor:canvas-viewport:${boardId}`;
+const readSavedViewport = (boardId: string): Viewport | null => {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(viewportKey(boardId)) ?? 'null');
+    return typeof saved?.zoom === 'number' ? saved : null;
+  } catch {
+    return null;
+  }
+};
+const saveViewport = (boardId: string, viewport: Viewport) => {
+  try {
+    sessionStorage.setItem(viewportKey(boardId), JSON.stringify(viewport));
+  } catch {
+    // Storage full or blocked: the next visit fits the first zone again.
+  }
+};
+/** The first zone, or the first card when there are none: top first, then left. */
+const firstNodeToRead = (nodes: Node[]): Node | undefined => {
+  const zones = nodes.filter((n) => n.type === 'zone');
+  return (zones.length ? zones : nodes.filter((n) => n.type === 'branchNode' && !n.parentNode))
+    .slice()
+    .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)[0];
+};
 
 // Define nodeTypes outside component to avoid recreation on every render
 const nodeTypes = {
@@ -427,6 +471,7 @@ interface BranchZoneTriggerModalProps {
     zoneId: string;
     trigger: ZoneTrigger;
     sessions: readonly Session[];
+    runError?: ActionErrorCopy;
   };
   client: AgorClient | null;
   branch: Branch | undefined;
@@ -470,6 +515,7 @@ const BranchZoneTriggerModal = React.memo(
         availableAgents={availableAgents}
         mcpServerById={mcpServerById}
         currentUser={currentUser}
+        runError={modal.runError}
         onExecute={onExecute}
       />
     );
@@ -511,6 +557,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       staticCursors,
       staticCursorScale,
       height = '100vh',
+      readOnly = false,
     }: SessionCanvasProps,
     ref
   ) => {
@@ -528,7 +575,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     const cardById = useAgorStore(selectCardById);
     const userById = useAgorStore(selectUserById);
     const currentUser = currentUserId ? userById.get(currentUserId) : undefined;
-    const canEditBoard = useCanManageBoard(client, board ?? undefined, currentUser);
+    const canEditBoard = useCanManageBoard(client, board ?? undefined, currentUser) && !readOnly;
     // Until this board's partition is loaded (e.g. right after a reconnect
     // unloaded it), its cached placements may be stale and its record may be
     // the lean one without zone geometry: a drag would then persist
@@ -539,7 +586,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Board Viewers may collaborate through comments even though structural
     // canvas mutations require board.edit. The daemon applies the same global
     // member floor plus board-view authorization on comment creation.
-    const canComment = Boolean(currentUser && hasMinimumRole(currentUser.role, ROLES.MEMBER));
+    const canComment =
+      !readOnly && Boolean(currentUser && hasMinimumRole(currentUser.role, ROLES.MEMBER));
     // The single fence for every board-scoped write (`useBoardMutationGuard`).
     // A write captures a ticket when it is queued or its dialog opens, and the
     // ticket is rechecked immediately before every dispatch: a write decided
@@ -653,7 +701,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
        */
       stale?: boolean;
       /** The last save was rejected (e.g. permission): the draft stays open. */
-      saveError?: string;
+      saveError?: ActionErrorCopy;
+      /** A new note whose create lost its reply: `objectId` is its client id. */
+      createUnconfirmed?: boolean;
     } | null>(null);
     const [markdownContent, setMarkdownContent] = useState('');
     const [markdownWidth, setMarkdownWidth] = useState(500); // Default width
@@ -686,11 +736,13 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       sessions: readonly Session[];
       /** The drop's write ticket: a board reload while the picker is open drops it. */
       ticket: BoardWriteTicket;
+      /** The last run failed before any session started: the picker stays open to retry. */
+      runError?: ActionErrorCopy;
     } | null>(null);
     const handleCancelBranchTrigger = useCallback(() => setBranchTriggerModal(null), []);
     // The picker action being run: a second Execute (a double click) before
     // the first finishes runs nothing. Set synchronously, before any await.
-    const runningBranchTriggerRef = useRef<typeof branchTriggerModal>(null);
+    const runningBranchTriggerRef = useRef<number | null>(null);
     const handleExecuteBranchTrigger = useStableCallback(
       async ({
         sessionId,
@@ -703,21 +755,34 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         mcpServerIds,
       }: Parameters<React.ComponentProps<typeof ZoneTriggerModal>['onExecute']>[0]) => {
         const triggerModal = branchTriggerModal;
-        if (!client || !triggerModal) {
-          console.error('❌ Cannot execute trigger: client or trigger action not available');
-          setBranchTriggerModal(null);
+        if (!triggerModal) return;
+        const keepOpenWith = (runError: ActionErrorCopy | undefined) =>
+          setBranchTriggerModal((current) =>
+            current?.actionId === triggerModal.actionId && current.runError !== runError
+              ? { ...current, runError }
+              : current
+          );
+        if (!client) {
+          // Nothing was sent; the modal stays open to run again.
+          keepOpenWith({ message: notConnectedMessage("run the zone's trigger"), raw: null });
           return;
         }
-        if (runningBranchTriggerRef.current === triggerModal) return;
-        runningBranchTriggerRef.current = triggerModal;
+        if (runningBranchTriggerRef.current === triggerModal.actionId) return;
+        runningBranchTriggerRef.current = triggerModal.actionId;
+        keepOpenWith(undefined);
 
         // Rechecked before every dispatch, including after each await.
         const stale = () => {
           if (boardGuard.isCurrent(triggerModal.ticket)) return false;
-          boardGuard.warnDropped('This board reloaded; the zone trigger was not run.');
+          boardGuard.warnDropped("Couldn't run the zone's trigger, because the board reloaded.");
           return true;
         };
 
+        // The step in flight when a request fails, and the session it already started.
+        let step: 'start the session' | 'fork the session' | 'start the subsession' | 'prompt' =
+          'start the session';
+        let startedSessionId: string | undefined;
+        let close = true;
         try {
           let targetSessionId = sessionId;
 
@@ -734,6 +799,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               mcpServerIds,
             });
             targetSessionId = newSession.session_id;
+            startedSessionId = newSession.session_id;
             const warning = getSessionCreationWarning(newSession);
             if (warning) showWarning(warning, { duration: 10 });
           }
@@ -744,6 +810,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           switch (action) {
             case 'prompt': {
               if (stale()) return;
+              step = 'prompt';
               await client.sessions.prompt(targetSessionId, renderedTemplate, {
                 permissionMode,
               });
@@ -752,9 +819,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }
             case 'fork': {
               if (stale()) return;
+              step = 'fork the session';
               const forkedSession = (await client
                 .service(`sessions/${targetSessionId}/fork`)
                 .create({ prompt: renderedTemplate })) as Session;
+              startedSessionId = forkedSession.session_id;
+              step = 'prompt';
               if (stale()) return;
               await client.sessions.prompt(forkedSession.session_id, renderedTemplate, {
                 permissionMode,
@@ -764,9 +834,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             }
             case 'spawn': {
               if (stale()) return;
+              step = 'start the subsession';
               const spawnedSession = (await client
                 .service(`sessions/${targetSessionId}/spawn`)
                 .create({ prompt: renderedTemplate })) as Session;
+              startedSessionId = spawnedSession.session_id;
+              step = 'prompt';
               if (stale()) return;
               await client.sessions.prompt(spawnedSession.session_id, renderedTemplate, {
                 permissionMode,
@@ -779,15 +852,23 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           // Use the same URL/recenter/flag-cleanup path as a session-card click.
           if (resultSessionId) onSessionClick?.(resultSessionId);
         } catch (error) {
-          console.error('❌ Failed to execute zone trigger:', error);
-          showError(
-            `Failed to ${action} session: ${error instanceof Error ? error.message : String(error)}`
-          );
+          if (startedSessionId) {
+            // Running again would start a second session: open this one instead.
+            showError(sessionStartedMessageNotSent(error));
+            onSessionClick?.(startedSessionId);
+          } else {
+            close = false;
+            keepOpenWith(
+              describeActionError(step === 'prompt' ? 'send your message' : step, error, {
+                idempotent: false,
+              })
+            );
+          }
         } finally {
-          if (runningBranchTriggerRef.current === triggerModal) {
+          if (runningBranchTriggerRef.current === triggerModal.actionId) {
             runningBranchTriggerRef.current = null;
           }
-          setBranchTriggerModal(null);
+          if (close) setBranchTriggerModal(null);
         }
       }
     );
@@ -877,6 +958,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Track objects we've deleted locally (to prevent them from reappearing during WebSocket updates)
     const deletedObjectsRef = useRef<Set<string>>(new Set());
 
+    // A failed board write redraws the canvas from the store (after the drag, if one is in progress).
+    const [boardResyncNonce, setBoardResyncNonce] = useState(0);
+    const boardResyncPendingRef = useRef(false);
+    const resyncBoardNodes = useCallback(() => {
+      boardResyncPendingRef.current = true;
+      setBoardResyncNonce((nonce) => nonce + 1);
+    }, []);
+
     // Initialize nodes and edges state BEFORE using them
     const [nodes, setNodesUnsafe, onNodesChangeInternal] = useNodesState([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -949,6 +1038,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         guard: boardGuard,
         onOpenSession: onSessionClick,
         currentUserId,
+        onWriteFailed: resyncBoardNodes,
       });
 
     // Extract zone labels - memoized to only change when labels actually change
@@ -1082,12 +1172,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             ? zoneObj.borderColor || zoneObj.color // Backwards compat: borderColor first, then fall back to deprecated color
             : undefined;
 
-        // Get repo for this branch
+        // The card still renders while its repo loads; it labels the gap itself.
         const repo = repoById.get(branch.repo_id);
-        if (!repo) {
-          console.error(`Repo not found for branch ${branch.branch_id}`);
-          return;
-        }
 
         nodes.push({
           id: branch.branch_id,
@@ -1128,6 +1214,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             isPinned: !!validZoneParentId,
             zoneName,
             zoneColor,
+            showDragHandle: !readOnly,
             client,
           },
         });
@@ -1163,6 +1250,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       warnInvalidZoneRef,
       client,
       canMutateBoard,
+      readOnly,
     ]);
 
     // Handler to open card modal. Identity-stabilized so card-map churn does
@@ -1536,7 +1624,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       client,
       boardId: board?.board_id as BoardID | null,
       reactFlowInstance: reactFlowInstanceRef.current,
-      enabled: !!board && !!client && !staticCursors,
+      enabled: !!board && !!client && !staticCursors && !readOnly,
     });
 
     // Create comment nodes from spatial comments
@@ -1622,8 +1710,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           position,
           parentId, // Set parent for relative positioning (moves with parent)
           // No extent constraint - comments can be dragged anywhere and re-pinned
+          // An explicit per-node `draggable` overrides `nodesDraggable`, so view-only must opt out here too.
           draggable:
-            mutationGate.canMutate && boardReady && canRepositionBoardComment(comment, currentUser),
+            !readOnly &&
+            mutationGate.canMutate &&
+            boardReady &&
+            canRepositionBoardComment(comment, currentUser),
           selectable: true,
           zIndex: 1000, // Always on top (elevateNodesOnSelect is disabled)
           data: {
@@ -1661,6 +1753,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       currentUser,
       mutationGate.canMutate,
       boardReady,
+      readOnly,
     ]);
 
     // Helper: Apply local position overrides to a set of incoming nodes (branches or cards).
@@ -1869,8 +1962,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // the full parent set on the first paint — splitting the merge let
     // pinned branches lose their parentId and render relative-to-zone
     // positions as absolute (the "pile near origin" on board load).
+    // biome-ignore lint/correctness/useExhaustiveDependencies: boardResyncNonce forces a redraw after a failed write
     useEffect(() => {
       if (isDraggingRef.current) return;
+      boardResyncPendingRef.current = false;
 
       const boardObjectNodes = getBoardObjectNodes();
 
@@ -1926,6 +2021,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       applyZOrder,
       applyLocalPositions,
       partitionNodesByType,
+      boardResyncNonce,
     ]);
 
     // Sync COMMENT nodes separately
@@ -2022,6 +2118,32 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           lastFitBoardIdRef.current = board?.board_id ?? null;
           return;
         }
+        const instance = reactFlowInstanceRef.current;
+        const wrapper = reactFlowWrapperRef.current;
+        const boardId = board?.board_id;
+        if (readOnly && boardId && instance && wrapper) {
+          // Phones: return to the remembered view, else fit the first zone's width from its top.
+          const saved = readSavedViewport(boardId);
+          const first = firstNodeToRead(instance.getNodes());
+          const { clientWidth: w, clientHeight: h } = wrapper;
+          if (saved) {
+            instance.setViewport(saved);
+          } else if (first?.width && w && h) {
+            const rect = getNodesBounds([first]);
+            const width = Math.min(
+              rect.width,
+              w / (READ_ONLY_MIN_ZOOM * (1 + READ_ONLY_FIT_PADDING))
+            );
+            instance.fitBounds(
+              { x: rect.x, y: rect.y, width, height: (width * h) / w },
+              { padding: READ_ONLY_FIT_PADDING }
+            );
+          }
+          if (saved || first?.width) {
+            lastFitBoardIdRef.current = boardId;
+            return;
+          }
+        }
         reactFlowInstanceRef.current?.fitView({
           padding: 0.2, // 20% padding around nodes
           minZoom: 0.1, // Allow zooming out far enough to see widely-spaced nodes
@@ -2033,7 +2155,14 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       }, 100);
 
       return () => clearTimeout(timer);
-    }, [isReactFlowReady, nodes.length, board?.board_id, consumePendingRecenter, recenterOnNode]);
+    }, [
+      isReactFlowReady,
+      nodes.length,
+      board?.board_id,
+      readOnly,
+      consumePendingRecenter,
+      recenterOnNode,
+    ]);
 
     // Intercept onNodesChange to detect resize events
     const onNodesChange = useCallback(
@@ -2144,12 +2273,18 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                         objectData: updatedObject,
                       } as unknown as Partial<Board>);
                     } catch (error) {
-                      console.error('Failed to persist zone resize:', error);
+                      showError(
+                        formatActionError('save the zone size', error, { idempotent: true })
+                      );
+                      resyncBoardNodes();
                     }
                   }
                 }
                 if (dropped) {
-                  boardGuard.warnDropped('This board reloaded; your last resize was not saved.');
+                  boardGuard.warnDropped(
+                    "Couldn't save the zone size, because the board reloaded."
+                  );
+                  resyncBoardNodes();
                 }
               }, 500);
             }
@@ -2159,7 +2294,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         // Call the original handler
         onNodesChangeInternal(changes);
       },
-      [client, onNodesChangeInternal, setNodes, boardGuard]
+      [client, onNodesChangeInternal, setNodes, boardGuard, showError, resyncBoardNodes]
     );
 
     // Handle node drag start
@@ -2195,6 +2330,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
         // Reset dragging flag immediately to allow node sync effects to run
         isDraggingRef.current = false;
+        // A failed write during the drag skipped its redraw.
+        if (boardResyncPendingRef.current) setBoardResyncNonce((nonce) => nonce + 1);
         // Never derive a zone from a board that isn't loaded: the move's
         // ticket is captured now and checked before each of its dispatches.
         const guard = node.type === 'comment' ? commentGuard : boardGuard;
@@ -2498,7 +2635,11 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                           const warning = getSessionCreationWarning(session);
                           if (warning) showWarning(warning, { duration: 10 });
                         } catch (error) {
-                          console.error('❌ Failed to execute always_new trigger:', error);
+                          showError(
+                            formatActionError("run the zone's trigger", error, {
+                              idempotent: false,
+                            })
+                          );
                         }
                       })();
                     } else {
@@ -2608,10 +2749,10 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               );
             }
           } catch (error) {
-            console.error('Failed to persist layout:', error);
+            showError(formatActionError('save the move', error, { idempotent: true }));
           }
           if (dropped) {
-            boardGuard.warnDropped('This board reloaded; your last move was not saved.');
+            boardGuard.warnDropped("Couldn't save the move, because the board reloaded.");
           }
         }, 500);
       },
@@ -2626,6 +2767,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         showWarning,
         boardGuard,
         commentGuard,
+        showError,
       ]
     );
 
@@ -2731,8 +2873,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 objectData,
               } as unknown as Partial<Board>)
               .catch((error: unknown) => {
-                console.error('Failed to add zone:', error);
-                setNodes((nodes) => nodes.filter((n) => n.id !== objectId));
+                showError(formatActionError('add the zone', error, { idempotent: false }));
+                // A lost reply may still have created it: the redraw shows what the store has.
+                resyncBoardNodes();
               });
           }
         }
@@ -2740,7 +2883,16 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         setDrawingZone(null);
         setActiveTool('select');
       }
-    }, [activeTool, drawingZone, client, setNodes, boardGuard, buildObjectNode]);
+    }, [
+      activeTool,
+      drawingZone,
+      client,
+      setNodes,
+      boardGuard,
+      buildObjectNode,
+      showError,
+      resyncBoardNodes,
+    ]);
 
     const openMarkdownPlacementModal = useCallback(
       (event: Pick<React.MouseEvent, 'clientX' | 'clientY'>): boolean => {
@@ -2797,7 +2949,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       }
       // Placed before a board reload: its anchor geometry may be gone.
       if (!commentGuard.isCurrent(commentPlacement.ticket)) {
-        commentGuard.warnDropped('This board reloaded; place your comment again.');
+        commentGuard.warnDropped(
+          "Couldn't post the comment, because the board reloaded. Place it again."
+        );
         setCommentPlacement(null);
         return;
       }
@@ -2855,7 +3009,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
         setCommentInput('');
         setActiveTool('select');
       } catch (error) {
-        console.error('Failed to create spatial comment:', error);
+        // The draft stays in the composer.
+        showError(formatActionError('post the comment', error, { idempotent: false }));
       }
     }, [
       commentPlacement,
@@ -2865,6 +3020,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       commentInput,
       canMutateComments,
       commentGuard,
+      showError,
     ]);
 
     const closeMarkdownModal = useCallback(() => {
@@ -2897,7 +3053,6 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       }
 
       const objectId = markdownModal.objectId || `markdown-${Date.now()}`;
-      const saved = markdownModal.objectId ? board.objects?.[objectId] : undefined;
       const position = markdownModal.position;
       const objectData: BoardObject = {
         type: 'markdown',
@@ -2939,22 +3094,26 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           objectData,
         } as unknown as Partial<Board>);
       } catch (error) {
-        console.error('Failed to save markdown note:', error);
-        // Rollback optimistic update: the note shows what is saved.
-        if (!markdownModal.objectId) {
-          setNodes((nodes) => nodes.filter((n) => n.id !== objectId));
-        } else if (saved?.type === 'markdown') {
-          setNodes((nodes) =>
-            nodes.map((n) =>
-              n.id === objectId
-                ? { ...n, data: { ...n.data, content: saved.content, width: saved.width } }
-                : n
-            )
+        // The save is an upsert by this client id, so repeating it is safe.
+        const saveError = describeActionError('save the note', error, { idempotent: true });
+        // The note shows what the store has, or goes if it has nothing.
+        resyncBoardNodes();
+        if (isInFlightConnectionLossError(error)) {
+          // It may have saved: keep its id so saving again updates it rather than adding a second note.
+          setMarkdownModal((current) =>
+            current
+              ? {
+                  ...current,
+                  objectId,
+                  createUnconfirmed: current.createUnconfirmed || !current.objectId,
+                  saveError,
+                }
+              : current
           );
+          return;
         }
         // Keep the editor open with the draft; only a successful save closes it.
-        const reason = error instanceof Error && error.message ? error.message : String(error);
-        setMarkdownModal((current) => (current ? { ...current, saveError: reason } : current));
+        setMarkdownModal((current) => (current ? { ...current, saveError } : current));
         return;
       }
 
@@ -2970,6 +3129,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       canMutateBoard,
       boardGuard,
       closeMarkdownModal,
+      resyncBoardNodes,
     ]);
 
     // Node click handler for eraser mode and comment placement
@@ -3292,15 +3452,22 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               reactFlowInstanceRef.current = instance;
               setIsReactFlowReady(true);
             }}
+            onMoveEnd={
+              readOnly && board
+                ? (_event, viewport) => saveViewport(board.board_id, viewport)
+                : undefined
+            }
             nodeTypes={nodeTypes}
             snapToGrid={true}
             snapGrid={[20, 20]}
             minZoom={0.1}
             maxZoom={1.5}
-            // Each node carries its narrower authorization. Workflow mode
-            // reserves pointer gestures for connections instead of dragging.
-            nodesDraggable={mutationGate.canMutate && activeTool !== 'workflow'}
-            nodesConnectable={activeTool === 'workflow' && canMutateBoard}
+            // The connection gate is global; each node carries its narrower
+            // authorization (board.edit for structure, author/admin for
+            // comments). Selection/focus remain available in read-only mode.
+            // Workflow mode reserves pointer gestures for connections instead of dragging.
+            nodesDraggable={mutationGate.canMutate && !readOnly && activeTool !== 'workflow'}
+            nodesConnectable={!readOnly && activeTool === 'workflow' && canMutateBoard}
             edgesFocusable={activeTool === 'workflow'}
             elementsSelectable={true}
             elevateNodesOnSelect={false}
@@ -3322,212 +3489,215 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             style={{ background: 'transparent' }}
           >
             {!canvasBackground && <Background />}
-            <Controls
-              position="top-left"
-              showZoom={false}
-              showFitView={false}
-              showInteractive={false}
-            >
-              {/* Zoom controls */}
-              <Tooltip title="Zoom In" placement="right" mouseEnterDelay={0.3}>
-                <span>
-                  <ControlButton
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      reactFlowInstanceRef.current?.zoomIn();
-                    }}
-                  >
-                    <PlusOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              <Tooltip title="Zoom Out" placement="right" mouseEnterDelay={0.3}>
-                <span>
-                  <ControlButton
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      reactFlowInstanceRef.current?.zoomOut();
-                    }}
-                  >
-                    <MinusOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              <Tooltip title="Fit View" placement="right" mouseEnterDelay={0.3}>
-                <span>
-                  <ControlButton
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      reactFlowInstanceRef.current?.fitView();
-                    }}
-                  >
-                    <ZoomInOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              {/* Custom toolbox buttons */}
-              <Tooltip title="Select" placement="right" mouseEnterDelay={0.3}>
-                <span>
-                  <ControlButton
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setActiveTool('select');
-                    }}
-                    style={{
-                      borderLeft:
-                        activeTool === 'select'
-                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
-                          : 'none',
-                    }}
-                  >
-                    <SelectOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              <Tooltip
-                title={
-                  canMutateBoard
-                    ? 'Workflow transitions'
-                    : (boardMutationMessage ?? 'Workflow transitions')
-                }
-                placement="right"
-                mouseEnterDelay={0.3}
+            {/* View-only canvas: no edit controls or minimap, not even hidden (the minimap redraws on every pan). */}
+            {!readOnly && (
+              <Controls
+                position="top-left"
+                showZoom={false}
+                showFitView={false}
+                showInteractive={false}
               >
-                <span>
-                  <ControlButton
-                    aria-label="Workflow transitions"
-                    disabled={!canMutateBoard}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setActiveTool(activeTool === 'workflow' ? 'select' : 'workflow');
-                    }}
-                    style={{
-                      borderLeft:
-                        activeTool === 'workflow'
-                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
-                          : 'none',
-                      opacity: canMutateBoard ? 1 : 0.4,
-                    }}
-                  >
-                    <ApartmentOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              <Tooltip
-                title={canMutateBoard ? 'Add Zone' : (boardMutationMessage ?? 'Add Zone')}
-                placement="right"
-                mouseEnterDelay={0.3}
-              >
-                <span>
-                  <ControlButton
-                    aria-label="Add Zone"
-                    disabled={!canMutateBoard}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setActiveTool('zone');
-                    }}
-                    style={{
-                      borderLeft:
-                        activeTool === 'zone'
-                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
-                          : 'none',
-                      opacity: canMutateBoard ? 1 : 0.4,
-                      cursor: canMutateBoard ? 'pointer' : 'not-allowed',
-                    }}
-                  >
-                    <BorderOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              <Tooltip
-                title={
-                  canMutateComments ? 'Add Comment' : (commentMutationMessage ?? 'Add Comment')
-                }
-                placement="right"
-                mouseEnterDelay={0.3}
-              >
-                <span>
-                  <ControlButton
-                    aria-label="Add Comment"
-                    disabled={!canMutateComments}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setActiveTool('comment');
-                    }}
-                    style={{
-                      borderLeft:
-                        activeTool === 'comment'
-                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
-                          : 'none',
-                      opacity: canMutateComments ? 1 : 0.4,
-                      cursor: canMutateComments ? 'pointer' : 'not-allowed',
-                    }}
-                  >
-                    <CommentOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              <Tooltip
-                title={
-                  canMutateBoard
-                    ? 'Add Markdown Note — click canvas to place'
-                    : (boardMutationMessage ?? 'Add Markdown Note — click canvas to place')
-                }
-                placement="right"
-                mouseEnterDelay={0.3}
-              >
-                <span>
-                  <ControlButton
-                    aria-label="Add Markdown Note"
-                    disabled={!canMutateBoard}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setActiveTool('markdown');
-                    }}
-                    style={{
-                      borderLeft:
-                        activeTool === 'markdown'
-                          ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
-                          : 'none',
-                      opacity: canMutateBoard ? 1 : 0.4,
-                      cursor: canMutateBoard ? 'pointer' : 'not-allowed',
-                    }}
-                  >
-                    <FileMarkdownOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-              <Tooltip
-                title={
-                  canMutateBoard ? 'Eraser - Click to toggle' : (boardMutationMessage ?? 'Eraser')
-                }
-                placement="right"
-                mouseEnterDelay={0.3}
-              >
-                <span>
-                  <ControlButton
-                    aria-label="Eraser"
-                    disabled={!canMutateBoard}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setActiveTool(activeTool === 'eraser' ? 'select' : 'eraser');
-                    }}
-                    style={{
-                      borderLeft:
-                        activeTool === 'eraser' ? `3px solid ${token.colorError}` : 'none',
-                      color: activeTool === 'eraser' ? token.colorError : 'inherit',
-                      backgroundColor:
-                        activeTool === 'eraser' ? `${token.colorError}15` : 'transparent',
-                      opacity: canMutateBoard ? 1 : 0.4,
-                      cursor: canMutateBoard ? 'pointer' : 'not-allowed',
-                    }}
-                  >
-                    <DeleteOutlined style={{ fontSize: '16px' }} />
-                  </ControlButton>
-                </span>
-              </Tooltip>
-            </Controls>
-            {activeTool === 'workflow' && (
+                {/* Zoom controls */}
+                <Tooltip title="Zoom In" placement="right" mouseEnterDelay={0.3}>
+                  <span>
+                    <ControlButton
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        reactFlowInstanceRef.current?.zoomIn();
+                      }}
+                    >
+                      <PlusOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Zoom Out" placement="right" mouseEnterDelay={0.3}>
+                  <span>
+                    <ControlButton
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        reactFlowInstanceRef.current?.zoomOut();
+                      }}
+                    >
+                      <MinusOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title="Fit View" placement="right" mouseEnterDelay={0.3}>
+                  <span>
+                    <ControlButton
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        reactFlowInstanceRef.current?.fitView();
+                      }}
+                    >
+                      <ZoomInOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Tooltip>
+                {/* Custom toolbox buttons */}
+                <Tooltip title="Select" placement="right" mouseEnterDelay={0.3}>
+                  <span>
+                    <ControlButton
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveTool('select');
+                      }}
+                      style={{
+                        borderLeft:
+                          activeTool === 'select'
+                            ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
+                            : 'none',
+                      }}
+                    >
+                      <SelectOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Tooltip>
+                <Tooltip
+                  title={
+                    canMutateBoard
+                      ? 'Workflow transitions'
+                      : (boardMutationMessage ?? 'Workflow transitions')
+                  }
+                  placement="right"
+                  mouseEnterDelay={0.3}
+                >
+                  <span>
+                    <ControlButton
+                      aria-label="Workflow transitions"
+                      disabled={!canMutateBoard}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveTool(activeTool === 'workflow' ? 'select' : 'workflow');
+                      }}
+                      style={{
+                        borderLeft:
+                          activeTool === 'workflow'
+                            ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
+                            : 'none',
+                        opacity: canMutateBoard ? 1 : 0.4,
+                      }}
+                    >
+                      <ApartmentOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Tooltip>
+                <Tooltip
+                  title={canMutateBoard ? 'Add Zone' : (boardMutationMessage ?? 'Add Zone')}
+                  placement="right"
+                  mouseEnterDelay={0.3}
+                >
+                  <span>
+                    <ControlButton
+                      aria-label="Add Zone"
+                      disabled={!canMutateBoard}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveTool('zone');
+                      }}
+                      style={{
+                        borderLeft:
+                          activeTool === 'zone'
+                            ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
+                            : 'none',
+                        opacity: canMutateBoard ? 1 : 0.4,
+                        cursor: canMutateBoard ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      <BorderOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Tooltip>
+                <Tooltip
+                  title={
+                    canMutateComments ? 'Add Comment' : (commentMutationMessage ?? 'Add Comment')
+                  }
+                  placement="right"
+                  mouseEnterDelay={0.3}
+                >
+                  <span>
+                    <ControlButton
+                      aria-label="Add Comment"
+                      disabled={!canMutateComments}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveTool('comment');
+                      }}
+                      style={{
+                        borderLeft:
+                          activeTool === 'comment'
+                            ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
+                            : 'none',
+                        opacity: canMutateComments ? 1 : 0.4,
+                        cursor: canMutateComments ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      <CommentOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Tooltip>
+                <Tooltip
+                  title={
+                    canMutateBoard
+                      ? 'Add Markdown Note — click canvas to place'
+                      : (boardMutationMessage ?? 'Add Markdown Note — click canvas to place')
+                  }
+                  placement="right"
+                  mouseEnterDelay={0.3}
+                >
+                  <span>
+                    <ControlButton
+                      aria-label="Add Markdown Note"
+                      disabled={!canMutateBoard}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveTool('markdown');
+                      }}
+                      style={{
+                        borderLeft:
+                          activeTool === 'markdown'
+                            ? `${token.lineWidth * 3}px ${token.lineType} ${token.colorPrimary}`
+                            : 'none',
+                        opacity: canMutateBoard ? 1 : 0.4,
+                        cursor: canMutateBoard ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      <FileMarkdownOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Tooltip>
+                <Tooltip
+                  title={
+                    canMutateBoard ? 'Eraser - Click to toggle' : (boardMutationMessage ?? 'Eraser')
+                  }
+                  placement="right"
+                  mouseEnterDelay={0.3}
+                >
+                  <span>
+                    <ControlButton
+                      aria-label="Eraser"
+                      disabled={!canMutateBoard}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveTool(activeTool === 'eraser' ? 'select' : 'eraser');
+                      }}
+                      style={{
+                        borderLeft:
+                          activeTool === 'eraser' ? `3px solid ${token.colorError}` : 'none',
+                        color: activeTool === 'eraser' ? token.colorError : 'inherit',
+                        backgroundColor:
+                          activeTool === 'eraser' ? `${token.colorError}15` : 'transparent',
+                        opacity: canMutateBoard ? 1 : 0.4,
+                        cursor: canMutateBoard ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      <DeleteOutlined style={{ fontSize: '16px' }} />
+                    </ControlButton>
+                  </span>
+                </Tooltip>
+              </Controls>
+            )}
+            {!readOnly && activeTool === 'workflow' && (
               <Panel position="top-center">
                 <Flex
                   align="center"
@@ -3587,19 +3757,21 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 </Flex>
               </Panel>
             )}
-            <MiniMap
-              nodeColor={miniMapNodeColor}
-              onClick={handleMiniMapClick}
-              pannable
-              zoomable
-              style={{
-                backgroundColor: token.colorBgElevated,
-                border: `1px solid ${token.colorBorder}`,
-              }}
-              maskColor="rgba(0, 0, 0, 0.5)"
-              maskStrokeColor={token.colorPrimary}
-              maskStrokeWidth={2}
-            />
+            {!readOnly && (
+              <MiniMap
+                nodeColor={miniMapNodeColor}
+                onClick={handleMiniMapClick}
+                pannable
+                zoomable
+                style={{
+                  backgroundColor: token.colorBgElevated,
+                  border: `1px solid ${token.colorBorder}`,
+                }}
+                maskColor="rgba(0, 0, 0, 0.5)"
+                maskStrokeColor={token.colorPrimary}
+                maskStrokeWidth={2}
+              />
+            )}
             <RemoteCursorLayer
               client={client}
               boardId={(board?.board_id as BoardID | null) ?? null}
@@ -3686,13 +3858,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             width={1000}
           >
             {markdownModal.saveError && !markdownModal.stale && (
-              <Alert
-                type="error"
-                showIcon
-                title="Note not saved."
-                description={markdownModal.saveError}
-                style={{ marginBottom: 16 }}
-              />
+              <ActionErrorNotice error={markdownModal.saveError} style={{ marginBottom: 16 }} />
             )}
             {markdownModal.stale && (
               <Alert
@@ -3700,11 +3866,12 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 showIcon
                 title={STALE_DRAFT_TITLE}
                 description={
-                  markdownModal.objectId && !board?.objects?.[markdownModal.objectId]
-                    ? 'This note no longer exists on the reloaded board, so your draft was not saved. Copy your draft to keep it.'
-                    : markdownModal.objectId
-                      ? 'This board reloaded while the note was open, so your draft was not saved over it. Copy your draft to keep it, then reopen the note to edit the reloaded one.'
-                      : 'This board reloaded while the note was open, so it was not created. Copy your draft to keep it, then add the note again.'
+                  !markdownModal.objectId ||
+                  (markdownModal.createUnconfirmed && !board?.objects?.[markdownModal.objectId])
+                    ? 'This board reloaded while the note was open, so it was not created. Copy your draft to keep it, then add the note again.'
+                    : !board?.objects?.[markdownModal.objectId]
+                      ? 'This note no longer exists on the reloaded board, so your draft was not saved. Copy your draft to keep it.'
+                      : 'This board reloaded while the note was open, so your draft was not saved over it. Copy your draft to keep it, then reopen the note to edit the reloaded one.'
                 }
                 action={
                   <Space orientation="vertical" size="small">

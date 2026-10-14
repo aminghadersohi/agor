@@ -1,6 +1,4 @@
-import type { BranchRepository } from '@agor/core/db';
-import type { Session } from '@agor/core/types';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   type McpPromptProvenanceStamp,
   resolvePromptProvenance,
@@ -9,7 +7,6 @@ import {
 
 const ORIGIN_SESSION_ID = '01a0d369-82f3-7458-8265-861a4752b7b2';
 const ORIGIN_BRANCH_ID = '01a0d111-0000-7000-8000-000000000001';
-const RECIPIENT_OWNER = '019f1bc1-bb61-7ea4-b9e1-0ecc173cccfb';
 
 const STAMP: McpPromptProvenanceStamp = {
   authenticated_by: 'session_token',
@@ -23,39 +20,23 @@ const STAMP: McpPromptProvenanceStamp = {
   mode: 'continue',
 };
 
-function branchRepo(permission: string): BranchRepository {
-  return {
-    findById: vi.fn(async () => ({
-      branch_id: ORIGIN_BRANCH_ID,
-      name: 'elise',
-      custom_context: { teammate: { kind: 'teammate', displayName: 'Elise' } },
-    })) as unknown as BranchRepository['findById'],
-    resolveUserPermission: vi.fn(async () => permission),
-  } as unknown as BranchRepository;
-}
-
-const RECIPIENT = { created_by: RECIPIENT_OWNER } as unknown as Pick<Session, 'created_by'>;
-
 function resolve(overrides: Partial<Parameters<typeof resolvePromptProvenance>[0]> = {}) {
   return resolvePromptProvenance({
     stamp: STAMP,
     body: 'push the branch',
     escapedSentinels: 0,
-    recipientSession: RECIPIENT,
-    branchRepo: branchRepo('all'),
-    findUserRole: async () => 'member',
     now: () => new Date('2026-09-24T12:00:00.000Z'),
     ...overrides,
   });
 }
 
 describe('resolvePromptProvenance', () => {
-  it('renders the block ahead of the body and records IDs, not names, in metadata', async () => {
-    const result = await resolve();
+  it('renders the block ahead of the body and records IDs, not names, in metadata', () => {
+    const result = resolve();
 
     expect(result.prompt.startsWith('<agor_prompt_provenance>')).toBe(true);
     expect(result.prompt.endsWith('push the branch')).toBe(true);
-    expect(result.prompt).toContain('teammate Elise (branch elise)');
+    expect(result.prompt).toContain(`agor_sessions_get sessionId="${ORIGIN_SESSION_ID}"`);
 
     expect(result.metadata).toMatchObject({
       version: 1,
@@ -68,35 +49,21 @@ describe('resolvePromptProvenance', () => {
       placement: 'prefix',
       stamped_at: '2026-09-24T12:00:00.000Z',
     });
-    // Display names are gated per recipient at render time, so the durable row
-    // must not carry them - it would become a side channel around that gate.
-    expect(JSON.stringify({ ...result.metadata, rendered_block: '' })).not.toContain('elise');
+    // Every reader of the recipient session can read the row and full_prompt,
+    // so neither may carry an origin branch or teammate name.
+    expect(result.metadata.rendered_block).toMatch(/^From: Agor session \S+\. Agent-authored/m);
   });
 
-  it('withholds branch and teammate when the recipient owner cannot read the origin branch', async () => {
-    const result = await resolve({
-      branchRepo: branchRepo('none'),
-      findUserRole: async () => 'member',
-    });
-
-    expect(result.prompt).toContain('01a0d369');
-    expect(result.prompt).toContain('withheld');
-    expect(result.prompt).not.toContain('Elise');
-    // The identity the recipient can act on is still durable.
-    expect(result.metadata.origin_branch_id).toBe(ORIGIN_BRANCH_ID);
+  it('renders the same text whatever the recipient can see, so no lookup gates it', () => {
+    // No branch repository or role lookup is consulted: the block depends on
+    // the stamp and body alone.
+    expect(resolve().prompt).toBe(resolve().prompt);
+    expect(resolve().metadata.origin_branch_id).toBe(ORIGIN_BRANCH_ID);
   });
 
-  it('shows the names to a superadmin recipient owner, who could read the branch anyway', async () => {
-    const result = await resolve({
-      branchRepo: branchRepo('none'),
-      findUserRole: async () => 'superadmin',
-    });
-    expect(result.prompt).toContain('teammate Elise (branch elise)');
-  });
-
-  it('admits an unattributed prompt when the caller named no session', async () => {
+  it('admits an unattributed prompt when the caller named no session', () => {
     const { origin_session_id: _s, origin_branch_id: _b, ...headless } = STAMP;
-    const result = await resolve({
+    const result = resolve({
       stamp: { ...headless, authenticated_by: 'personal_api_key' },
     });
 
@@ -107,20 +74,20 @@ describe('resolvePromptProvenance', () => {
     expect(result.metadata.authenticated_by).toBe('personal_api_key');
   });
 
-  it('places the block after a slash command so provider dispatch is unchanged', async () => {
-    const result = await resolve({ body: '/code-review high' });
+  it('places the block after a slash command so provider dispatch is unchanged', () => {
+    const result = resolve({ body: '/code-review high' });
     expect(result.prompt.trimStart().startsWith('/')).toBe(true);
     expect(result.metadata.placement).toBe('suffix');
   });
 
-  it('records how many sentinels the admission route neutralized', async () => {
-    const result = await resolve({ escapedSentinels: 3 });
+  it('records how many sentinels the admission route neutralized', () => {
+    const result = resolve({ escapedSentinels: 3 });
     expect(result.metadata.escaped_sentinels).toBe(3);
   });
 
-  it('renders a generic tool label rather than dropping the block when a call site omits one', async () => {
+  it('renders a generic tool label rather than dropping the block when a call site omits one', () => {
     const { tool: _tool, mode: _mode, ...unlabelled } = STAMP;
-    const result = await resolve({ stamp: unlabelled });
+    const result = resolve({ stamp: unlabelled });
     expect(result.prompt).toContain('<agor_prompt_provenance>');
     expect(result.metadata.tool).toBe('mcp');
   });
@@ -128,20 +95,21 @@ describe('resolvePromptProvenance', () => {
 
 describe('withPromptProvenanceTool', () => {
   it('names the tool without disturbing the server-derived identity fields', () => {
-    const params = { _promptProvenance: STAMP, provider: 'mcp' };
-    const labelled = withPromptProvenanceTool(
-      params,
-      'agor_session_relationships_report',
-      'parent'
-    );
+    const { mode: _mode, ...unlabelled } = STAMP;
+    const params = {
+      _promptProvenance: { ...unlabelled, tool: 'agor_sessions_create' },
+      provider: 'mcp',
+    };
+    const labelled = withPromptProvenanceTool(params, 'agor_sessions_prompt', 'fork');
 
     expect(labelled._promptProvenance).toMatchObject({
       authenticated_by: 'session_token',
       origin_session_id: ORIGIN_SESSION_ID,
-      tool: 'agor_session_relationships_report',
-      mode: 'parent',
+      tool: 'agor_sessions_prompt',
+      mode: 'fork',
     });
-    expect(params._promptProvenance.tool).toBe('agor_sessions_prompt');
+    expect(params._promptProvenance.tool).toBe('agor_sessions_create');
+    expect(params._promptProvenance).not.toHaveProperty('mode');
   });
 
   it('is a no-op when the request carries no stamp at all', () => {

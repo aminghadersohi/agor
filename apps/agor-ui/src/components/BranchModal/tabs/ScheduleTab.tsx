@@ -21,7 +21,13 @@ import { Button, Empty, Popconfirm, Space, Spin, Switch, Table, Tooltip, Typogra
 import type { ReactNode } from 'react';
 import { useCallback, useEffect, useState } from 'react';
 import { useConnectionState } from '../../../contexts/ConnectionContext';
+import {
+  type ActionErrorCopy,
+  describeActionError,
+  formatActionError,
+} from '../../../utils/connectionErrors';
 import { useThemedMessage } from '../../../utils/message';
+import { ActionErrorNotice } from '../../CompactNotice';
 import { ScheduleModal } from '../../ScheduleModal';
 import { ScheduleRunsPanel } from '../../ScheduleRunsPanel';
 
@@ -128,6 +134,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
   const { showError, showSuccess, showWarning } = useThemedMessage();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<ActionErrorCopy | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   const [runsPanelSchedule, setRunsPanelSchedule] = useState<Schedule | null>(null);
@@ -153,13 +160,13 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
         },
       });
       setSchedules(Array.isArray(result) ? result : result.data);
+      setLoadError(null);
     } catch (err) {
-      console.error('Failed to load schedules:', err);
-      showError('Failed to load schedules');
+      setLoadError(describeActionError('load schedules', err, { idempotent: true }));
     } finally {
       setLoading(false);
     }
-  }, [client, branch.branch_id, showError]);
+  }, [client, branch.branch_id]);
 
   // Refetch on every socket (re)connect; see HomeSchedulesSection.
   const { authGeneration } = useConnectionState();
@@ -209,9 +216,9 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
     if (!client) return;
     try {
       await client.service('schedules').remove(schedule.schedule_id);
-      showSuccess(`Schedule "${schedule.name}" deleted`);
+      showSuccess(`Schedule "${schedule.name}" deleted.`);
     } catch (err) {
-      showError(err instanceof Error ? err.message : 'Failed to delete schedule');
+      showError(formatActionError('delete the schedule', err, { idempotent: true }));
     }
   };
 
@@ -220,7 +227,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
     setRunningId(schedule.schedule_id);
     try {
       await client.service(`schedules/${schedule.schedule_id}/run-now`).create({});
-      showSuccess(`Triggered "${schedule.name}"`);
+      showSuccess(`Started a run of "${schedule.name}".`);
     } catch (err) {
       // A power hold is a host condition, not a broken schedule.
       if ((err as { data?: { code?: string } } | null)?.data?.code === 'schedule_power_held') {
@@ -229,7 +236,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
         );
         return;
       }
-      showError(err instanceof Error ? err.message : 'Failed to trigger run');
+      showError(formatActionError('start the scheduled run', err, { idempotent: false }));
     } finally {
       setRunningId(null);
     }
@@ -240,7 +247,11 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
     try {
       await client.service('schedules').patch(schedule.schedule_id, { enabled });
     } catch (err) {
-      showError(err instanceof Error ? err.message : 'Failed to update schedule');
+      showError(
+        formatActionError(enabled ? 'turn the schedule on' : 'turn the schedule off', err, {
+          idempotent: true,
+        })
+      );
     }
   };
 
@@ -445,6 +456,11 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
       </div>
       {loading ? (
         <Spin />
+      ) : loadError ? (
+        <ActionErrorNotice
+          error={loadError}
+          action={{ label: 'Try again', onClick: () => void fetchSchedules() }}
+        />
       ) : schedules.length === 0 ? (
         <Empty
           description={
