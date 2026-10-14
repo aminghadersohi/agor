@@ -29,9 +29,9 @@ type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ tex
 const BRANCH_ID = '01a00000-0000-7000-8000-0000000000b1' as BranchID;
 const SESSION_ID = '01a00000-0000-7000-8000-0000000000c1' as SessionID;
 
-function teammateBranch(displayName: string): Branch {
+function teammateBranch(displayName: string, branchId: BranchID = BRANCH_ID): Branch {
   return {
-    branch_id: BRANCH_ID,
+    branch_id: branchId,
     name: 'private-assistant',
     custom_context: { teammate: { kind: 'teammate', displayName } },
   } as unknown as Branch;
@@ -54,7 +54,7 @@ function toolsFor(
     authenticatedSession: {
       session_id: SESSION_ID,
       agentic_tool: 'claude-code',
-      branch_id: BRANCH_ID,
+      branch_id: branch?.branch_id ?? BRANCH_ID,
     },
     authenticatedUser: user,
     baseServiceParams: userParams(user),
@@ -310,4 +310,196 @@ describe('resolveSkillTeammate', () => {
     expect(await resolve('frink', f.outsider)).toEqual({ name: 'frink', keys: ['frink'] });
     await expect(resolve('  ')).rejects.toThrow(/teammate must be/);
   });
+});
+
+describe('agor_skillsets_release / agor_skillsets_get', () => {
+  const OTHER_BRANCH = '01a00000-0000-7000-8000-0000000000b2' as BranchID;
+
+  /** Frink's namespace: owned by the Frink teammate branch, writable by everyone. */
+  async function frinkNamespace(db: Parameters<typeof skillsKnowledgeApp>[0]) {
+    const fixture = skillsKnowledgeApp(db);
+    const owner = await seedSkillsUser(db, 'owner');
+    const ns = await seedSkillsNamespace(db, owner, {
+      ownerBranchId: BRANCH_ID,
+      othersCan: 'write',
+    });
+    await putSkillDoc(
+      fixture,
+      owner,
+      ns,
+      'skills/frink/research-loop.md',
+      skillMarkdown('research-loop')
+    );
+    await putSkillDoc(
+      fixture,
+      owner,
+      ns,
+      'skills/maya/campaign-brief.md',
+      skillMarkdown('campaign-brief')
+    );
+    await putSkillDoc(
+      fixture,
+      owner,
+      ns,
+      'skills/_shared/standing-facts.md',
+      skillMarkdown('standing-facts')
+    );
+    return { fixture, owner, ns };
+  }
+
+  dbTest('bootstraps r1 for every teammate, then only the curator releases', async ({ db }) => {
+    const { fixture, owner, ns } = await frinkNamespace(db);
+    const writer = await seedSkillsUser(db, 'writer');
+    // Another teammate's session (not Frink) with write access: bootstrap only.
+    const lagertha = toolsFor(fixture, writer, {
+      branch: teammateBranch('Lagertha', OTHER_BRANCH),
+      db,
+    });
+    const first = payload(await lagertha.agor_skillsets_release({ all: true }));
+    expect(first.counts).toEqual({ released: 2 });
+    expect(
+      first.results.map(
+        (r: { teammate: string; path: string; release: number; authorized_as: string }) => [
+          r.teammate,
+          r.path,
+          r.release,
+          r.authorized_as,
+        ]
+      )
+    ).toEqual([
+      ['frink', 'skillsets/frink.md', 1, 'bootstrap'],
+      ['maya', 'skillsets/maya.md', 1, 'bootstrap'],
+    ]);
+
+    // Once r1 exists, the same caller is refused.
+    await putSkillDoc(
+      fixture,
+      owner,
+      ns,
+      'skills/frink/research-loop.md',
+      skillMarkdown('research-loop', { version: '0.2.0' })
+    );
+    const denied = await lagertha.agor_skillsets_release({ teammate: 'frink' });
+    expect((denied as { isError?: boolean }).isError).toBe(true);
+    expect(payload(denied).results[0]).toMatchObject({
+      status: 'denied',
+      reason: expect.stringContaining('Only the curator'),
+    });
+
+    // Frink's own session is the curator.
+    const frink = toolsFor(fixture, writer, { branch: teammateBranch('Professor Frink'), db });
+    const second = payload(
+      await frink.agor_skillsets_release({ teammate: 'frink', expectedVersion: 1 })
+    );
+    expect(second.results[0]).toMatchObject({
+      status: 'released',
+      release: 2,
+      previous_release: 1,
+      authorized_as: 'curator',
+      manifest_version_number: 2,
+    });
+    // Nothing changed since: unchanged, not a new release.
+    expect(
+      payload(await frink.agor_skillsets_release({ teammate: 'frink' })).results[0]
+    ).toMatchObject({
+      status: 'unchanged',
+      release: 2,
+    });
+    // A stale expectedVersion conflicts.
+    const stale = payload(
+      await frink.agor_skillsets_release({ teammate: 'frink', expectedVersion: 1 })
+    );
+    expect(stale.results[0]).toMatchObject({
+      status: 'conflict',
+      reason: expect.stringContaining('is at version 2, not 1'),
+    });
+  });
+
+  dbTest('validates its arguments', async ({ db }) => {
+    const { fixture, owner } = await frinkNamespace(db);
+    const tools = toolsFor(fixture, owner, { db });
+    await expect(tools.agor_skillsets_release({})).rejects.toThrow(
+      /exactly one of teammate or all/
+    );
+    await expect(tools.agor_skillsets_release({ teammate: 'frink', all: true })).rejects.toThrow(
+      /exactly one/
+    );
+    await expect(tools.agor_skillsets_release({ all: true, expectedVersion: 1 })).rejects.toThrow(
+      /single teammate/
+    );
+    await expect(
+      tools.agor_skillsets_release({ teammate: 'frink', namespace: 'nope' })
+    ).rejects.toThrow(/not a skills provider namespace/);
+  });
+
+  dbTest(
+    'shows pin status and unreleased skills; skills tools follow the release',
+    async ({ db }) => {
+      const { fixture, owner, ns } = await frinkNamespace(db);
+      const frink = toolsFor(fixture, owner, { branch: teammateBranch('Professor Frink'), db });
+      await frink.agor_skillsets_release({ teammate: 'frink' });
+      await putSkillDoc(
+        fixture,
+        owner,
+        ns,
+        'skills/frink/research-loop.md',
+        skillMarkdown('research-loop', { version: '0.2.0', body: '# Loop\n\nNewer.' })
+      );
+      await putSkillDoc(
+        fixture,
+        owner,
+        ns,
+        'skills/frink/new-thing.md',
+        skillMarkdown('new-thing')
+      );
+
+      const view = payload(await frink.agor_skillsets_get({}));
+      expect(view.teammate.name).toBe('Professor Frink');
+      const [set] = view.skillsets;
+      expect(set).toMatchObject({
+        namespace: ns.slug,
+        path: 'skillsets/frink.md',
+        release: 1,
+        manifest_version_number: 1,
+      });
+      expect(set.skills.map((s: { name: string; status: string }) => [s.name, s.status])).toEqual([
+        ['standing-facts', 'current'],
+        ['research-loop', 'update_available'],
+      ]);
+      expect(set.unreleased.map((s: { name: string }) => s.name)).toEqual(['new-thing']);
+
+      const list = payload(await frink.agor_skills_list({}));
+      expect(list.releases).toEqual([
+        expect.objectContaining({ path: 'skillsets/frink.md', release: 1 }),
+      ]);
+      const pinned = Object.fromEntries(
+        list.skills.map(
+          (s: { name: string; pinned_version_number: number | null; version_number: number }) => [
+            s.name,
+            [s.pinned_version_number, s.version_number],
+          ]
+        )
+      );
+      expect(pinned).toEqual({
+        'standing-facts': [1, 1],
+        'research-loop': [1, 2],
+        'new-thing': [null, 1],
+      });
+
+      // agor_skills_get serves the pinned version by default.
+      const got = payload(await frink.agor_skills_get({ name: 'research-loop' }));
+      expect(got.provenance).toMatchObject({
+        version_number: 1,
+        selected_by: `release r1 (${ns.slug}/skillsets/frink.md)`,
+      });
+      const latest = payload(
+        await frink.agor_skills_get({ name: 'research-loop', version: 'latest' })
+      );
+      expect(latest.provenance).toMatchObject({
+        version_number: 2,
+        selected_by: 'requested version',
+      });
+      expect(latest.content).toContain('Newer.');
+    }
+  );
 });

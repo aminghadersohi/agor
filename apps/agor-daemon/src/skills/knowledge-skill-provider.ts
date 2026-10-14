@@ -106,8 +106,14 @@ export class KnowledgeSkillProvider implements SkillProvider {
     this.providers = (providers ?? configuredSkillProviders(app)).slice(0, MAX_SKILL_PROVIDERS);
   }
 
-  private withQuery(query: Record<string, unknown>): Params {
-    return { ...this.params, query };
+  /** The caller's params, with `query` when given. */
+  paramsWith(query?: Record<string, unknown>): Params {
+    return query ? { ...this.params, query } : { ...this.params };
+  }
+
+  /** The Feathers app this provider reads through. */
+  get serviceApp(): Application {
+    return this.app;
   }
 
   /**
@@ -120,7 +126,7 @@ export class KnowledgeSkillProvider implements SkillProvider {
       for (const provider of this.providers) {
         const result = await this.app
           .service('kb/namespaces')
-          .find(this.withQuery({ slug: provider.namespace, archived: false }));
+          .find(this.paramsWith({ slug: provider.namespace, archived: false }));
         const namespace = paginatedData<KnowledgeNamespace>(result).data.find(
           (ns) => ns.slug === provider.namespace && !ns.archived
         );
@@ -149,7 +155,7 @@ export class KnowledgeSkillProvider implements SkillProvider {
     while (docs.length < PROVIDER_SKILL_LIMIT) {
       const page = paginatedData<HydratedKnowledgeDocument>(
         await this.app.service('kb/documents').find(
-          this.withQuery({
+          this.paramsWith({
             namespace_id: namespace.namespace_id,
             kind: 'skill',
             status: 'published',
@@ -191,7 +197,7 @@ export class KnowledgeSkillProvider implements SkillProvider {
   ): Promise<{ doc: HydratedKnowledgeDocument; namespace: KnowledgeNamespace }> {
     const doc = (await this.app.service('kb/documents').get(
       documentId,
-      this.withQuery({
+      this.paramsWith({
         include_content: true,
         ...(version !== undefined && version !== 'latest' ? { version } : {}),
       })
@@ -254,7 +260,7 @@ export class KnowledgeSkillProvider implements SkillProvider {
     await this.read(ref.id);
     const versions = (await this.app
       .service('kb/versions')
-      .find(this.withQuery({ document_id: ref.id }))) as KnowledgeDocumentVersion[];
+      .find(this.paramsWith({ document_id: ref.id }))) as KnowledgeDocumentVersion[];
     return [...versions]
       .sort((a, b) => b.version_number - a.version_number)
       .map((version) => ({
