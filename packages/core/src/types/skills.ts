@@ -208,7 +208,8 @@ export const SESSION_SKILLS_RECEIPT_KEY = 'skills_receipt' as const;
  * What a session on a teammate branch was given at start: one skill set
  * release, by manifest version, with the exact pins. Written once by the
  * daemon on the first task that delivers an index; later tasks in the same
- * session keep this release even after a newer one is cut.
+ * session keep this release even after a newer one is cut, and
+ * `agor_skills_get` serves exactly these pins by default.
  */
 export interface SessionSkillsReceipt {
   teammate: string;
@@ -219,7 +220,13 @@ export interface SessionSkillsReceipt {
   skillset_path: string;
   manifest_document_id: KnowledgeDocumentID;
   manifest_version_id: KnowledgeDocumentVersionID;
-  skills: Array<{ name: string; version_id: KnowledgeDocumentVersionID; sha256: string }>;
+  skills: Array<{
+    name: string;
+    document_id: KnowledgeDocumentID;
+    version_id: KnowledgeDocumentVersionID;
+    version_number: number;
+    sha256: string;
+  }>;
   /** ISO timestamp of the first delivery. */
   delivered_at: string;
   /** Agentic tool that received the index (`claude-code`, `codex`, `gemini`, …). */

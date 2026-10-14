@@ -2,12 +2,15 @@ import type {
   Branch,
   BranchID,
   Params,
+  Session,
+  SessionSkillsReceipt,
   SkillContent,
   SkillSetEntry,
   SkillSummary,
 } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
+import { sessionSkillsReceipt } from '../../skills/delivery.js';
 import {
   KnowledgeSkillProvider,
   sha256Hex,
@@ -54,6 +57,17 @@ async function callerBranch(
 export async function callerSkillTeammate(ctx: McpContext): Promise<SkillTeammate | null> {
   const { branch } = await callerBranch(ctx);
   return branch ? skillTeammateOf(branch) : null;
+}
+
+/** The skills receipt of the calling session, if it was given a release. */
+async function callerSkillsReceipt(ctx: McpContext): Promise<SessionSkillsReceipt | null> {
+  const sessionId = ctx.authenticatedSession?.session_id ?? ctx.sessionId;
+  if (!sessionId) return null;
+  const session = (await ctx.app.service('sessions').get(sessionId, ctx.baseServiceParams)) as Pick<
+    Session,
+    'custom_context'
+  >;
+  return sessionSkillsReceipt(session);
 }
 
 /** `teammate` when given, else the caller's teammate (null when neither). */
@@ -123,7 +137,7 @@ function pinsByDocument(
   return pins;
 }
 
-function releaseLabel(record: SkillSetRecord): string {
+function _releaseLabel(record: SkillSetRecord): string {
   return `release r${record.manifest?.release} (${record.namespace.slug}/${record.path})`;
 }
 
@@ -151,7 +165,7 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
     'agor_skills_list',
     {
       description:
-        "List a teammate's skills: the compact index (name, version, short description, provenance, documentId) of the Knowledge skills assigned to it in skills provider namespaces (`skills/<teammate>/…` plus `skills/_shared/…`), with the version its latest skill set release pins. Defaults to the calling session's teammate; outside a teammate session with no `teammate`, lists every provider skill. Fetch a body with agor_skills_get.",
+        "List a teammate's skills: the compact index (name, version, short description, provenance, documentId) of the Knowledge skills assigned to it in the configured skills provider namespaces (`skills/<teammate>/…` plus `skills/_shared/…`). Without `teammate`, `equipped` describes the skill set release this session was given and each skill's `equipped_version_number` is the version agor_skills_get serves by default; `pinned_version_number` is the latest release's pin. Defaults to the calling session's teammate; outside a teammate session with no `teammate`, lists every provider skill.",
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         teammate: mcpOptionalNonBlankString(
@@ -161,23 +175,37 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
       }),
     },
     async (args) => {
-      const teammate = await requestedTeammate(ctx, coerceString(args.teammate));
+      const teammateArg = coerceString(args.teammate);
+      const teammate = await requestedTeammate(ctx, teammateArg);
       const provider = providerFor(ctx);
-      const [namespaces, skills, records] = await Promise.all([
+      const [namespaces, skills, records, receipt] = await Promise.all([
         provider.providerNamespaces(),
         provider.list(teammate ? { teammateKeys: teammate.keys } : undefined),
         teammate ? teammateSkillSets(provider, teammate) : Promise.resolve([]),
+        teammateArg ? Promise.resolve(null) : callerSkillsReceipt(ctx),
       ]);
       const pins = pinsByDocument(records);
+      const equipped = new Map(receipt?.skills.map((pin) => [pin.document_id, pin]) ?? []);
       return textResult({
         teammate: teammate ? { name: teammate.name, keys: teammate.keys } : null,
         provider_namespaces: namespaces.map((ns) => ns.slug),
+        equipped: receipt
+          ? {
+              release: receipt.release,
+              namespace: receipt.namespace,
+              path: receipt.skillset_path,
+              manifest_version_id: receipt.manifest_version_id,
+              delivered_at: receipt.delivered_at,
+              skills: receipt.skills.length,
+            }
+          : null,
         releases: records.filter((record) => record.manifest).map(releaseSummary),
         count: skills.length,
         skills: skills.map((skill) => {
           const pin = pins.get(skill.document_id);
           return {
             ...skillIndexEntry(skill),
+            equipped_version_number: equipped.get(skill.document_id)?.version_number ?? null,
             pinned_version_number: pin?.entry.version_number ?? null,
           };
         }),
@@ -194,7 +222,7 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
     'agor_skills_get',
     {
       description:
-        "Get one skill from a skills provider namespace by name or documentId: the markdown body after its frontmatter, with a provenance header (namespace, path, version number, sha256, license/origin). Returns the version the calling teammate's latest skill set release pins, else the current version, unless `version` is given. Read the skill before doing the kind of task it covers.",
+        "Get one skill from a configured skills provider namespace by name or documentId: the markdown body after its frontmatter, with a provenance header (namespace, path, version number, sha256, license/origin). By default it serves exactly the version this session was given (its skills receipt), after checking the sha256, and fails if the skill is not in that release or its content changed. Pass version: 'latest' (or a version number or id) to read another version on purpose. Read the skill before doing the kind of task it covers.",
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         name: mcpOptionalNonBlankString(
@@ -205,7 +233,9 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
         version: z
           .union([z.number().int().positive(), z.string().min(1)])
           .optional()
-          .describe('Version number or version id. Omit for the pinned (or current) version.'),
+          .describe(
+            "Omit for the version pinned for this session. 'latest' for the current version, or a version number or id."
+          ),
       }),
     },
     async (args) => {
@@ -213,40 +243,56 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
       const documentId = coerceString(args.documentId);
       if (!name && !documentId) throw new Error('Provide name or documentId.');
       const provider = providerFor(ctx);
+      const version = args.version;
+
+      if (version === undefined) {
+        // Default: exactly what this session was given, verified, or nothing.
+        const receipt = await callerSkillsReceipt(ctx);
+        if (!receipt) {
+          throw new Error(
+            "This session was not given a team skills release, so there is no pinned version to serve. Pass version: 'latest' (or a version number) to read a skill on purpose."
+          );
+        }
+        const wanted = name?.trim().toLowerCase();
+        const pin = receipt.skills.find((entry) =>
+          documentId ? entry.document_id === documentId : entry.name.toLowerCase() === wanted
+        );
+        const label = `release r${receipt.release} (${receipt.namespace}/${receipt.skillset_path})`;
+        if (!pin) {
+          throw new Error(
+            `${documentId ?? name} is not in this session's ${label}. Pass version: 'latest' to read the current version on purpose.`
+          );
+        }
+        let skill: SkillContent;
+        try {
+          skill = await provider.get({
+            provider: provider.id,
+            id: pin.document_id,
+            version_id: pin.version_id,
+            version_number: pin.version_number,
+            sha256: pin.sha256,
+          });
+        } catch {
+          throw new Error(`The version pinned by this session's ${label} is unavailable.`);
+        }
+        if (sha256Hex(skill.content) !== pin.sha256) {
+          throw new Error(
+            `The content pinned by this session's ${label} no longer matches its sha256; it was not returned.`
+          );
+        }
+        const provenance = skillProvenance(skill, `session ${label}`);
+        return textResult({
+          ...summaryOf(skill),
+          provenance,
+          content: `${renderProvenanceHeader(skill.name, provenance)}\n\n${skill.body.replace(/^\s+/, '')}`,
+        });
+      }
+
       const teammate = await callerSkillTeammate(ctx);
       const id =
         documentId ?? (await findSkillByName(provider, name as string, teammate)).document_id;
-      const version = args.version;
-
-      let skill: SkillContent | undefined;
-      let selectedBy = version === undefined ? 'current version' : 'requested version';
-      if (version === undefined && teammate) {
-        const pin = pinsByDocument(await teammateSkillSets(provider, teammate)).get(id);
-        if (pin) {
-          // A pinned skill is served at its pin or not at all.
-          try {
-            skill = await provider.get({
-              provider: provider.id,
-              id,
-              version_id: pin.entry.version_id,
-              version_number: pin.entry.version_number,
-              sha256: pin.entry.sha256,
-            });
-          } catch {
-            throw new Error(
-              `The version ${releaseLabel(pin.record)} pins is unavailable. Pass version: 'latest' to read the current one.`
-            );
-          }
-          if (sha256Hex(skill.content) !== pin.entry.sha256) {
-            throw new Error(
-              `The content of the version ${releaseLabel(pin.record)} pins no longer matches its sha256; it was not returned.`
-            );
-          }
-          selectedBy = releaseLabel(pin.record);
-        }
-      }
-      skill ??= await provider.get({ provider: provider.id, id }, version ?? 'latest');
-      const provenance = skillProvenance(skill, selectedBy);
+      const skill = await provider.get({ provider: provider.id, id }, version);
+      const provenance = skillProvenance(skill, 'requested version');
       return textResult({
         ...summaryOf(skill),
         provenance,

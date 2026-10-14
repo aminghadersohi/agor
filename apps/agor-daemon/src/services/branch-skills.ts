@@ -37,7 +37,6 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import { type Application, BadRequest, NotAuthenticated, NotFound } from '@agor/core/feathers';
-import { isSkillsProviderNamespace } from '@agor/core/knowledge';
 import {
   type AuthenticatedParams,
   BRANCH_SKILLS_SCAN_COMMAND,
@@ -65,6 +64,7 @@ import {
 } from '@agor/core/types';
 import { sessionSkillsReceipt } from '../skills/delivery.js';
 import { KnowledgeSkillProvider } from '../skills/knowledge-skill-provider.js';
+import { configuredProviderSlugs } from '../skills/skillset-governance.js';
 import { SkillSets } from '../skills/skillsets.js';
 import { skillTeammateOf } from '../skills/teammate.js';
 import {
@@ -405,6 +405,7 @@ export function createBranchSkillsRoute(options: {
     );
     if (primary) namespaces.set(primary.namespace_id, primary);
 
+    const providerSlugs = configuredProviderSlugs(featherApp.get('config'));
     const assigned = assignTeammateSkillDocs(
       // Drafts are imports under review, not equipped skills.
       [...own.docs, ...shared.docs].filter((doc) => doc.status !== 'draft'),
@@ -413,7 +414,7 @@ export function createBranchSkillsRoute(options: {
         otherKeys,
         primaryNamespaceId: primary?.namespace_id,
         sharedNamespaceIds: [...namespaces.values()]
-          .filter((ns) => isSkillsProviderNamespace(ns))
+          .filter((ns) => providerSlugs.has(ns.slug))
           .map((ns) => ns.namespace_id),
       }
     );
@@ -563,7 +564,7 @@ export function createBranchSkillsRoute(options: {
       const sets = new SkillSets(provider);
       for (const namespace of await provider.providerNamespaces()) {
         const assigned = await sets.namespaceSkills(namespace, teammate);
-        const record = await sets.find(namespace, teammate, assigned);
+        const record = await sets.find(namespace, teammate);
         if (record.document && !record.manifest) {
           return {
             release: {
