@@ -3,6 +3,7 @@ import { getTeammateConfig } from '@agor-live/client';
 import {
   Button,
   Descriptions,
+  Drawer,
   Form,
   Grid,
   Input,
@@ -23,6 +24,7 @@ import { EmojiPickerInput } from '../../EmojiPickerInput/EmojiPickerInput';
 import { ProfileImageGalleryEditor } from '../../ProfileImage';
 import { Tag } from '../../Tag';
 import { TeammateIdentityAvatar } from '../../TeammateIdentityAvatar';
+import { TeammateSkillsPanel } from '../../TeammateSkillsPanel';
 import type { TeammateFormState } from '../useBranchModalForm';
 import { TeammateFrontDeskSection } from './TeammateFrontDeskSection';
 
@@ -51,6 +53,7 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
 }) => {
   const { token } = theme.useToken();
   const [retiring, setRetiring] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
   const screens = Grid.useBreakpoint();
   // Stack labels above fields on narrow screens instead of squeezing a 6/18 grid.
   const compact = !screens.md;
@@ -137,6 +140,31 @@ export const TeammateTab: React.FC<TeammateTabProps> = ({
         </Form>
 
         <TeammateFrontDeskSection branch={branch} client={client} sessions={sessions} />
+
+        {/* Fork: read-only skills summary; the full view opens in a drawer. */}
+        <TeammateSkillsPanel
+          branch={branch}
+          client={client ?? null}
+          variant="compact"
+          onOpenFull={() => setSkillsOpen(true)}
+        />
+        <Drawer
+          open={skillsOpen}
+          onClose={() => setSkillsOpen(false)}
+          title={null}
+          aria-label="Skills"
+          closable={false}
+          placement="right"
+          size="min(736px, 100vw)"
+          destroyOnHidden
+          styles={{ body: { padding: 0 } }}
+        >
+          <TeammateSkillsPanel
+            branch={branch}
+            client={client ?? null}
+            onClose={() => setSkillsOpen(false)}
+          />
+        </Drawer>
 
         {!branch.archived && (
           <Popconfirm

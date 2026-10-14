@@ -21,6 +21,7 @@ import {
   BRANCH_CLEANUP_COMMAND,
   BRANCH_CLEANUP_COMMAND_MAX_LENGTH,
   BRANCH_DELETION_COMMAND,
+  BRANCH_SKILLS_SCAN_COMMAND,
   ENVIRONMENT_COMMAND_BUDGET as ENV_BUDGET,
   EXECUTOR_ADMISSION_CLASSES,
 } from '@agor/core/types';
@@ -535,6 +536,17 @@ export const BranchFilesReadPayloadSchema = BasePayloadSchema.extend({
 
 export type BranchFilesReadPayload = z.infer<typeof BranchFilesReadPayloadSchema>;
 
+/** Read-only scan of a branch worktree for skill files (teammate Skills panel). */
+export const BranchSkillsScanPayloadSchema = BasePayloadSchema.extend({
+  command: z.literal(BRANCH_SKILLS_SCAN_COMMAND),
+  sessionToken: z.string(),
+  params: z.object({
+    branchId: z.string().uuid(),
+  }),
+});
+
+export type BranchSkillsScanPayload = z.infer<typeof BranchSkillsScanPayloadSchema>;
+
 export const BranchFilesystemStatusPayloadSchema = BasePayloadSchema.extend({
   command: z.literal('branch.filesystem.status'),
   sessionToken: z.string(),
@@ -1030,6 +1042,7 @@ const ExecutorPayloadUnionSchema = z.discriminatedUnion('command', [
   BranchFilesListPayloadSchema,
   BranchFilesBrowsePayloadSchema,
   BranchFilesReadPayloadSchema,
+  BranchSkillsScanPayloadSchema,
   BranchFilesWritePayloadSchema,
   BranchFilesystemStatusPayloadSchema,
   BranchArtifactPublishPayloadSchema,
@@ -1114,6 +1127,7 @@ export function getSupportedCommands(): string[] {
     'branch.files.list',
     'branch.files.browse',
     'branch.files.read',
+    BRANCH_SKILLS_SCAN_COMMAND,
     'branch.files.write',
     'branch.filesystem.status',
     'branch.artifact.publish',

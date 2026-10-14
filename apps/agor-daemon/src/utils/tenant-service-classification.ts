@@ -231,6 +231,10 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
     scopeClass: 'scoped',
     why: 'Fork teammate front desk. Registered through createTenantScopedAuthenticatedRouteRegistrar; reads and compare-and-swaps tenant-owned branch_front_desk_sessions rows under the tenant authorization fence in the armed request scope.',
   },
+  'branches/:id/skills': {
+    scopeClass: 'scoped',
+    why: 'Fork teammate Skills panel. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false, because one request may await several executor scans); read-only branch, session and Knowledge reads run in the armed request scope.',
+  },
   'sessions/:id/retarget-callback': {
     scopeClass: 'scoped',
     why: 'Fork callback routing. Registered through createTenantScopedAuthenticatedRouteRegistrar; one SessionsService.retargetCallback unit (same as agor_sessions_retarget_callback) that rejects cross-tenant destinations and writes tenant-owned session/relationship rows in the armed request scope.',

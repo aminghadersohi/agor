@@ -18,6 +18,20 @@ vi.mock('../../ProfileImage/profileImageApi', () => ({
   setTeammateActiveTheme: vi.fn(),
 }));
 
+// Fork: the Skills section has its own tests (TeammateSkillsPanel.test.tsx); a
+// stub keeps its daemon read and extra antd buttons out of the retire flow.
+vi.mock('../../TeammateSkillsPanel', () => ({
+  TeammateSkillsPanel: ({ variant, onOpenFull }: { variant?: string; onOpenFull?: () => void }) => (
+    <div data-testid={`skills-${variant ?? 'full'}`}>
+      {onOpenFull && (
+        <button type="button" onClick={onOpenFull}>
+          Open Skills
+        </button>
+      )}
+    </div>
+  ),
+}));
+
 const branch = {
   branch_id: 'branch-1',
   archived: false,
@@ -92,5 +106,15 @@ describe('TeammateTab retire', () => {
       )
     ).toBeTruthy();
     expect(onRetired).not.toHaveBeenCalled();
+  });
+});
+
+describe('TeammateTab skills', () => {
+  it('shows the compact skills section and opens the full view in a drawer', async () => {
+    renderTab([]);
+    expect(screen.getByTestId('skills-compact')).toBeTruthy();
+    expect(screen.queryByTestId('skills-full')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Skills' }));
+    expect(await screen.findByTestId('skills-full')).toBeTruthy();
   });
 });
