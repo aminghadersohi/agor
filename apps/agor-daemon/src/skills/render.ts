@@ -1,18 +1,31 @@
 /**
  * Text shapes the skills tools return: compact index rows and the provenance
  * header placed above a skill body.
+ *
+ * Every Knowledge-derived value interpolated here goes through
+ * `skillTextField`: one line, no leading markdown structure, bounded. A skill
+ * author must not be able to add headings or instructions around the body.
  */
 
+import { skillTextField } from '@agor/core/knowledge';
 import type { SkillContent, SkillSummary } from '@agor/core/types';
 
 /** Index descriptions are cut to about this many characters. */
 export const SKILL_INDEX_DESCRIPTION_CHARS = 160;
+/** Bounds for the other interpolated fields. */
+export const SKILL_FIELD_CHARS = {
+  name: 64,
+  version: 32,
+  namespace: 64,
+  path: 160,
+  license: 80,
+  origin: 200,
+  selectedBy: 160,
+} as const;
 
 /** First `max` characters on one line, with an ellipsis when cut. */
 export function truncateOneLine(text: string | undefined, max: number): string {
-  const line = (text ?? '').replace(/\s+/g, ' ').trim();
-  if (line.length <= max) return line;
-  return `${line.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+  return skillTextField(text ?? '', max);
 }
 
 export interface SkillProvenance {
@@ -49,27 +62,35 @@ export function skillProvenance(skill: SkillContent, selectedBy: string): SkillP
 
 /** A blockquote the model sees above the body, so it knows where the procedure came from. */
 export function renderProvenanceHeader(name: string, provenance: SkillProvenance): string {
+  const f = SKILL_FIELD_CHARS;
+  const version = skillTextField(provenance.version, f.version);
   const origin = provenance.origin
-    ? [provenance.origin.uri, provenance.origin.commit && `@${provenance.origin.commit}`]
-        .filter(Boolean)
-        .join('')
-    : undefined;
+    ? skillTextField(
+        [provenance.origin.uri, provenance.origin.commit && `@${provenance.origin.commit}`]
+          .filter(Boolean)
+          .join(''),
+        f.origin
+      )
+    : '';
+  const license = skillTextField(provenance.license, f.license);
   const lines = [
-    `> Skill \`${name}\`${provenance.version ? ` v${provenance.version}` : ''} from Knowledge`,
-    `> ${provenance.namespace}/${provenance.path} · version ${provenance.version_number} (${provenance.selected_by})`,
-    `> sha256 ${provenance.sha256}`,
+    `> Skill "${skillTextField(name, f.name)}"${version ? ` v${version}` : ''} from Knowledge`,
+    `> ${skillTextField(provenance.namespace, f.namespace)}/${skillTextField(provenance.path, f.path)} · version ${Number(provenance.version_number) || 0} (${skillTextField(provenance.selected_by, f.selectedBy)})`,
+    `> sha256 ${skillTextField(provenance.sha256, 64)}`,
   ];
-  if (provenance.license) lines.push(`> license: ${provenance.license}`);
+  if (license) lines.push(`> license: ${license}`);
   if (origin) lines.push(`> origin: ${origin}`);
   return lines.join('\n');
 }
 
 /** One `agor_skills_list` row: what to pick a skill by, and how to fetch it. */
 export function skillIndexEntry(skill: SkillSummary) {
+  const f = SKILL_FIELD_CHARS;
+  const version = skillTextField(skill.version, f.version);
   return {
-    name: skill.name,
-    ...(skill.version ? { version: skill.version } : {}),
-    description: truncateOneLine(skill.description, SKILL_INDEX_DESCRIPTION_CHARS),
+    name: skillTextField(skill.name, f.name),
+    ...(version ? { version } : {}),
+    description: skillTextField(skill.description, SKILL_INDEX_DESCRIPTION_CHARS),
     namespace: skill.namespace_slug,
     path: skill.path,
     document_id: skill.document_id,

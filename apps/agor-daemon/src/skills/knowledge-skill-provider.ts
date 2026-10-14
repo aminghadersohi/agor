@@ -1,8 +1,9 @@
 /**
  * The Knowledge skills provider (v1).
  *
- * Provider namespaces are Knowledge namespaces whose metadata has
- * `skills_provider: true`. Their `kind: skill` documents under
+ * Provider namespaces are the Knowledge namespaces the daemon config lists
+ * under `skills.providers` (operator-owned; nothing stored in Knowledge can
+ * add one). Their `kind: skill` documents under
  * `skills/<teammate key>/` or `skills/_shared/` are the provider's skills
  * (see `teammate-skills/assign.ts`). Drafts, archived documents, other kinds
  * and `README.md` files are not.
@@ -13,13 +14,9 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { AgorSkillsProviderSettings } from '@agor/core/config';
 import { type Application, BadRequest, NotFound } from '@agor/core/feathers';
-import {
-  expectedSkillName,
-  isSkillsProviderNamespace,
-  parseSkillDocument,
-  validateSkillDocument,
-} from '@agor/core/knowledge';
+import { expectedSkillName, parseSkillDocument, validateSkillDocument } from '@agor/core/knowledge';
 import {
   type HydratedKnowledgeDocument,
   KNOWLEDGE_SKILL_PROVIDER_ID,
@@ -44,7 +41,16 @@ import { providerSkillAssignment, providerSkillIsFor } from '../teammate-skills/
 const PAGE_SIZE = 500;
 /** Skill documents read per provider namespace. */
 export const PROVIDER_SKILL_LIMIT = 2000;
-const NAMESPACE_LIMIT = 1000;
+/** Configured providers considered; the rest of a longer list is ignored. */
+export const MAX_SKILL_PROVIDERS = 16;
+
+/** The operator's trusted skills providers (`skills.providers` in config.yaml). */
+export function configuredSkillProviders(app: Application): readonly AgorSkillsProviderSettings[] {
+  const config = (app as { get?: (key: string) => unknown }).get?.('config') as
+    | { skills?: { providers?: readonly AgorSkillsProviderSettings[] } }
+    | undefined;
+  return (config?.skills?.providers ?? []).slice(0, MAX_SKILL_PROVIDERS);
+}
 
 function paginatedData<T>(result: unknown): { data: T[]; total: number } {
   if (Array.isArray(result)) return { data: result as T[], total: result.length };
@@ -83,33 +89,51 @@ export function isProviderSkillDocument(doc: {
 
 export class KnowledgeSkillProvider implements SkillProvider {
   readonly id = KNOWLEDGE_SKILL_PROVIDER_ID;
+  readonly providers: readonly AgorSkillsProviderSettings[];
   private namespaceCache: Promise<KnowledgeNamespace[]> | undefined;
 
   /**
    * @param params The caller's service params (user, provider, tenant). Every
    *   `kb/*` call is made with them; never pass internal/service-account params
    *   on behalf of a user.
+   * @param providers Trusted providers; defaults to the daemon config.
    */
   constructor(
     private readonly app: Application,
-    private readonly params: Params
-  ) {}
+    private readonly params: Params,
+    providers?: readonly AgorSkillsProviderSettings[]
+  ) {
+    this.providers = (providers ?? configuredSkillProviders(app)).slice(0, MAX_SKILL_PROVIDERS);
+  }
 
   private withQuery(query: Record<string, unknown>): Params {
     return { ...this.params, query };
   }
 
-  /** Provider namespaces the caller can read, in slug order. */
+  /**
+   * Configured provider namespaces the caller can read, in config order. Each
+   * is one lookup by slug; nothing else is scanned.
+   */
   async providerNamespaces(): Promise<KnowledgeNamespace[]> {
     this.namespaceCache ??= (async () => {
-      const result = await this.app
-        .service('kb/namespaces')
-        .find(this.withQuery({ archived: false, $limit: NAMESPACE_LIMIT }));
-      return paginatedData<KnowledgeNamespace>(result)
-        .data.filter((ns) => !ns.archived && isSkillsProviderNamespace(ns))
-        .sort((a, b) => a.slug.localeCompare(b.slug));
+      const found: KnowledgeNamespace[] = [];
+      for (const provider of this.providers) {
+        const result = await this.app
+          .service('kb/namespaces')
+          .find(this.withQuery({ slug: provider.namespace, archived: false }));
+        const namespace = paginatedData<KnowledgeNamespace>(result).data.find(
+          (ns) => ns.slug === provider.namespace && !ns.archived
+        );
+        if (namespace) found.push(namespace);
+      }
+      return found;
     })();
     return this.namespaceCache;
+  }
+
+  /** The configured provider entry for a namespace slug. */
+  providerFor(slug: string): AgorSkillsProviderSettings | undefined {
+    return this.providers.find((provider) => provider.namespace === slug);
   }
 
   private async providerNamespace(namespaceId: string): Promise<KnowledgeNamespace | undefined> {

@@ -8,8 +8,9 @@ import type { TeammateSkillOrigin } from './teammate-skills';
 /**
  * Skills provider: where shared, versioned skills come from.
  *
- * v1 has one provider, Knowledge. A Knowledge namespace is a provider when its
- * metadata has `skills_provider: true`. Inside it, `kind: skill` documents are
+ * v1 has one provider, Knowledge. A Knowledge namespace is a provider only when
+ * the daemon config lists it under `skills.providers`; nothing stored in
+ * Knowledge can make a namespace one. Inside it, `kind: skill` documents are
  * assigned by path:
  *
  * - `skills/<teammate key>/…` belongs to that teammate (keys as in
@@ -18,9 +19,6 @@ import type { TeammateSkillOrigin } from './teammate-skills';
  *
  * Other kinds and `README.md` files are never skills.
  */
-
-/** Namespace metadata flag that makes a Knowledge namespace a skills provider. */
-export const SKILLS_PROVIDER_NAMESPACE_FLAG = 'skills_provider' as const;
 
 /** Folder under which provider skills live. */
 export const SKILLS_ROOT = 'skills' as const;
@@ -35,6 +33,8 @@ export const KNOWLEDGE_SKILL_PROVIDER_ID = 'knowledge' as const;
 export const SKILL_NAME_MAX_LENGTH = 64;
 export const SKILL_DESCRIPTION_MAX_LENGTH = 1024;
 export const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/** `metadata.version`: one token such as `1.2.0` or `2026.10-rc1`. */
+export const SKILL_VERSION_MAX_LENGTH = 32;
 
 /** Origin + id; never a bare name, since two providers may share one. */
 export interface SkillRef {

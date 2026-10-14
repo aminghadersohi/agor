@@ -109,7 +109,7 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
         skills: skills.map(skillIndexEntry),
         ...(namespaces.length === 0
           ? {
-              note: 'No readable Knowledge namespace has `skills_provider: true` in its metadata.',
+              note: 'No skills provider is configured that you can read. An operator lists trusted provider namespaces under `skills.providers` in config.yaml.',
             }
           : {}),
       });
