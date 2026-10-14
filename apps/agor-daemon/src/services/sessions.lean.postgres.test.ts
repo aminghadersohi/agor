@@ -14,9 +14,10 @@ import {
   UsersRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
-import type { Session, TenantID } from '@agor/core/types';
+import type { HookContext, ListSyncPage, Session, TenantID } from '@agor/core/types';
 import { SESSION_LIST_ROW_SHAPE, SessionStatus } from '@agor/core/types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { listSyncRowVersion, projectListSyncResult, stripListSyncQuery } from '../utils/list-sync';
 import { SessionsService } from './sessions.js';
 
 const postgresUrl = process.env.AGOR_TEST_POSTGRES_URL;
@@ -145,6 +146,34 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           );
         }
       }
+
+      // Versions from another tenant cannot elicit a row, slot, or count.
+      const foreign = await runWithTenantDatabaseScope(db, tenantB, () =>
+        service.find({ query: { lean: true } })
+      );
+      const own = await runWithTenantDatabaseScope(db, tenantA, () =>
+        service.find({ ...params, query: { lean: true } })
+      );
+      const context = {
+        path: 'sessions',
+        method: 'find',
+        params: {
+          provider: 'socketio',
+          query: {
+            $sync: {
+              known: dataOf(foreign).map(listSyncRowVersion).join(''),
+            },
+          },
+        },
+        result: own,
+      } as unknown as HookContext;
+      projectListSyncResult(stripListSyncQuery(context));
+      const page = context.result as ListSyncPage<Session>;
+      expect(page.total).toBe(2);
+      expect(page.data.every((row) => typeof row !== 'number')).toBe(true);
+      expect((page.data as Session[]).map((row) => row.session_id).sort()).toEqual(
+        [a.heavy, a.plain].sort()
+      );
 
       const fetched = await runWithTenantDatabaseScope(db, tenantA, () =>
         service.get(a.heavy, params)
