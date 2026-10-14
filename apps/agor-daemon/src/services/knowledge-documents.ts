@@ -24,6 +24,7 @@ import {
   type UpdateKnowledgeDocumentInput,
 } from '@agor/core/db';
 import { type Application, BadRequest, Conflict, Forbidden, NotFound } from '@agor/core/feathers';
+import { parseMarkdownFrontmatter, validateSkillDocument } from '@agor/core/knowledge';
 import type {
   AuthenticatedParams,
   HydratedKnowledgeDocument,
@@ -725,6 +726,7 @@ export class KnowledgeDocumentsService extends DrizzleService<
         throw new Forbidden('You do not have permission to update this knowledge document');
       }
       await this.assertExpectedVersion(existing, data.expected_version);
+      await this.assertSkillFrontmatter(data, existing, path ?? existing.path);
       const persisted = await this.repo.update(
         existing.document_id,
         this.prepareWriteData(
@@ -776,6 +778,7 @@ export class KnowledgeDocumentsService extends DrizzleService<
     if (!namespace) throw new NotFound(`Knowledge namespace not found: ${namespaceSlug}`);
     if (namespace.archived) throw new NotFound(`Knowledge namespace not found: ${namespaceSlug}`);
     await this.assertCanWriteNamespace(namespace.namespace_id, params?.user as User | undefined);
+    await this.assertSkillFrontmatter(data, null, path);
 
     const persisted = await this.repo.create(
       this.prepareWriteData({
@@ -817,6 +820,7 @@ export class KnowledgeDocumentsService extends DrizzleService<
         : null;
     if (!namespace || namespace.archived) throw new NotFound('Knowledge namespace not found');
     await this.assertCanWriteNamespace(namespace.namespace_id, params?.user as User | undefined);
+    await this.assertSkillFrontmatter(prepared, null, prepared.path);
     const persisted = await this.repo.create({
       ...prepared,
       namespace_id: namespace.namespace_id,
@@ -887,6 +891,11 @@ export class KnowledgeDocumentsService extends DrizzleService<
     if (!(await this.canEdit(existing, params?.user as User | undefined))) {
       throw new Forbidden('You do not have permission to update this knowledge document');
     }
+    await this.assertSkillFrontmatter(
+      data as KnowledgeDocumentWriteData,
+      existing,
+      data.path ?? existing.path
+    );
     const persisted = await this.repo.update(
       String(id),
       {
@@ -936,6 +945,11 @@ export class KnowledgeDocumentsService extends DrizzleService<
     if (!(await this.canEdit(existing, params?.user as User | undefined))) {
       throw new Forbidden('You do not have permission to update this knowledge document');
     }
+    await this.assertSkillFrontmatter(
+      data as KnowledgeDocumentWriteData,
+      existing,
+      data.path ?? existing.path
+    );
     const persisted = await this.repo.update(
       String(id),
       {
@@ -956,6 +970,52 @@ export class KnowledgeDocumentsService extends DrizzleService<
       this.attributionUserId(params, data.updated_by)
     );
     return (await this.attribution.attachToDocuments([persisted]))[0];
+  }
+
+  /**
+   * Agent Skills frontmatter on `kind: skill` writes (`validateSkillDocument`):
+   * `name` (kebab-case, ≤64, equal to the file stem or the `SKILL.md` folder)
+   * and `description` (≤1024). A write that leaves an invalid skill is
+   * rejected, except an edit of an existing skill that keeps its frontmatter,
+   * path and kind: that only logs a warning, so older skills stay editable.
+   * Metadata-only writes are not checked.
+   */
+  private async assertSkillFrontmatter(
+    data: KnowledgeDocumentWriteData,
+    existing: KnowledgeDocument | null,
+    path: string | undefined
+  ): Promise<void> {
+    const kind = data.kind ?? existing?.kind ?? 'doc';
+    if (kind !== 'skill' || !path) return;
+    const pathChanged = !!existing && path !== existing.path;
+    const kindChanged = !!existing && existing.kind !== 'skill';
+    const contentChanged = typeof data.content_text === 'string';
+    if (existing && !contentChanged && !pathChanged && !kindChanged) return;
+
+    const previous = existing ? ((await this.versionFor(existing))?.content_text ?? null) : null;
+    const content = contentChanged ? (data.content_text as string) : (previous ?? '');
+    const issues = validateSkillDocument({ path, content });
+    if (issues.length === 0) return;
+
+    const keepsFrontmatter =
+      !!existing &&
+      !pathChanged &&
+      !kindChanged &&
+      previous !== null &&
+      JSON.stringify(parseMarkdownFrontmatter(previous)) ===
+        JSON.stringify(parseMarkdownFrontmatter(content));
+    if (keepsFrontmatter) {
+      console.warn(
+        `[knowledge.skill_frontmatter] kept_invalid document_id=${existing.document_id} issues=${issues.length}`
+      );
+      return;
+    }
+    throw new BadRequest(
+      `Invalid skill frontmatter in ${path}: ${issues.join('; ')}. A kind:skill document starts with ` +
+        '`---` frontmatter declaring `name` (kebab-case, at most 64 characters, equal to the file ' +
+        'name, or the folder for SKILL.md) and `description` (at most 1024 characters).',
+      { path, issues }
+    );
   }
 
   private assertOrdinaryWrite(data: KnowledgeDocumentWriteData): void {

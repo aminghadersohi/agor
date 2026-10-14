@@ -7,23 +7,38 @@ const FRONTMATTER_PATTERN = /^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)[ \
 
 /**
  * Leading `---` YAML block of a Markdown file, parsed with the Knowledge YAML
- * rules (JSON schema, no tags/anchors/merge keys). Returns `null` when there is
- * no block, it is too large, it does not parse, or it is not a mapping, so a
- * malformed skill still lists by its file name.
+ * rules (JSON schema, no tags/anchors/merge keys), and the markdown after it.
+ * `frontmatter` is `null` when there is no block, it is too large, it does not
+ * parse, or it is not a mapping; `body` is then the whole content when there
+ * is no block, and the text after the block otherwise.
  */
-export function parseMarkdownFrontmatter(content: string): Record<string, unknown> | null {
+export function splitMarkdownFrontmatter(content: string): {
+  frontmatter: Record<string, unknown> | null;
+  body: string;
+} {
   const match = FRONTMATTER_PATTERN.exec(content);
-  if (!match) return null;
+  if (!match) return { frontmatter: null, body: content };
+  const body = content.slice(match[0].length);
   const yaml = match[1];
-  if (Buffer.byteLength(yaml) > MAX_FRONTMATTER_BYTES) return null;
+  if (Buffer.byteLength(yaml) > MAX_FRONTMATTER_BYTES) return { frontmatter: null, body };
   try {
     const value = parseKnowledgeYaml(yaml);
-    return value && typeof value === 'object' && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : null;
+    const frontmatter =
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : null;
+    return { frontmatter, body };
   } catch {
-    return null;
+    return { frontmatter: null, body };
   }
+}
+
+/**
+ * Leading `---` YAML block of a Markdown file; see {@link splitMarkdownFrontmatter}.
+ * Returns `null` so a malformed skill still lists by its file name.
+ */
+export function parseMarkdownFrontmatter(content: string): Record<string, unknown> | null {
+  return splitMarkdownFrontmatter(content).frontmatter;
 }
 
 export function frontmatterString(

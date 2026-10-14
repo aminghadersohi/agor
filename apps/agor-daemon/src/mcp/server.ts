@@ -64,13 +64,13 @@ import { registerGatewayChannelTools } from './tools/gateway-channels.js';
 import { registerKnowledgeTools } from './tools/knowledge.js';
 import { registerMcpServerTools } from './tools/mcp-servers.js';
 import { registerMessageTools } from './tools/messages.js';
-
 import { registerPowerTools } from './tools/power.js';
 import { registerRepoTools } from './tools/repos.js';
 import { registerScheduleTools } from './tools/schedules.js';
 import { registerSearchTools } from './tools/search.js';
 import { registerSessionMemoryTools } from './tools/session-memory.js';
 import { registerSessionTools } from './tools/sessions.js';
+import { registerSkillTools } from './tools/skills.js';
 import { registerTaskTools } from './tools/tasks.js';
 import { registerProfileImageTools, registerUserTools } from './tools/users.js';
 import { registerWidgetTools } from './tools/widgets.js';
@@ -273,7 +273,13 @@ const DOMAIN_TOOL_REGISTRARS: DomainToolRegistrar[] = [
   { domain: 'power', register: registerPowerTools },
   { domain: 'mcp-servers', register: registerMcpServerTools },
   { domain: 'gateway', register: registerGatewayChannelTools },
-  { domain: 'knowledge', register: registerKnowledgeTools },
+  {
+    domain: 'knowledge',
+    register: (server, ctx) => {
+      registerKnowledgeTools(server, ctx);
+      registerSkillTools(server, ctx);
+    },
+  },
   { domain: 'schedules', register: registerScheduleTools },
 ];
 
