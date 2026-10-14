@@ -3,13 +3,17 @@ import { defineConfig } from 'tsup';
 
 export default defineConfig({
   entry: {
-    'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
-    'layout/justified-zones': 'src/layout/justified-zones.ts',
     index: 'src/index.ts',
     'analytics/index': 'src/analytics/index.ts', // Backend analytics logger and plugin resolution
     'telemetry/index': 'src/telemetry/index.ts', // Community install telemetry helpers
     'tracing/datadog': 'src/tracing/datadog.ts', // Shared Datadog tracer type + optional-peer resolver
     'types/index': 'src/types/index.ts',
+    'layout/justified-zones': 'src/layout/justified-zones.ts',
+    'layout/board-zone-arrangement': 'src/layout/board-zone-arrangement.ts',
+    'layout/board-layout-options': 'src/layout/board-layout-options.ts',
+    'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
+    'layout/zone-layout': 'src/layout/zone-layout.ts',
+    'layout/zone-growth-reflow': 'src/layout/zone-growth-reflow.ts',
     'realtime/index': 'src/realtime/index.ts',
     'executor-protocol': 'src/executor-protocol.ts',
     'oauth/rotating-grant-refresh': 'src/oauth/rotating-grant-refresh.ts',
