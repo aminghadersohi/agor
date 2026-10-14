@@ -138,6 +138,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Pin/clear return the fresh front-desk view to the caller; other viewers refetch when they open the teammate.',
   },
+  'branches/:id/skills': {
+    audience: 'none',
+    why: 'Read-only query route; the Skills panel refetches on open.',
+  },
   'sessions/:id/power-priority': {
     audience: 'none',
     why: 'The dedicated mutation returns its projection; the canonical sessions.patched event refreshes viewers.',
