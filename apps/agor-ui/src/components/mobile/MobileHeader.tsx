@@ -1,64 +1,25 @@
-import {
-  ArrowLeftOutlined,
-  BellOutlined,
-  CheckOutlined,
-  DownOutlined,
-  SearchOutlined,
-} from '@ant-design/icons';
-import { Badge, Button, Drawer, Flex, Layout, List, Space, Typography, theme } from 'antd';
-import { createContext, type ReactNode, useContext, useState } from 'react';
-import { reducedMotionSurface, usePrefersReducedMotion } from '../../hooks/usePrefersReducedMotion';
+import { ArrowLeftOutlined } from '@ant-design/icons';
+import { Button, Layout, Typography, theme } from 'antd';
+import { createContext, type ReactNode, useContext } from 'react';
 import { MOBILE_TOUCH_TARGET } from '../../utils/deviceDetection';
-import { pressableProps } from '../../utils/pressableProps';
 
-// Shared header accessory owned by MobileApp, across home/board/session/comments routes.
+// Fork-only: shared header accessory owned by MobileApp (the power indicator),
+// rendered on every sub-page header.
 export const MobileHeaderAccessory = createContext<ReactNode>(null);
 
 const { Header } = Layout;
 const { Title } = Typography;
 
-export interface BoardSwitcherOption {
-  board_id: string;
-  name: string;
-  emoji?: string;
-}
-
 interface MobileHeaderProps {
   title?: string;
   /** When set, a back arrow appears on the left. */
   onBack?: () => void;
-  /** When set, a search icon appears on the right (opens the search screen). */
-  onSearch?: () => void;
-  /** When set, a bell icon appears on the right that opens comments/mentions. */
-  onOpenComments?: () => void;
-  /** Unread comments/mentions count shown on the bell (0 hides the badge). */
-  commentsBadge?: number;
-  /**
-   * When set, the title becomes a button with a chevron that opens a compact
-   * board-switch sheet.
-   */
-  boardSwitcher?: {
-    boards: BoardSwitcherOption[];
-    currentBoardId?: string;
-    onSelect: (boardId: string) => void;
-  };
 }
 
-// The signed-in identity/account lives in the More sheet, so the header stays a
-// title (+ optional back and board switcher) without a duplicated avatar.
-export const MobileHeader: React.FC<MobileHeaderProps> = ({
-  title,
-  onBack,
-  onSearch,
-  onOpenComments,
-  commentsBadge,
-  boardSwitcher,
-}) => {
+/** Sub-page header (Back + title). Tab root screens have no header. */
+export const MobileHeader: React.FC<MobileHeaderProps> = ({ title, onBack }) => {
   const { token } = theme.useToken();
-  const reduced = usePrefersReducedMotion();
-  const [switcherOpen, setSwitcherOpen] = useState(false);
   const accessory = useContext(MobileHeaderAccessory);
-  const iconButtonStyle = { minWidth: MOBILE_TOUCH_TARGET, minHeight: MOBILE_TOUCH_TARGET };
 
   return (
     <Header
@@ -66,152 +27,33 @@ export const MobileHeader: React.FC<MobileHeaderProps> = ({
         flexShrink: 0,
         display: 'flex',
         alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: token.marginSM,
+        gap: token.marginXS,
         paddingInline: token.padding,
         background: token.colorBgContainer,
         borderBottom: `${token.lineWidth}px solid ${token.colorBorderSecondary}`,
       }}
     >
-      <Space
-        size={token.marginXS}
-        align="center"
-        style={{ flex: 1, minWidth: 0 }}
-        // A flex item will not shrink below its own content unless min-width
-        // is cleared. Without this the ellipsis on the title never engages and
-        // a long title widens the header past the viewport, pushing the
-        // accessory and action icons off-screen on a narrow phone.
-        styles={{ item: { minWidth: 0 } }}
-      >
-        {onBack && (
-          <Button
-            type="text"
-            aria-label="Back"
-            icon={<ArrowLeftOutlined />}
-            onClick={onBack}
-            style={{ ...iconButtonStyle, marginInlineStart: -token.marginXS }}
-          />
-        )}
-        {boardSwitcher ? (
-          <Button
-            type="text"
-            onClick={() => setSwitcherOpen(true)}
-            aria-label={`Switch board (current: ${title ?? 'board'})`}
-            style={{
-              paddingInline: 0,
-              minWidth: 0,
-              maxWidth: '100%',
-              minHeight: MOBILE_TOUCH_TARGET,
-            }}
-          >
-            <Space size={token.marginXXS} align="center" style={{ maxWidth: '100%' }}>
-              <Title
-                level={5}
-                ellipsis
-                style={{ margin: 0, fontSize: token.fontSizeLG, fontWeight: 500 }}
-              >
-                {title || 'agor'}
-              </Title>
-              <DownOutlined
-                style={{ fontSize: token.fontSizeSM, color: token.colorTextSecondary }}
-              />
-            </Space>
-          </Button>
-        ) : (
-          <Title
-            level={5}
-            ellipsis
-            style={{
-              margin: 0,
-              color: token.colorText,
-              fontSize: token.fontSizeLG,
-              fontWeight: 500,
-            }}
-          >
-            {title || 'agor'}
-          </Title>
-        )}
-      </Space>
-
-      {onSearch && (
+      {onBack && (
         <Button
           type="text"
-          aria-label="Search"
-          icon={<SearchOutlined />}
-          onClick={onSearch}
-          style={iconButtonStyle}
+          aria-label="Back"
+          icon={<ArrowLeftOutlined />}
+          onClick={onBack}
+          style={{
+            minWidth: MOBILE_TOUCH_TARGET,
+            minHeight: MOBILE_TOUCH_TARGET,
+            marginInlineStart: -token.marginXS,
+          }}
         />
       )}
-
+      <Title
+        level={5}
+        ellipsis
+        style={{ margin: 0, flex: 1, minWidth: 0, fontSize: token.fontSizeLG, fontWeight: 500 }}
+      >
+        {title || 'agor'}
+      </Title>
       {accessory}
-
-      {onOpenComments && (
-        <Badge count={commentsBadge ?? 0} size="small" offset={[-6, 6]}>
-          <Button
-            type="text"
-            aria-label="Comments"
-            icon={<BellOutlined />}
-            onClick={onOpenComments}
-            style={iconButtonStyle}
-          />
-        </Badge>
-      )}
-
-      {boardSwitcher && (
-        <Drawer
-          open={switcherOpen}
-          onClose={() => setSwitcherOpen(false)}
-          placement="bottom"
-          height="auto"
-          title="Switch board"
-          {...reducedMotionSurface(reduced)}
-          styles={{
-            // Auto height keeps short lists compact. Bound both flex ancestors
-            // so a long list scrolls in the body instead of growing offscreen.
-            wrapper: { maxHeight: '85dvh' },
-            section: { maxHeight: '85dvh' },
-            body: {
-              minHeight: 0,
-              overflowY: 'auto',
-              overscrollBehaviorY: 'contain',
-              touchAction: 'pan-y',
-              padding: 0,
-              paddingBottom: 'env(safe-area-inset-bottom)',
-            },
-          }}
-        >
-          <List
-            dataSource={boardSwitcher.boards}
-            renderItem={(board) => {
-              const active = board.board_id === boardSwitcher.currentBoardId;
-              const select = () => {
-                setSwitcherOpen(false);
-                boardSwitcher.onSelect(board.board_id);
-              };
-              return (
-                <List.Item
-                  {...pressableProps(select)}
-                  aria-label={`Switch to ${board.name}`}
-                  aria-current={active ? 'true' : undefined}
-                  style={{
-                    cursor: 'pointer',
-                    paddingInline: token.padding,
-                    minHeight: MOBILE_TOUCH_TARGET,
-                  }}
-                >
-                  <Flex align="center" gap={token.marginSM} style={{ width: '100%', minWidth: 0 }}>
-                    {board.emoji && <span aria-hidden>{board.emoji}</span>}
-                    <Typography.Text ellipsis style={{ flex: 1, fontWeight: active ? 600 : 400 }}>
-                      {board.name}
-                    </Typography.Text>
-                    {active && <CheckOutlined style={{ color: token.colorPrimary }} />}
-                  </Flex>
-                </List.Item>
-              );
-            }}
-          />
-        </Drawer>
-      )}
     </Header>
   );
 };

@@ -36,9 +36,6 @@ export function stampedPrompt(): { prompt: string; block: string } {
     origin: {
       sessionId: ORIGIN_SESSION_ID,
       sessionShortId: '01a0d369',
-      branchVisible: true,
-      branchName: 'elena',
-      teammateName: 'Elena',
       agenticTool: 'claude-code',
     },
     userLabel: 'relay@example.invalid',
@@ -53,7 +50,10 @@ export function stampedPrompt(): { prompt: string; block: string } {
  * Persist one stamped Task through the ordinary admission repository call and
  * read it back through the ordinary reader.
  */
-export async function assertStampedPromptRoundTrips(db: Database, tenantId: string): Promise<void> {
+export async function assertStampedPromptRoundTrips(
+  db: Database,
+  tenantId: string
+): Promise<{ taskId: TaskID; originBranchId: string }> {
   const { prompt, block } = stampedPrompt();
 
   const seeded = await runWithTenantDatabaseScope(db, tenantId, async (scoped) => {
@@ -138,4 +138,6 @@ export async function assertStampedPromptRoundTrips(db: Database, tenantId: stri
   // The stamp travels with the prompt, not beside it.
   expect(persisted?.full_prompt.startsWith('<agor_prompt_provenance>')).toBe(true);
   expect(persisted?.full_prompt.endsWith('push the branch')).toBe(true);
+
+  return { taskId: created.task_id as TaskID, originBranchId: seeded.branch.branch_id };
 }

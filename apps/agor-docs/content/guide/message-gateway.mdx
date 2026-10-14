@@ -296,7 +296,7 @@ Notes:
 
 ### Emoji reactions as input
 
-With **Deliver reactions to sessions** on (`config.inbound_reactions: true`, off by default), a human adding or removing an emoji reaction on a message in a thread that already has a session delivers a short prompt to that session, for example `[Slack reaction] Amin reacted :white_check_mark: to your message in this thread`, followed by a quoted excerpt of the reacted message. This lets you approve or acknowledge an agent's reply without typing.
+With **Deliver reactions to sessions** on (`config.inbound_reactions: true`, off by default), a human adding or removing an emoji reaction on a message in a thread that already has a session delivers a short prompt to that session, for example `[Slack reaction] Ada reacted :white_check_mark: to your message in this thread`, followed by a quoted excerpt of the reacted message. This lets you approve or acknowledge an agent's reply without typing.
 
 - A reaction never starts a session. Reactions in threads with no session, on surfaces the channel doesn't listen on, or outside `allowed_channel_ids` are ignored.
 - The bot's own reactions (including ones agents add with the reaction tools) are ignored. Reactors go through the same identity checks as messages (Slack user alignment or the fixed run-as user, plus branch prompt permission). Rejected reactions are dropped silently, without a notice in the thread.

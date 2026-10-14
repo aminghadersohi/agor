@@ -551,14 +551,18 @@ export interface TaskMetadata {
    * treatment of `source`), and the value is applied from a trusted param that
    * only the MCP layer sets. The same reviewed shape as `completion_callback`.
    *
-   * Presence means an MCP caller delivered this prompt. Absence means it came
-   * from an authenticated browser/REST transport session or a daemon-internal
-   * producer - neither of which an agent holding a session token or personal
-   * API key can reach. So an agent cannot suppress its own stamp.
+   * Presence means an MCP caller delivered this prompt. Absence means it did
+   * not arrive over MCP: it came from a provider-carrying (browser/REST)
+   * transport or a daemon-internal producer. A session MCP token reaches
+   * neither, so an agent using it cannot suppress its own stamp. A personal API
+   * key also authenticates REST, so absence alone is not proof that a human
+   * typed the prompt.
    *
-   * IDs only, deliberately. Display names are resolved and RBAC-gated at
-   * render time against the recipient Session owner's branch access, so this
-   * row cannot become a channel for a branch name the reader may not see.
+   * IDs only, deliberately, and `rendered_block` likewise names the origin
+   * only by Session ID. Every reader of the recipient Session can read this
+   * row and `full_prompt`, so neither may carry an origin branch or teammate
+   * name; a reader resolves those through `agor_sessions_get` under their own
+   * branch access.
    */
   prompt_provenance?: {
     version: 1;
@@ -570,7 +574,7 @@ export interface TaskMetadata {
      * claim into the stronger one.
      */
     authenticated_by: 'session_token' | 'personal_api_key';
-    /** Absent when the caller named no Agor session (P2: admit, render unattributed). */
+    /** Absent when the caller named no Agor session (admitted, rendered unattributed). */
     origin_session_id?: SessionID;
     origin_branch_id?: BranchID;
     /**
@@ -578,7 +582,7 @@ export interface TaskMetadata {
      * and nothing else on the authenticated request names one - so the only
      * way to fill it would be to query the origin Session's current Task and
      * attest a guess. An envelope that exists to stop inferred identity from
-     * looking attested must not do that. See the follow-up note in the PR.
+     * looking attested must not do that.
      */
     /** Agor account the calling agent ran under. Not evidence of human approval. */
     origin_user_id: UserID;

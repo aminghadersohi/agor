@@ -7,9 +7,9 @@
  * rather than silently putting a half-populated card into the marketplace.
  */
 
-import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { MCPCatalogEntry, MCPCatalogTransport } from '@agor/core/types';
 import {
   MCP_CATALOG_AUTHORED_AUTH_TYPES,
@@ -169,16 +169,16 @@ const catalogFileSchema = z
   .strict();
 
 /**
- * Absolute path of the checked-in catalog file. Source and CJS builds keep it
- * beside this loader; the split ESM build may hoist the loader into a root
- * chunk, which finds the copied file under mcp-catalog/.
+ * Absolute path of the checked-in catalog file, alongside its loader.
+ *
+ * Resolved from `import.meta.url`, not `__dirname`: under code splitting the
+ * tsup `__dirname` shim lives in a shared chunk at the package root. This
+ * module stays in the `mcp-catalog/index.js` entry (core keeps
+ * `@agor/core/mcp-catalog` external); scripts/packaged-entry-import-smoke.mjs
+ * loads the file from `dist` to catch a regression.
  */
 export function curatedCatalogPath(): string {
-  const candidates = [
-    path.join(__dirname, 'curated.yaml'),
-    path.join(__dirname, 'mcp-catalog', 'curated.yaml'),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), 'curated.yaml');
 }
 
 /**

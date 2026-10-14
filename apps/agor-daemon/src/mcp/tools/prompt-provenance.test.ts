@@ -13,9 +13,8 @@ import { describe, expect, it } from 'vitest';
  *     withhold `{ kind: 'human' }` from the SDK user message.
  *
  * Omitting them is silent: the prompt still delivers, just wearing human trust
- * authority it never earned. So this asserts over every call site rather than
- * over the one that was found wearing it, and pins the roster so a new tool
- * cannot join without a decision.
+ * authority it never earned. So this asserts over every call site and pins the
+ * roster so a new tool cannot join without a decision.
  */
 const TOOLS_DIR = __dirname;
 
@@ -90,5 +89,13 @@ describe('MCP tool prompt provenance', () => {
     expect(call).toMatch(
       /\.\.\.(ctx\.baseServiceParams|callbackParams|provenanceParams|withPromptProvenanceTool\(|freshMcpServiceParams\()/
     );
+  });
+
+  // A spread alone is not enough: `{ ...ctx.baseServiceParams, _promptProvenance: undefined }`
+  // would pass the check above and drop the stamp. Only `withPromptProvenanceTool`
+  // may touch the field; behavioral coverage lives in `sessions.test.ts` and
+  // `branches.test.ts`, which assert the stamp the prompt service receives.
+  it.each(callSites)('$id never overrides the stamp it passes through', ({ call }) => {
+    expect(call).not.toMatch(/_promptProvenance\s*:/);
   });
 });

@@ -1,4 +1,3 @@
-import type { BranchRepository } from '@agor/core/db';
 import { shortId } from '@agor/core/db';
 import {
   applyPromptProvenanceBlock,
@@ -7,13 +6,10 @@ import {
 import type {
   BranchID,
   PersistedAgenticToolName,
-  Session,
   SessionID,
   TaskMetadata,
   UserID,
 } from '@agor/core/types';
-import { getTeammateConfig } from '@agor/core/types';
-import { isSuperAdmin } from './branch-authorization.js';
 
 /**
  * Trusted prompt-origin stamp carried on `params._promptProvenance`.
@@ -62,54 +58,26 @@ export interface PromptProvenanceResolution {
 }
 
 /**
- * Resolve, gate, and render one agent-originated prompt's provenance.
+ * Render one agent-originated prompt's provenance and apply it to the body.
  *
- * Display names are resolved here rather than at stamp time because the gate
- * depends on the *recipient*: the origin Session's short ID is always
- * rendered, while the branch and teammate names are shown only when the
- * recipient Session's owner could read that branch anyway. Both sides are
- * already known to be in the same tenant, so this is intra-tenant RBAC only.
+ * The block names the origin by Session ID only. Branch and teammate names
+ * are deliberately absent: the rendered text is persisted in `full_prompt`
+ * and `rendered_block`, which every reader of the recipient Session can read,
+ * so no single viewer's branch access can gate it. The recipient resolves the
+ * origin with `agor_sessions_get`, which applies the reader's own RBAC.
  *
- * Failing to resolve a name is not a failure to deliver. A withheld or missing
- * branch renders as withheld and the prompt still lands - the block is an
- * attestation of what the daemon knows, not a precondition for delivery.
+ * Pure and synchronous: no lookup can fail or slow delivery, and the same
+ * stamp and body always produce the same text.
  */
-export async function resolvePromptProvenance(input: {
+export function resolvePromptProvenance(input: {
   stamp: McpPromptProvenanceStamp;
   /** Caller body with sentinels already neutralized by the admission route. */
   body: string;
   /** Sentinel occurrences the route neutralized, recorded on the stamp. */
   escapedSentinels: number;
-  recipientSession: Pick<Session, 'created_by'>;
-  branchRepo: BranchRepository;
-  findUserRole: (userId: string) => Promise<string | undefined>;
   now?: () => Date;
-}): Promise<PromptProvenanceResolution> {
-  const { stamp, body, recipientSession, branchRepo } = input;
-
-  let branchVisible = false;
-  let branchName: string | undefined;
-  let teammateName: string | undefined;
-
-  if (stamp.origin_branch_id) {
-    const branch = await branchRepo.findById(stamp.origin_branch_id);
-    if (branch) {
-      const recipientOwnerId = recipientSession.created_by as UserID;
-      let permission = await branchRepo.resolveUserPermission(branch, recipientOwnerId);
-      if (permission === 'none') {
-        // Superadmins read every branch; the capability resolver answers
-        // per-branch policy only. Looked up only on the denied path so the
-        // ordinary case stays one query.
-        const role = await input.findUserRole(recipientOwnerId);
-        if (isSuperAdmin(role)) permission = 'all';
-      }
-      branchVisible = permission !== 'none';
-      if (branchVisible) {
-        branchName = branch.name;
-        teammateName = getTeammateConfig(branch)?.displayName;
-      }
-    }
-  }
+}): PromptProvenanceResolution {
+  const { stamp, body } = input;
 
   const block = renderPromptProvenanceBlock({
     ...(stamp.origin_session_id
@@ -117,9 +85,6 @@ export async function resolvePromptProvenance(input: {
           origin: {
             sessionId: stamp.origin_session_id,
             sessionShortId: shortId(stamp.origin_session_id),
-            branchVisible,
-            ...(branchName ? { branchName } : {}),
-            ...(teammateName ? { teammateName } : {}),
             ...(stamp.origin_agentic_tool ? { agenticTool: stamp.origin_agentic_tool } : {}),
           },
         }

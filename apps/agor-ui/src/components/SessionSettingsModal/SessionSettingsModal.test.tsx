@@ -7,7 +7,7 @@ import { Form } from 'antd';
 import type React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConnectionProvider } from '../../contexts/ConnectionContext';
-import { SessionSettingsModal } from './SessionSettingsModal';
+import { SessionSettingsModal, type SessionSettingsModalProps } from './SessionSettingsModal';
 
 const persistUserDefaultFromForm = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
@@ -94,7 +94,11 @@ vi.mock('../AgenticConfigChipRow', () => ({
 }));
 // Light stubs for the always-rendered primary-zone children.
 vi.mock('../SessionMetadataForm', () => ({
-  SessionMetadataForm: () => <div data-testid="meta" />,
+  SessionMetadataForm: () => (
+    <Form.Item name="title" label="Title">
+      <input />
+    </Form.Item>
+  ),
 }));
 vi.mock('../SessionIds', () => ({ SessionIdsList: () => <div data-testid="ids" /> }));
 // Secondary-collapse children (lazy, but stub to avoid heavy module work).
@@ -112,7 +116,6 @@ vi.mock('../CodexSettingsForm', () => ({
     );
   },
 }));
-vi.mock('../CallbackConfigForm', () => ({ CallbackConfigForm: () => null }));
 vi.mock('../CallbackToggleButton', () => ({ CallbackTargetDisplay: () => null }));
 vi.mock('../AdvancedSettingsForm', () => ({
   AdvancedSettingsForm: ({ disabled }: { disabled?: boolean }) => (
@@ -143,6 +146,90 @@ const codexSession = {
 describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
   beforeEach(() => {
     mcpLinks.value = { ids: [], loaded: true };
+  });
+
+  describe('callback_config on save', () => {
+    const callbackSession: Session = {
+      ...claudeSession,
+      callback_config: {
+        enabled: true,
+        callback_mode: 'once',
+        include_last_message: true,
+        include_original_prompt: true,
+        callback_session_id: 'target-1' as Session['session_id'],
+        callback_created_by: 'u1',
+        template: 'Received {{childSessionTitle}}',
+      },
+    };
+
+    it.each([false, true])(
+      'omits untouched callbacks after server changes (store caught up: %s)',
+      async (storeCaughtUp) => {
+        const onUpdate = vi.fn();
+        const props = { open: true, onClose: vi.fn(), onUpdate };
+        const { rerender } = render(<SessionSettingsModal {...props} session={callbackSession} />);
+        // A concurrent target/mode edit and a consumed Once callback must not
+        // be reversed, even if the UI still holds the old store snapshot.
+        const serverSession: Session = {
+          ...callbackSession,
+          callback_config: {
+            ...callbackSession.callback_config,
+            enabled: false,
+            callback_mode: 'persistent',
+            callback_session_id: 'target-2' as Session['session_id'],
+            callback_created_by: 'u2',
+            include_original_prompt: false,
+            include_last_message: false,
+            template: 'New server template',
+          },
+        };
+        rerender(
+          <SessionSettingsModal
+            {...props}
+            session={storeCaughtUp ? serverSession : callbackSession}
+          />
+        );
+        fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), {
+          target: { value: 'Edited title' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(onUpdate).toHaveBeenCalled());
+        expect(onUpdate.mock.calls[0][1]).toMatchObject({ title: 'Edited title' });
+        expect(onUpdate.mock.calls[0][1]).not.toHaveProperty('callback_config');
+      }
+    );
+
+    it.each([
+      { label: 'Enable Completion Callbacks', patch: { enabled: false } },
+      { label: "Include Child's Final Answer", patch: { include_last_message: false } },
+      {
+        label: 'Custom Template',
+        template: 'Edited template',
+        patch: { template: 'Edited template' },
+      },
+      { label: 'Custom Template', template: '', patch: { template: '' } },
+    ])('sends only the edited callback field: $patch', async ({ label, template, patch }) => {
+      const onUpdate = vi.fn();
+      render(
+        <SessionSettingsModal
+          open
+          onClose={vi.fn()}
+          session={callbackSession}
+          onUpdate={onUpdate}
+        />
+      );
+      fireEvent.click(screen.getByText('Callbacks'));
+      if (template !== undefined) {
+        fireEvent.change(screen.getByRole('textbox', { name: /Custom Template/ }), {
+          target: { value: template },
+        });
+      } else {
+        fireEvent.click(screen.getByRole('switch', { name: label }));
+      }
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onUpdate).toHaveBeenCalled());
+      expect(onUpdate.mock.calls[0][1].callback_config).toEqual(patch);
+    });
   });
 
   it('never sends an MCP diff while the session links are loading', async () => {
@@ -258,10 +345,21 @@ describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
     expect(screen.queryByTestId('effort-chip')).not.toBeInTheDocument();
   });
 
+  // Omitted means persistent, matching completion-callback dispatch. Saving
+  // without touching callbacks sends no callback patch (only edited fields are
+  // diffed), so the effective mode is never rewritten behind the server's back.
   it.each([
-    ['keeps an explicit once mode', { enabled: true, callback_mode: 'once' }, 'once'],
-    ['writes the persistent default when the mode was omitted', { enabled: true }, 'persistent'],
-  ])('%s on save', async (_label, callbackConfig, expectedMode) => {
+    [
+      'an explicit once mode',
+      { enabled: true, callback_mode: 'once' },
+      'Once — next completion only',
+    ],
+    [
+      'the persistent default when the mode was omitted',
+      { enabled: true },
+      'Persistent — every completion until unlinked',
+    ],
+  ])('shows %s and leaves it untouched on save', async (_label, callbackConfig, modeLabel) => {
     const onUpdate = vi.fn();
     render(
       <SessionSettingsModal
@@ -274,16 +372,15 @@ describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
       />
     );
 
+    fireEvent.click(screen.getByText('Callbacks'));
+    expect(await screen.findByText(modeLabel)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Title' }), {
+      target: { value: 'Edited title' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    await waitFor(() =>
-      expect(onUpdate).toHaveBeenCalledWith(
-        's1',
-        expect.objectContaining({
-          callback_config: expect.objectContaining({ callback_mode: expectedMode }),
-        })
-      )
-    );
+    await waitFor(() => expect(onUpdate).toHaveBeenCalled());
+    expect(onUpdate.mock.calls[0][1]).not.toHaveProperty('callback_config');
   });
 
   it('persists MCP changes while a preset is selected', async () => {
@@ -376,7 +473,7 @@ describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
         updated_at: '2026-09-01T00:00:00.000Z',
       },
     } as unknown as Session;
-    const renderModal = (onUpdate: ReturnType<typeof vi.fn>) =>
+    const renderModal = (onUpdate: NonNullable<SessionSettingsModalProps['onUpdate']>) =>
       render(
         <SessionSettingsModal
           open
@@ -413,7 +510,7 @@ describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
   describe('custom_context from a lean session row', () => {
     const fullContext = {
       teamName: 'Backend',
-      scheduled_run: { schedule_id: 'sched-1' },
+      scheduled_run: { schedule_id: 'sched-1', rendered_prompt: 'Scheduled prompt', run_index: 1 },
       slash_commands: ['/review'],
     };
     const leanSession = {
@@ -480,7 +577,9 @@ describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
       expect(await screen.findByText('(details unavailable)')).toBeInTheDocument();
       fireEvent.click(screen.getByText('Advanced'));
       const field = (await screen.findByTestId('custom-context')) as HTMLTextAreaElement;
-      expect(screen.getByText(/Could not load full session details: offline/)).toBeInTheDocument();
+      expect(
+        screen.getByText("Couldn't load this session's details. (offline)")
+      ).toBeInTheDocument();
       expect(field.readOnly).toBe(true);
 
       // Saving other settings while degraded never sends the lean context.
@@ -488,7 +587,7 @@ describe('SessionSettingsModal configuration', { timeout: 10_000 }, () => {
       await waitFor(() => expect(onUpdate).toHaveBeenCalled());
       expect(onUpdate.mock.calls[0][1]).not.toHaveProperty('custom_context');
 
-      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
       await waitFor(() => expect(field.readOnly).toBe(false));
       expect(JSON.parse(field.value)).toEqual(fullContext);
       expect(screen.queryByText('(details unavailable)')).not.toBeInTheDocument();
