@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SkillSetEntry, SkillSetManifest } from '../types/skills';
 import { splitMarkdownFrontmatter } from './frontmatter';
 import {
+  isSkillSetPath,
   parseSkillSetManifest,
   renderSkillSetManifest,
   sameSkillPins,
@@ -71,5 +72,36 @@ describe('skill set manifests', () => {
     expect(sameSkillPins([entry(1)], [entry(1, { version_id: 'ver-9' as never })])).toBe(false);
     expect(sameSkillPins([entry(1)], [entry(1, { sha256: 'f'.repeat(64) })])).toBe(false);
     expect(sameSkillPins([entry(1)], [entry(1), entry(2)])).toBe(false);
+  });
+  it('shares one size bound between writing and reading', () => {
+    const many = Array.from({ length: 151 }, (_, i) => entry(i + 1));
+    expect(() => renderSkillSetManifest({ ...manifest, skills: many })).toThrow(
+      'A skill set pins at most 150 skills; this release has 151.'
+    );
+    const fat = Array.from({ length: 150 }, (_, i) =>
+      entry(i + 1, { path: `skills/frink/${'p'.repeat(400)}-${i}.md` })
+    );
+    expect(() => renderSkillSetManifest({ ...manifest, skills: fat })).toThrow(
+      /bytes; the limit is 49152/
+    );
+    // A hand-made manifest over the bound is unreadable rather than half-read.
+    const listed = many
+      .map(
+        (e) =>
+          `  - document_id: ${e.document_id}\n    path: ${e.path}\n    version_id: ${e.version_id}\n    version_number: ${e.version_number}\n    sha256: ${e.sha256}`
+      )
+      .join('\n');
+    expect(parseSkillSetManifest(`---\nname: x\nrelease: 1\nskills:\n${listed}\n---\n`)).toEqual({
+      error: 'a skill set pins at most 150 skills',
+    });
+  });
+
+  it('recognises release-only paths', () => {
+    expect(isSkillSetPath('skillsets/frink.md')).toBe(true);
+    expect(isSkillSetPath('/SkillSets/frink.md')).toBe(true);
+    expect(isSkillSetPath('skillsets')).toBe(true);
+    expect(isSkillSetPath('notes/skillsets.md')).toBe(false);
+    expect(isSkillSetPath('skillsets-old/x.md')).toBe(false);
+    expect(isSkillSetPath(undefined)).toBe(false);
   });
 });

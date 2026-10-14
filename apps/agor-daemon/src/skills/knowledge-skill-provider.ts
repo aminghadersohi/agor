@@ -177,11 +177,21 @@ export class KnowledgeSkillProvider implements SkillProvider {
   async list(query?: SkillListQuery): Promise<SkillSummary[]> {
     const skills: SkillSummary[] = [];
     for (const namespace of await this.providerNamespaces()) {
-      for (const doc of await this.listNamespaceSkillDocs(namespace)) {
-        if (query?.teammateKeys && !providerSkillIsFor(doc.path, query.teammateKeys)) continue;
-        const content = this.toContent(doc, namespace, doc.current_version ?? null);
-        if (content) skills.push(summaryOf(content));
-      }
+      skills.push(...(await this.listNamespace(namespace, query)));
+    }
+    return skills;
+  }
+
+  /** The skills of one provider namespace only. */
+  async listNamespace(
+    namespace: KnowledgeNamespace,
+    query?: SkillListQuery
+  ): Promise<SkillSummary[]> {
+    const skills: SkillSummary[] = [];
+    for (const doc of await this.listNamespaceSkillDocs(namespace)) {
+      if (query?.teammateKeys && !providerSkillIsFor(doc.path, query.teammateKeys)) continue;
+      const content = this.toContent(doc, namespace, doc.current_version ?? null);
+      if (content) skills.push(summaryOf(content));
     }
     return skills;
   }

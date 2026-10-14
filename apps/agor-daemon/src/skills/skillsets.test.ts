@@ -1,6 +1,12 @@
-import { type Database, eq, kbDocumentVersions, update } from '@agor/core/db';
+import {
+  type Database,
+  eq,
+  KnowledgeDocumentRepository,
+  kbDocumentVersions,
+  update,
+} from '@agor/core/db';
 import { parseSkillSetManifest } from '@agor/core/knowledge';
-import type { Branch, BranchID, KnowledgeNamespace, User } from '@agor/core/types';
+import type { KnowledgeNamespace, User, UserID } from '@agor/core/types';
 import { describe, expect, it } from 'vitest';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import {
@@ -13,7 +19,7 @@ import {
   userParams,
 } from '../../test/skills-fixture';
 import { KnowledgeSkillProvider } from './knowledge-skill-provider';
-import { providerOwnerBranchId, releaseAuthorization, SkillSets } from './skillsets';
+import { curatorAuthorization, SkillSets } from './skillsets';
 import type { SkillTeammate } from './teammate';
 
 const FRINK: SkillTeammate = {
@@ -219,16 +225,19 @@ describe('SkillSets releases', () => {
   });
 
   dbTest('refuses to release over an unreadable manifest', async ({ db }) => {
-    const { fixture, owner, ns, sets, namespace } = await setup(db);
-    await fixture.documents.putDocument(
-      {
-        namespace_slug: ns.slug,
-        path: 'skillsets/frink.md',
-        kind: 'bundle',
-        content_text: '# hand-written',
-      } as never,
-      userParams(owner) as never
-    );
+    const { owner, ns, sets, namespace } = await setup(db);
+    // A hand-written manifest from before governance (written straight to the repository).
+    await new KnowledgeDocumentRepository(db).create({
+      namespace_id: ns.namespace_id,
+      path: 'skillsets/frink.md',
+      title: 'hand-written',
+      kind: 'bundle',
+      visibility: 'public',
+      status: 'published',
+      edit_policy: 'owner',
+      content_text: '# hand-written',
+      created_by: owner.user_id as UserID,
+    });
     await expect(release(sets, namespace)).rejects.toThrow(
       /skillsets\/frink\.md is not a valid skill set manifest \(the manifest has no YAML frontmatter\)/
     );
@@ -258,76 +267,45 @@ describe('SkillSets releases', () => {
   });
 });
 
-describe('releaseAuthorization', () => {
-  const FRINK_BRANCH = '01a00000-0000-7000-8000-00000000f001' as BranchID;
-  const namespace = (permission: 'read' | 'write' | 'own') =>
-    ({
-      namespace_id: 'ns',
-      slug: 'assistant-frink',
-      branch_id: FRINK_BRANCH,
-      metadata: { skills_provider: true },
-      effective_permission: permission,
-    }) as unknown as KnowledgeNamespace;
-  const teammateBranch = (branchId: string) =>
-    ({
-      branch_id: branchId,
-      custom_context: { teammate: { kind: 'teammate', displayName: 'x' } },
-    }) as unknown as Branch;
-  const plainBranch = { branch_id: 'plain', custom_context: {} } as unknown as Branch;
+describe('curatorAuthorization', () => {
+  const provider = {
+    namespace: 'assistant-frink',
+    curator_branch_id: '01a00000-0000-7000-8000-00000000f001',
+  };
 
-  it('lets the owning teammate’s session release', () => {
-    expect(releaseAuthorization(namespace('write'), teammateBranch(FRINK_BRANCH), true)).toEqual({
+  it('allows only the configured curator branch, from a verified session', () => {
+    expect(curatorAuthorization(provider, provider.curator_branch_id, true)).toEqual({
       allowed: true,
       as: 'curator',
     });
-  });
-
-  it('lets a non-teammate caller with own release, but not another teammate’s session', () => {
-    expect(releaseAuthorization(namespace('own'), null, true)).toEqual({
-      allowed: true,
-      as: 'curator',
-    });
-    expect(releaseAuthorization(namespace('own'), plainBranch, true)).toEqual({
-      allowed: true,
-      as: 'curator',
-    });
-    expect(releaseAuthorization(namespace('own'), teammateBranch('other'), true)).toMatchObject({
+    expect(curatorAuthorization(provider, 'other-branch', true)).toMatchObject({
       allowed: false,
-      reason: expect.stringContaining('Only the curator'),
+      reason: expect.stringContaining('Only the curator session'),
     });
-    expect(releaseAuthorization(namespace('write'), null, true)).toMatchObject({ allowed: false });
-  });
-
-  it('bootstraps r1 for any writer, but not for readers', () => {
-    expect(releaseAuthorization(namespace('write'), teammateBranch('other'), false)).toEqual({
-      allowed: true,
-      as: 'bootstrap',
-    });
-    expect(releaseAuthorization(namespace('read'), null, false)).toMatchObject({
+    expect(curatorAuthorization(provider, null, true)).toMatchObject({ allowed: false });
+    // A claimed, unverified session never qualifies.
+    expect(curatorAuthorization(provider, provider.curator_branch_id, false)).toMatchObject({
       allowed: false,
-      reason: expect.stringContaining('needs write access'),
+    });
+    expect(curatorAuthorization(undefined, provider.curator_branch_id, true)).toMatchObject({
+      allowed: false,
+      reason: 'This namespace is not a configured skills provider.',
     });
   });
+});
 
-  it('never grants the curator role from a claimed, unverified session', () => {
-    expect(
-      releaseAuthorization(namespace('write'), teammateBranch(FRINK_BRANCH), true, false)
-    ).toMatchObject({ allowed: false });
-    // ...but a claimed teammate session still takes the own path away.
-    expect(
-      releaseAuthorization(namespace('own'), teammateBranch('other'), true, false)
-    ).toMatchObject({ allowed: false });
-  });
-
-  it('finds the owning branch from the namespace or its teammate metadata', () => {
-    expect(providerOwnerBranchId(namespace('own'))).toBe(FRINK_BRANCH);
-    expect(
-      providerOwnerBranchId({
-        metadata: { assistant: { branch_id: 'legacy' } },
-      } as unknown as KnowledgeNamespace)
-    ).toBe('legacy');
-    expect(
-      providerOwnerBranchId({ metadata: {} } as unknown as KnowledgeNamespace)
-    ).toBeUndefined();
+describe('manifest size bound', () => {
+  dbTest('refuses an oversized release without touching the current one', async ({ db }) => {
+    const { fixture, owner, ns, sets, namespace } = await setup(db);
+    await release(sets, namespace);
+    for (let i = 0; i < 160; i += 1) {
+      await putSkillDoc(fixture, owner, ns, `skills/frink/s-${i}.md`, skillMarkdown(`s-${i}`));
+    }
+    await expect(release(sets, namespace)).rejects.toThrow(
+      /Release r2 of .*skillsets\/frink\.md was not written: A skill set pins at most 150 skills; this release has 162/
+    );
+    const after = await sets.find(namespace, FRINK);
+    expect(after.document?.current_version?.version_number).toBe(1);
+    expect(after.manifest?.release).toBe(1);
   });
 });

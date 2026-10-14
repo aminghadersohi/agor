@@ -34,6 +34,7 @@ import {
 } from '@agor/core/types';
 import { z } from 'zod';
 import { runKnowledgePolicyTransaction } from '../knowledge/policy-transaction.js';
+import { configuredProviderSlugs } from '../skills/skillset-governance.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import { isKnowledgeAdmin } from './knowledge-access.js';
 import { KnowledgeDocumentsService } from './knowledge-documents.js';
@@ -259,6 +260,14 @@ export class KnowledgeTransfersService {
         }
         if (await namespaces.findBySlug(data.slug))
           throw new Conflict('Destination namespace already exists');
+        if (
+          configuredProviderSlugs(this.app?.get?.('config')).has(data.slug) &&
+          !isKnowledgeAdmin(user as never)
+        ) {
+          throw new Forbidden(
+            `${data.slug} is a configured skills provider namespace; only an admin can create it.`
+          );
+        }
         const ns = await namespaces.create({
           slug: data.slug,
           display_name: data.display_name,

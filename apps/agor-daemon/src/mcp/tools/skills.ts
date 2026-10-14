@@ -1,14 +1,6 @@
-/**
- * Skills tools (knowledge domain): discover and fetch skills from skills
- * provider namespaces, and read or cut skill set releases. See
- * `skills/knowledge-skill-provider.ts` and `skills/skillsets.ts`.
- */
-
-import { BranchRepository } from '@agor/core/db';
 import type {
   Branch,
   BranchID,
-  KnowledgeNamespace,
   Params,
   SkillContent,
   SkillSetEntry,
@@ -16,14 +8,14 @@ import type {
 } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { KnowledgeSkillProvider, summaryOf } from '../../skills/knowledge-skill-provider.js';
-import { renderProvenanceHeader, skillIndexEntry, skillProvenance } from '../../skills/render.js';
 import {
-  type ReleaseOutcome,
-  releaseAuthorization,
-  type SkillSetRecord,
-  SkillSets,
-} from '../../skills/skillsets.js';
+  KnowledgeSkillProvider,
+  sha256Hex,
+  summaryOf,
+} from '../../skills/knowledge-skill-provider.js';
+import { releaseAllTeammates, releaseNamespaces, runReleases } from '../../skills/release.js';
+import { renderProvenanceHeader, skillIndexEntry, skillProvenance } from '../../skills/render.js';
+import { curatorAuthorization, type SkillSetRecord, SkillSets } from '../../skills/skillsets.js';
 import {
   resolveSkillTeammate,
   type SkillTeammate,
@@ -33,9 +25,6 @@ import { mcpOptionalId, mcpOptionalNonBlankString } from '../schema.js';
 import type { McpContext } from '../server.js';
 import { coerceString, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope } from '../tenant-scope.js';
-
-/** Teammate branches read when releasing for every teammate. */
-const RELEASE_ALL_TEAMMATE_LIMIT = 500;
 
 function providerFor(ctx: McpContext): KnowledgeSkillProvider {
   return new KnowledgeSkillProvider(ctx.app, ctx.baseServiceParams as Params);
@@ -157,101 +146,6 @@ function releaseSummary(record: SkillSetRecord) {
   };
 }
 
-/** Provider namespaces to release in: all readable ones, or the one named. */
-async function releaseNamespaces(
-  provider: KnowledgeSkillProvider,
-  slug: string | undefined
-): Promise<KnowledgeNamespace[]> {
-  const namespaces = await provider.providerNamespaces();
-  if (!slug) return namespaces;
-  const match = namespaces.filter((ns) => ns.slug === slug);
-  if (match.length === 0) {
-    throw new Error(`${slug} is not a skills provider namespace you can read.`);
-  }
-  return match;
-}
-
-/**
- * Everyone a release-all covers in one namespace: each visible teammate
- * (teammates sharing the same keys count once) plus each skill folder no
- * visible teammate claims, addressed by its folder key.
- */
-async function releaseAllTeammates(
-  ctx: McpContext,
-  provider: KnowledgeSkillProvider,
-  namespace: KnowledgeNamespace
-): Promise<SkillTeammate[]> {
-  const branches = await runWithMcpTenantDatabaseScope(ctx, (db) =>
-    new BranchRepository(db).findTeammateBranches({
-      archived: false,
-      userId: ctx.userId,
-      minimumPermission: 'view',
-      limit: RELEASE_ALL_TEAMMATE_LIMIT,
-    })
-  );
-  const teammates = new Map<string, SkillTeammate>();
-  for (const branch of branches) {
-    const teammate = skillTeammateOf(branch);
-    if (teammate) teammates.set([...teammate.keys].sort().join('|'), teammate);
-  }
-  const claimed = new Set([...teammates.values()].flatMap((teammate) => teammate.keys));
-  const folders = new Set(
-    (await provider.list())
-      .filter((skill) => skill.namespace_id === namespace.namespace_id)
-      .flatMap((skill) => (skill.assignment.kind === 'teammate' ? [skill.assignment.key] : []))
-  );
-  for (const folder of folders) {
-    if (!claimed.has(folder)) teammates.set(folder, { name: folder, keys: [folder] });
-  }
-  return [...teammates.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-interface ReleaseResult {
-  namespace: string;
-  teammate: string;
-  path?: string;
-  status: 'released' | 'unchanged' | 'skipped' | 'denied' | 'conflict' | 'error';
-  release?: number;
-  previous_release?: number | null;
-  skills?: number;
-  authorized_as?: 'curator' | 'bootstrap';
-  manifest_version_number?: number;
-  reason?: string;
-}
-
-function outcomeResult(
-  outcome: ReleaseOutcome,
-  teammate: SkillTeammate,
-  authorizedAs: 'curator' | 'bootstrap'
-): ReleaseResult {
-  const base = {
-    namespace: outcome.record.namespace.slug,
-    teammate: teammate.name,
-    path: outcome.record.path,
-    authorized_as: authorizedAs,
-  };
-  if (outcome.status === 'released') {
-    return {
-      ...base,
-      status: 'released',
-      release: outcome.manifest.release,
-      previous_release: outcome.manifest.release > 1 ? outcome.manifest.release - 1 : null,
-      skills: outcome.manifest.skills.length,
-      manifest_version_number: outcome.record.document?.current_version?.version_number,
-    };
-  }
-  if (outcome.status === 'unchanged') {
-    return {
-      ...base,
-      status: 'unchanged',
-      release: outcome.record.manifest?.release,
-      skills: outcome.record.manifest?.skills.length,
-      reason: 'every pinned skill is already at its current version',
-    };
-  }
-  return { ...base, status: 'skipped', reason: outcome.reason };
-}
-
 export function registerSkillTools(server: McpServer, ctx: McpContext): void {
   server.registerTool(
     'agor_skills_list',
@@ -329,6 +223,7 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
       if (version === undefined && teammate) {
         const pin = pinsByDocument(await teammateSkillSets(provider, teammate)).get(id);
         if (pin) {
+          // A pinned skill is served at its pin or not at all.
           try {
             skill = await provider.get({
               provider: provider.id,
@@ -337,10 +232,17 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
               version_number: pin.entry.version_number,
               sha256: pin.entry.sha256,
             });
-            selectedBy = releaseLabel(pin.record);
           } catch {
-            selectedBy = `current version (the version ${releaseLabel(pin.record)} pins is unavailable)`;
+            throw new Error(
+              `The version ${releaseLabel(pin.record)} pins is unavailable. Pass version: 'latest' to read the current one.`
+            );
           }
+          if (sha256Hex(skill.content) !== pin.entry.sha256) {
+            throw new Error(
+              `The content of the version ${releaseLabel(pin.record)} pins no longer matches its sha256; it was not returned.`
+            );
+          }
+          selectedBy = releaseLabel(pin.record);
         }
       }
       skill ??= await provider.get({ provider: provider.id, id }, version ?? 'latest');
@@ -375,7 +277,7 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
       const skillsets = [];
       for (const namespace of await releaseNamespaces(provider, coerceString(args.namespace))) {
         const assigned = await sets.namespaceSkills(namespace, teammate);
-        const record = await sets.find(namespace, teammate, assigned);
+        const record = await sets.find(namespace, teammate);
         const pinned = new Set(record.manifest?.skills.map((entry) => entry.document_id));
         skillsets.push({
           ...releaseSummary(record),
@@ -398,7 +300,7 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
     'agor_skillsets_release',
     {
       description:
-        'Cut a new frozen skill set release: pin the current published version of every skill assigned to the teammate (or to every teammate with all:true) in each skills provider namespace, as release N+1 of skillsets/<teammate>.md. Curator only: a session on the teammate that owns the provider namespace, or a caller outside a teammate session with own access. While a teammate has no release yet, anyone with write access may cut its r1. A release that would pin exactly what the current one pins is skipped as unchanged. Concurrent releases conflict instead of overwriting.',
+        "Cut a new frozen skill set release: pin the current published version of every skill assigned to the teammate (or to every teammate with all:true) in a skills provider namespace, as release N+1 of skillsets/<teammate>.md. Only the curator session may call this: a session whose branch is the provider's configured curator_branch_id. Admins cut releases (including the first) with `agor skills release` outside any session. A release that would pin exactly what the current one pins is reported as unchanged. Concurrent releases conflict instead of overwriting.",
       annotations: { idempotentHint: false },
       inputSchema: z.object({
         teammate: mcpOptionalNonBlankString(
@@ -425,7 +327,6 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
         throw new Error('expectedVersion applies to a single teammate, not all:true.');
       }
       const provider = providerFor(ctx);
-      const sets = new SkillSets(provider);
       const namespaces = await releaseNamespaces(provider, coerceString(args.namespace));
       if (args.expectedVersion !== undefined && namespaces.length > 1) {
         throw new Error('expectedVersion needs namespace when several provider namespaces exist.');
@@ -436,56 +337,37 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
             resolveSkillTeammate(db, teammateArg, ctx.userId)
           )
         : null;
-
-      const results: ReleaseResult[] = [];
-      for (const namespace of namespaces) {
-        const teammates = single ? [single] : await releaseAllTeammates(ctx, provider, namespace);
-        for (const teammate of teammates) {
-          try {
-            const plan = await sets.plan(namespace, teammate, {
-              actor: ctx.userId,
-              ...(args.expectedVersion !== undefined
-                ? { expectedVersion: args.expectedVersion }
-                : {}),
-            });
-            const auth = releaseAuthorization(
-              namespace,
-              caller.branch,
-              !!plan.record.document,
-              caller.verified
-            );
-            if (!auth.allowed) {
-              results.push({
-                namespace: namespace.slug,
-                teammate: teammate.name,
-                path: plan.record.path,
-                status: 'denied',
-                reason: auth.reason,
-              });
-              continue;
+      const session = ctx.authenticatedSession;
+      const callerTeammate = caller.branch ? skillTeammateOf(caller.branch) : null;
+      const run = await runReleases({
+        provider,
+        namespaces,
+        teammate: single,
+        listAllTeammates: (namespace) =>
+          runWithMcpTenantDatabaseScope(ctx, (db) =>
+            releaseAllTeammates(db, ctx.userId, provider, namespace)
+          ),
+        authorize: (namespace) =>
+          curatorAuthorization(
+            provider.providerFor(namespace.slug),
+            caller.branch?.branch_id,
+            caller.verified
+          ),
+        actor: ctx.userId,
+        ...(args.expectedVersion !== undefined ? { expectedVersion: args.expectedVersion } : {}),
+        writeParams: session
+          ? {
+              knowledgeWriteAttribution: {
+                sessionId: session.session_id,
+                agenticTool: session.agentic_tool,
+                ...(callerTeammate ? { teammateName: callerTeammate.name } : {}),
+              },
             }
-            results.push(outcomeResult(await sets.commit(plan), teammate, auth.as));
-          } catch (error) {
-            const code = (error as { code?: unknown } | null)?.code;
-            results.push({
-              namespace: namespace.slug,
-              teammate: teammate.name,
-              status: code === 409 ? 'conflict' : code === 403 ? 'denied' : 'error',
-              reason: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-      }
-      const failed = results.some((result) =>
-        ['denied', 'conflict', 'error'].includes(result.status)
-      );
-      const counts = results.reduce<Record<string, number>>((acc, result) => {
-        acc[result.status] = (acc[result.status] ?? 0) + 1;
-        return acc;
-      }, {});
+          : {},
+      });
       return {
-        ...textResult({ counts, results }),
-        ...(failed ? { isError: true } : {}),
+        ...textResult({ counts: run.counts, results: run.results }),
+        ...(run.failed ? { isError: true } : {}),
       };
     }
   );
