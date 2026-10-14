@@ -17,6 +17,9 @@
  * that teammate only its own folder and its unfoldered skills.
  */
 
+import { isSkillReadmePath } from '@agor/core/knowledge';
+import { SKILLS_SHARED_FOLDER, type SkillAssignment } from '@agor/core/types';
+
 /** Lowercase ASCII slug: accents folded, every other run of non-alphanumerics becomes `-`. */
 export function slugify(value: string): string {
   return value
@@ -84,4 +87,22 @@ export function assignTeammateSkillDocs<T extends SkillDocRef>(
 /** Gap documents to look for in readable namespaces, one per teammate key. */
 export function teammateGapPaths(ownKeys: Iterable<string>): string[] {
   return [...new Set(ownKeys)].map((key) => `skills/${key}/_gaps.md`);
+}
+
+/**
+ * Who a skill in a skills-provider namespace is for: `skills/_shared/…` →
+ * every teammate, `skills/<key>/…` → the teammate with that key. Undefined
+ * for unfoldered paths and `README.md` files, which are never provider skills.
+ */
+export function providerSkillAssignment(path: string): SkillAssignment | undefined {
+  const folder = skillFolder(path);
+  if (folder === undefined || isSkillReadmePath(path)) return undefined;
+  return folder === SKILLS_SHARED_FOLDER ? { kind: 'shared' } : { kind: 'teammate', key: folder };
+}
+
+/** True when a provider skill at `path` goes to a teammate with one of `keys`. */
+export function providerSkillIsFor(path: string, keys: Iterable<string>): boolean {
+  const assignment = providerSkillAssignment(path);
+  if (!assignment) return false;
+  return assignment.kind === 'shared' || new Set(keys).has(assignment.key);
 }

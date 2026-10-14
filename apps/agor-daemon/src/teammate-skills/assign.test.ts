@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   assignTeammateSkillDocs,
+  providerSkillAssignment,
+  providerSkillIsFor,
   type SkillDocRef,
   skillFolder,
   slugify,
@@ -119,5 +121,35 @@ describe('teammateGapPaths', () => {
       'skills/lind/_gaps.md',
       'skills/freja-lind/_gaps.md',
     ]);
+  });
+});
+
+describe('providerSkillAssignment', () => {
+  it('assigns _shared to everyone and other folders to that key', () => {
+    expect(providerSkillAssignment('skills/_shared/standing-facts.md')).toEqual({ kind: 'shared' });
+    expect(providerSkillAssignment('skills/Frink/research.md')).toEqual({
+      kind: 'teammate',
+      key: 'frink',
+    });
+    expect(providerSkillAssignment('skills/triage/x/SKILL.md')).toEqual({
+      kind: 'teammate',
+      key: 'triage',
+    });
+  });
+
+  it('ignores README files and paths outside a skills folder', () => {
+    expect(providerSkillAssignment('skills/README.md')).toBeUndefined();
+    expect(providerSkillAssignment('skills/frink/README.md')).toBeUndefined();
+    expect(providerSkillAssignment('skills/loose.md')).toBeUndefined();
+    expect(providerSkillAssignment('docs/frink/x.md')).toBeUndefined();
+  });
+
+  it('matches a teammate by any of its keys, plus shared skills', () => {
+    const keys = teammateSkillKeys('Professor Frink');
+    expect(providerSkillIsFor('skills/frink/x.md', keys)).toBe(true);
+    expect(providerSkillIsFor('skills/professor-frink/x.md', keys)).toBe(true);
+    expect(providerSkillIsFor('skills/_shared/x.md', keys)).toBe(true);
+    expect(providerSkillIsFor('skills/maya/x.md', keys)).toBe(false);
+    expect(providerSkillIsFor('skills/frink/README.md', keys)).toBe(false);
   });
 });
