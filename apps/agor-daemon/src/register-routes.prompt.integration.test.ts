@@ -47,6 +47,7 @@ async function fixture() {
   const messages = new MessagesRepository(db);
   const branchRepository = new BranchRepository(db);
   const usersRepository = new UsersRepository(db);
+  let branchId = '';
   const { actor, session } = await scoped(async () => {
     const actor = await usersRepository.create({ email: 'prompt@example.invalid', role: 'member' });
     const repo = await new RepoRepository(db).create({
@@ -75,6 +76,7 @@ async function fixture() {
       status: SessionStatus.IDLE,
       ready_for_prompt: true,
     });
+    branchId = branch.branch_id;
     return { actor, session };
   });
 
@@ -162,6 +164,7 @@ async function fixture() {
     scoped,
     session,
     actor,
+    branchId,
     taskRepo,
     messages,
     sessionsRepository,

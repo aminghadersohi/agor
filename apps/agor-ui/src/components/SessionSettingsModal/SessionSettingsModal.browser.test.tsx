@@ -28,7 +28,7 @@ const session = {
   },
 } as Session;
 
-it('saves persistent one-hop mode, preserves routing, and allows switching back to once', async () => {
+it('saves only the changed one-hop mode and allows switching back to once', async () => {
   const onUpdate = vi.fn();
   const view = render(
     <AppActionsProvider value={{}}>
@@ -39,6 +39,7 @@ it('saves persistent one-hop mode, preserves routing, and allows switching back 
   await waitFor(() =>
     expect(screen.getByText(/C completes → B processes the result/)).toBeVisible()
   );
+  expect(screen.getByText(/template formats callbacks this session receives/)).toBeVisible();
   await act(() => page.getByRole('combobox', { name: 'Callback mode' }).click());
   await act(() => userEvent.keyboard('{ArrowUp}{Enter}'));
   await waitFor(() =>
@@ -52,11 +53,7 @@ it('saves persistent one-hop mode, preserves routing, and allows switching back 
       session.session_id,
       expect.objectContaining({
         callback_config: {
-          ...session.callback_config,
           callback_mode: 'persistent',
-          delivery: 'direct',
-          include_last_message: true,
-          template: undefined,
         },
       })
     )
@@ -90,7 +87,7 @@ it('saves persistent one-hop mode, preserves routing, and allows switching back 
     expect(onUpdate).toHaveBeenLastCalledWith(
       session.session_id,
       expect.objectContaining({
-        callback_config: expect.objectContaining({ ...session.callback_config }),
+        callback_config: { callback_mode: 'once' },
       })
     )
   );

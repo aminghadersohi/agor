@@ -39,10 +39,9 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
     });
 
     /**
-     * The stamped Task derives its tenant from its Session, and the admission
-     * route resolves origin branch/teammate names with the same tenant-scoped
-     * `BranchRepository.findById` used here. Another tenant must see neither,
-     * so a stamp can never surface a foreign tenant's branch name.
+     * The stamped Task derives its tenant from its Session, and the origin
+     * branch ID it records is only resolvable through the tenant-scoped
+     * `BranchRepository.findById` used here. Another tenant must see neither.
      */
     it('keeps the stamped Task and its origin branch invisible to another tenant', async () => {
       const { taskId, originBranchId } = await assertStampedPromptRoundTrips(

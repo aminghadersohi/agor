@@ -340,15 +340,13 @@ describe('executor acknowledgement failure convergence', () => {
     expect(task.error_message).toBe((rejection as Error).message);
     expect(task.error_message).toMatch(/disconnected|timed out/i);
     expect(session).toMatchObject({ status: SessionStatus.FAILED, ready_for_prompt: true });
-    // The invariant is ordering, not multiplicity: the repository commits the
-    // terminal Task and its Session projection first, and every service-side
-    // Session read happens strictly after it. Upstream PR #2564's completion
-    // dispatch reloads the Session after that commit, so how many post-commit
-    // reads occur is an implementation detail this boundary does not fix.
+    // Fork: post-commit callback routing and auto-archive scheduling re-read
+    // the Session too, so pin the ordering (every terminal read follows the
+    // commit) rather than the upstream read count.
     expect(terminalBoundaryOrder[0]).toBe('repository-terminal-commit');
-    expect(terminalBoundaryOrder.length).toBeGreaterThan(1);
-    expect(terminalBoundaryOrder.slice(1)).toEqual(
-      terminalBoundaryOrder.slice(1).map(() => 'service-terminal-session-read')
+    expect(terminalBoundaryOrder.slice(1).length).toBeGreaterThan(0);
+    expect(new Set(terminalBoundaryOrder.slice(1))).toEqual(
+      new Set(['service-terminal-session-read'])
     );
   });
 });

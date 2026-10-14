@@ -8,6 +8,7 @@ import type {
   User,
 } from '@agor-live/client';
 import {
+  canDismissBranchWorkspaceNotification,
   getTeammateConfig,
   isSessionExecuting,
   isTeammate,
@@ -28,6 +29,7 @@ import { Button, Card, Space, Spin, Tooltip, Typography, theme } from 'antd';
 import { AggregationColor } from 'antd/es/color-picker/color';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
+import { useBranchAccess } from '../../hooks/useBranchAccess';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useProgressiveMount } from '../../hooks/useProgressiveMount';
 import { readCollapsedBranchNode } from '../../utils/collapsedBranchNodes';
@@ -40,7 +42,11 @@ import {
 import { ensureColorVisible, isDarkTheme } from '../../utils/theme';
 import { ArchiveActionButton } from '../ArchiveButton';
 import { ArchiveDeleteBranchModal } from '../ArchiveDeleteBranchModal';
-import { BranchFilesystemRecovery } from '../BranchFilesystemRecovery';
+import {
+  BranchFilesystemRecovery,
+  getBranchStatusTag,
+  needsBranchAccess,
+} from '../BranchFilesystemRecovery';
 import { BranchWorkspaceStatus } from '../BranchWorkspaceStatus';
 import { EntityColorPicker } from '../EntityColorPicker';
 import { EnvironmentPill } from '../EnvironmentPill';
@@ -57,7 +63,8 @@ const PEEK_SESSIONS_STORAGE_KEY_PREFIX = 'agor:branch-card:peeked-session-ids:';
 
 interface BranchCardProps {
   branch: Branch;
-  repo: Repo;
+  /** Absent while the repo list loads; the card says so instead of hiding. */
+  repo?: Repo;
   sessions: Session[]; // Sessions for this specific branch
   userById: Map<string, User>;
   currentUserId?: string;
@@ -83,6 +90,8 @@ interface BranchCardProps {
   isPinned?: boolean;
   zoneName?: string;
   zoneColor?: string;
+  /** Off on the view-only canvas, where cards cannot be dragged. */
+  showDragHandle?: boolean;
   /** Shared board presentation state, controlled by board layout/MCP tools. */
   compact?: boolean;
   /**
@@ -127,6 +136,7 @@ const BranchCardComponent = ({
   isPinned = false,
   zoneName,
   zoneColor,
+  showDragHandle = true,
   compact = false,
   onToggleCompact,
   onAutoZoneInteraction,
@@ -206,6 +216,11 @@ const BranchCardComponent = ({
   // activity stopping). Persisted deletion continues after request acceptance.
   const operation = pendingOperation ?? (branch.deletion_status === 'deleting' ? 'deleting' : null);
   const isOperating = operation !== null;
+
+  const openArchiveDeleteModal = useCallback(() => {
+    setArchiveDeleteModalMounted(true);
+    setArchiveDeleteModalOpen(true);
+  }, []);
 
   const handleArchiveOrDelete = async (options: BranchArchiveOrDeleteOptions) => {
     if (!onArchiveOrDelete || mutationPendingRef.current || isOperating) return;
@@ -299,8 +314,16 @@ const BranchCardComponent = ({
 
   // Check if branch is still being created on filesystem
   const isCreating = branch.filesystem_status === 'creating';
-  const isFailed =
-    branch.filesystem_status === 'failed' || branch.deletion_status === 'deletion_failed';
+  const statusTag = getBranchStatusTag(branch);
+  const isFailed = statusTag?.tone === 'error';
+  const currentUser = currentUserId ? userById.get(currentUserId) : null;
+  // One cached read per card, only for notices whose actions depend on it.
+  const branchAccess = useBranchAccess(
+    client,
+    branch,
+    currentUser,
+    !isOperating && (needsBranchAccess(branch) || canDismissBranchWorkspaceNotification(branch))
+  );
 
   // Check if this branch is a persisted agent
   const teammateConfig = useMemo(() => getTeammateConfig(branch), [branch]);
@@ -474,7 +497,8 @@ const BranchCardComponent = ({
         // Disconnected chokepoint: block all in-card interactions (clicking
         // into a session, env pill actions, modals) and dim to communicate
         // the state. Canvas pan/zoom and the slim app-shell banner remain
-        // active. See docs/disconnected-state-design.md.
+        // active. The status notice opts back in so its Details stay readable.
+        // See docs/disconnected-state-design.md.
         ...(connectionDisabled && !inPopover
           ? { pointerEvents: 'none' as const, opacity: 0.55 }
           : {}),
@@ -524,6 +548,9 @@ const BranchCardComponent = ({
                 <span style={{ fontSize: 32 }}>{teammateConfig.emoji}</span>
               ) : isAgent ? (
                 <RobotOutlined
+                  role={isFailed ? 'img' : undefined}
+                  aria-label={isFailed ? statusTag?.label : undefined}
+                  title={isFailed ? statusTag?.label : undefined}
                   style={{
                     fontSize: 32,
                     color: isFailed ? token.colorError : token.colorInfo,
@@ -531,6 +558,9 @@ const BranchCardComponent = ({
                 />
               ) : (
                 <BranchesOutlined
+                  role={isFailed ? 'img' : undefined}
+                  aria-label={isFailed ? statusTag?.label : undefined}
+                  title={isFailed ? statusTag?.label : undefined}
                   style={{
                     fontSize: 32,
                     color: isFailed ? token.colorError : token.colorPrimary,
@@ -560,9 +590,9 @@ const BranchCardComponent = ({
                 <Typography.Text
                   type="secondary"
                   style={{ fontSize: 12 }}
-                  ellipsis={{ tooltip: repo.slug }}
+                  ellipsis={{ tooltip: repo?.slug ?? 'Repository not loaded' }}
                 >
-                  {repo.slug}
+                  {repo?.slug ?? 'Repository not loaded'}
                 </Typography.Text>
               </>
             )}
@@ -595,7 +625,6 @@ const BranchCardComponent = ({
               className={REACT_FLOW_NO_DRAG_CLASS}
               aria-label={compact ? 'Expand card' : 'Collapse card'}
               icon={compact ? <PlusSquareOutlined /> : <MinusSquareOutlined />}
-              disabled={isOperating}
               onClick={(e) => {
                 e.stopPropagation();
                 onToggleCompact(branch.branch_id, !compact);
@@ -624,7 +653,7 @@ const BranchCardComponent = ({
               />
             </Tooltip>
           )}
-          {!inPopover && !panelMode && (
+          {!inPopover && !panelMode && showDragHandle && (
             <Button
               type="text"
               icon={<DragOutlined style={{ fontSize: 16 }} />}
@@ -679,15 +708,11 @@ const BranchCardComponent = ({
             {!inPopover && !panelMode && onArchiveOrDelete && (
               <ArchiveActionButton
                 tooltip={
-                  branch.deletion_status
-                    ? 'View deletion status or retry'
-                    : 'Archive or delete branch'
+                  branch.deletion_status ? 'View deletion status' : 'Archive or delete branch'
                 }
-                disabled={connectionDisabled || isOperating}
-                onClick={() => {
-                  setArchiveDeleteModalMounted(true);
-                  setArchiveDeleteModalOpen(true);
-                }}
+                // A persisted deletion stays viewable; handleArchiveOrDelete refuses to submit.
+                disabled={connectionDisabled || pendingOperation !== null}
+                onClick={openArchiveDeleteModal}
               />
             )}
           </div>
@@ -698,17 +723,9 @@ const BranchCardComponent = ({
         <BranchWorkspaceStatus
           branch={branch}
           client={client}
-          currentUser={currentUserId ? userById.get(currentUserId) : null}
+          currentUser={currentUser}
+          access={branchAccess}
         />
-      )}
-      {!isOperating && branch.deletion_status === 'deletion_failed' && (
-        <div
-          role="status"
-          style={{ color: isFailed ? token.colorError : token.colorTextSecondary, marginBottom: 8 }}
-        >
-          Deletion failed
-          {branch.deletion_error && <div>{branch.deletion_error}</div>}
-        </div>
       )}
       {/* Branch metadata - all pills on one row with wrapping */}
       {!compact && (
@@ -726,24 +743,38 @@ const BranchCardComponent = ({
             {branch.pull_request_url && (
               <PullRequestPill prUrl={branch.pull_request_url} currentRepo={repo} />
             )}
-            <EnvironmentPill
-              repo={repo}
-              branch={branch}
-              onEdit={
-                !isOperating && onOpenSettings ? () => onOpenSettings(branch.branch_id) : undefined
-              }
-              onStartEnvironment={onStartEnvironment}
-              onStopEnvironment={onStopEnvironment}
-              onViewLogs={onViewLogs}
-              onNukeEnvironment={onNukeEnvironment}
-              connectionDisabled={connectionDisabled || isOperating}
-              showNukeEnvironment={false}
-            />
+            {repo && (
+              <EnvironmentPill
+                repo={repo}
+                branch={branch}
+                onEdit={
+                  !isOperating && onOpenSettings
+                    ? () => onOpenSettings(branch.branch_id)
+                    : undefined
+                }
+                onStartEnvironment={onStartEnvironment}
+                onStopEnvironment={onStopEnvironment}
+                onViewLogs={onViewLogs}
+                onNukeEnvironment={onNukeEnvironment}
+                connectionDisabled={connectionDisabled || isOperating}
+                showNukeEnvironment={false}
+              />
+            )}
           </Space>
         </div>
       )}
 
-      {!isOperating && <BranchFilesystemRecovery branch={branch} client={client} />}
+      {!isOperating && (
+        <BranchFilesystemRecovery
+          branch={branch}
+          client={client}
+          currentUser={currentUser}
+          access={branchAccess}
+          onRetryDelete={
+            onArchiveOrDelete && !inPopover && !panelMode ? openArchiveDeleteModal : undefined
+          }
+        />
+      )}
 
       {/* Notes */}
       {!compact && branch.notes && (
@@ -769,7 +800,7 @@ const BranchCardComponent = ({
             <Space role="status" aria-live="polite" style={{ paddingBlock: token.paddingSM }}>
               {inPopover && <Spin size="small" />}
               <Typography.Text type="secondary">
-                {operation === 'archiving' ? 'Archiving branch…' : 'Deleting branch…'}
+                {operation === 'archiving' ? 'Archiving branch…' : 'Agor is deleting this branch…'}
               </Typography.Text>
             </Space>
           ) : sectionsReady ? (
@@ -817,7 +848,7 @@ const BranchCardComponent = ({
       {archiveDeleteModalMounted && (
         <ArchiveDeleteBranchModal
           client={client}
-          currentUser={currentUserId ? userById.get(currentUserId) : null}
+          currentUser={currentUser}
           open={archiveDeleteModalOpen}
           branch={branch}
           sessionCount={sessions.length}

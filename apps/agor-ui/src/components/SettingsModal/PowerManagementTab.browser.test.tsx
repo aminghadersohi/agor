@@ -109,10 +109,7 @@ describe('UPS admin workspace (browser)', () => {
         <MobileHeaderAccessory.Provider
           value={<PowerStatusIndicator client={client} user={user} onOpen={onOpen} />}
         >
-          <MobileHeader
-            title="A deliberately long fictional Session title for mobile monitoring"
-            user={user}
-          />
+          <MobileHeader title="A deliberately long fictional Session title for mobile monitoring" />
         </MobileHeaderAccessory.Provider>
       </MemoryRouter>
     );

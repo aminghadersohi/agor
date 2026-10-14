@@ -118,7 +118,7 @@ type Listener = (payload: unknown) => void;
  * `sessions:find`) takes precedence over the bare name when present. `name:get` seeds `get`. A seed
  * may also be a function of the call's query (a scoped server, see `fakeServer`).
  */
-function makeMockClient(seed: Record<string, unknown[] | Record<string, unknown>> = {}) {
+function makeMockClient(seed: Record<string, unknown> = {}) {
   const serviceListeners = new Map<string, Map<string, Listener[]>>();
   const ioListeners = new Map<string, Listener[]>();
   // Side effects fired at call time of `service(name)[method]()` — used by the
@@ -1422,6 +1422,244 @@ describe('useAgorData — socket-event bailouts', () => {
         ?.map((s) => s.session_id)
     ).toEqual(['s-root']);
   });
+
+  it.each(['running', 'stopping', 'awaiting_permission', 'awaiting_input'])(
+    'keeps the production active indicator state for a stale terminal event while durable status is %s',
+    async (activeStatus) => {
+      const active = makeSession({ status: activeStatus, ready_for_prompt: false });
+      const staleTerminal = { ...active, status: 'idle', ready_for_prompt: true };
+      const { client, emit, fetchCount } = makeMockClient(
+        onBoardRoute({
+          sessions: [active],
+          'sessions:get': active,
+        })
+      );
+      const { result } = renderHook(() => useAgorData(client));
+      await waitForInitialLoad(result);
+
+      act(() => {
+        emit('sessions', 'patched', staleTerminal);
+        flushRealtimeNow(STANDALONE_AUTHORITY_SCOPE);
+      });
+
+      // The late realtime snapshot never reaches the store, so the actual
+      // BranchSessionSections spinner cannot disappear between event and GET.
+      expect(agorStore.getState().sessionById.get('s-1')).toMatchObject({
+        status: activeStatus,
+      });
+      await flush();
+      act(() => flushRealtimeNow(STANDALONE_AUTHORITY_SCOPE));
+
+      expect(fetchCount('sessions', 'get')).toBe(1);
+      expect(agorStore.getState().sessionById.get('s-1')).toMatchObject({
+        status: activeStatus,
+        ready_for_prompt: false,
+      });
+    }
+  );
+
+  it.each(['failure', 'dirty'])(
+    'bounds %s confirmation storms, exposes exhaustion, and recovers on focus',
+    async (mode) => {
+      const active = makeSession({ status: 'running', ready_for_prompt: false });
+      const terminal = { ...active, status: 'idle', ready_for_prompt: true };
+      const { client, emit, onFetch, fetchCount } = makeMockClient(
+        onBoardRoute({
+          sessions: [active],
+          'sessions:get': terminal,
+        })
+      );
+      let recover = false;
+      onFetch('sessions', 'get', () => {
+        if (recover) return;
+        if (mode === 'failure') throw new Error('temporary');
+        emit('sessions', 'updated', terminal);
+      });
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { result, unmount } = renderHook(() => useAgorData(client));
+      await waitForInitialLoad(result);
+      vi.useFakeTimers();
+      try {
+        await act(async () => emit('sessions', 'patched', terminal));
+        for (const [delay, count] of [
+          [250, 2],
+          [500, 3],
+          [1000, 4],
+        ]) {
+          await act(async () => vi.advanceTimersByTimeAsync(delay - 1));
+          expect(fetchCount('sessions', 'get')).toBe(count - 1);
+          await act(async () => vi.advanceTimersByTimeAsync(1));
+          expect(fetchCount('sessions', 'get')).toBe(count);
+        }
+        expect(warning).toHaveBeenCalledWith(expect.stringContaining('confirmation exhausted'));
+        act(() => {
+          for (let i = 0; i < 100; i++) emit('sessions', 'updated', terminal);
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(60_000));
+        expect(fetchCount('sessions', 'get')).toBe(5);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(agorStore.getState().sessionById.get('s-1')).toMatchObject(active);
+        recover = true;
+        await act(async () => window.dispatchEvent(new Event('focus')));
+        act(() => flushRealtimeNow(STANDALONE_AUTHORITY_SCOPE));
+        expect(fetchCount('sessions', 'get')).toBe(6);
+        expect(agorStore.getState().sessionById.get('s-1')).toMatchObject(terminal);
+        await act(async () => window.dispatchEvent(new Event('focus')));
+        expect(fetchCount('sessions', 'get')).toBe(6);
+        unmount();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        unmount();
+        vi.useRealTimers();
+        warning.mockRestore();
+      }
+    }
+  );
+
+  it.each(['failure', 'dirty'])(
+    're-arms one backed-off read on a new terminal event after %s exhaustion without focus',
+    async (mode) => {
+      const active = makeSession({ status: 'running', ready_for_prompt: false });
+      const terminal = { ...active, status: 'idle', ready_for_prompt: true };
+      const { client, emit, onFetch, fetchCount } = makeMockClient(
+        onBoardRoute({
+          sessions: [active],
+          'sessions:get': terminal,
+        })
+      );
+      let recover = false;
+      onFetch('sessions', 'get', () => {
+        if (recover) return;
+        if (mode === 'failure') throw new Error('temporary');
+        emit('sessions', 'updated', terminal);
+      });
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { result, unmount } = renderHook(() => useAgorData(client));
+      await waitForInitialLoad(result);
+      vi.useFakeTimers();
+      try {
+        await act(async () => emit('sessions', 'patched', terminal));
+        await act(async () => vi.advanceTimersByTimeAsync(1750));
+        expect(fetchCount('sessions', 'get')).toBe(4);
+        expect(vi.getTimerCount()).toBe(0);
+        act(() => {
+          for (let i = 0; i < 100; i++) emit('sessions', 'updated', terminal);
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(999));
+        expect(fetchCount('sessions', 'get')).toBe(4);
+        await act(async () => vi.advanceTimersByTimeAsync(1));
+        expect(fetchCount('sessions', 'get')).toBe(5);
+        // Failure/dirty response does not reset the four-read budget or poll.
+        await act(async () => vi.advanceTimersByTimeAsync(60_000));
+        expect(fetchCount('sessions', 'get')).toBe(5);
+        expect(vi.getTimerCount()).toBe(0);
+        expect(agorStore.getState().sessionById.get('s-1')).toMatchObject(active);
+        recover = true;
+        act(() => emit('sessions', 'patched', terminal));
+        await act(async () => vi.advanceTimersByTimeAsync(999));
+        expect(fetchCount('sessions', 'get')).toBe(5);
+        await act(async () => vi.advanceTimersByTimeAsync(1));
+        act(() => flushRealtimeNow(STANDALONE_AUTHORITY_SCOPE));
+        expect(fetchCount('sessions', 'get')).toBe(6);
+        expect(agorStore.getState().sessionById.get('s-1')).toMatchObject(terminal);
+        await act(async () => vi.advanceTimersByTimeAsync(60_000));
+        expect(fetchCount('sessions', 'get')).toBe(6);
+      } finally {
+        unmount();
+        vi.useRealTimers();
+        warning.mockRestore();
+      }
+    }
+  );
+
+  it.each(
+    [
+      'active',
+      'removed',
+      'created',
+      'unmount',
+      'unmount-pending',
+      'auth',
+      'identity',
+      'disconnect',
+      'board',
+    ].flatMap((change) => [
+      { change, rearmed: false },
+      { change, rearmed: true },
+    ])
+  )(
+    'fences terminal retries across $change changes (rearmed=$rearmed)',
+    async ({ change, rearmed }) => {
+      const active = makeSession({ status: 'running', ready_for_prompt: false });
+      const terminal = { ...active, status: 'idle', ready_for_prompt: true };
+      const { client, emit, onFetch, fetchCount } = makeMockClient(
+        onBoardRoute({
+          sessions: [active],
+          'sessions:get': terminal,
+        })
+      );
+      const gate = deferred();
+      onFetch('sessions', 'get', (call) => {
+        if (call <= (rearmed ? 4 : 1)) throw new Error('temporary');
+        return gate.promise;
+      });
+      const initialProps = {
+        authenticatedUserId: 'user-a',
+        authenticatedUserRole: 'member' as const,
+        authGeneration: 1,
+        connectionReady: true,
+      };
+      const { result, rerender, unmount } = renderHook((props) => useAgorData(client, props), {
+        initialProps,
+      });
+      await waitForInitialLoad(result);
+      vi.useFakeTimers();
+      try {
+        await act(async () => emit('sessions', 'patched', terminal));
+        if (rearmed) {
+          await act(async () => vi.advanceTimersByTimeAsync(1750));
+          act(() => emit('sessions', 'patched', terminal));
+        }
+        const priorReads = rearmed ? 4 : 1;
+        // Half of the cases cancel a queued timer; the others invalidate a
+        // response already captured by the retry under the old authority.
+        const inFlight = ['active', 'unmount-pending', 'auth', 'disconnect', 'board'].includes(
+          change
+        );
+        if (inFlight) await act(async () => vi.advanceTimersByTimeAsync(rearmed ? 1000 : 250));
+        if (change === 'active') act(() => emit('sessions', 'patched', active));
+        if (change === 'created') act(() => emit('sessions', 'created', active));
+        if (change === 'removed') act(() => emit('sessions', 'removed', active));
+        if (change.startsWith('unmount')) unmount();
+        if (change === 'auth') rerender({ ...initialProps, authGeneration: 2 });
+        if (change === 'identity') rerender({ ...initialProps, authenticatedUserId: 'user-b' });
+        if (change === 'disconnect') rerender({ ...initialProps, connectionReady: false });
+        if (change === 'board') {
+          // Board navigation is not an authority transition, so confirmation
+          // survives for rows still held by the authenticated caller.
+          window.history.pushState({}, '', '/b/another-board');
+          rerender(initialProps);
+        }
+        await act(async () => gate.resolve());
+        await act(async () => vi.advanceTimersByTimeAsync(60_000));
+        act(() => flushRealtimeNow('user-a:member:1'));
+        expect(fetchCount('sessions', 'get')).toBe(priorReads + (inFlight ? 1 : 0));
+        const status = agorStore.getState().sessionById.get('s-1')?.status;
+        if (change === 'board') expect(status).toBe('idle');
+        else if (['removed', 'identity'].includes(change)) expect(status).toBeUndefined();
+        // A transient disconnect deliberately retains same-caller rows.
+        else expect(status).toBe('running');
+        unmount();
+        expect(vi.getTimerCount()).toBe(0);
+        await act(async () => window.dispatchEvent(new Event('focus')));
+        expect(fetchCount('sessions', 'get')).toBe(priorReads + (inFlight ? 1 : 0));
+      } finally {
+        unmount();
+        vi.useRealTimers();
+        window.history.pushState({}, '', '/');
+      }
+    }
+  );
 
   it('ignores `sessions.removed` for a session not in the map', async () => {
     const { client, emit } = makeMockClient();

@@ -67,6 +67,7 @@ export const CallbackConfigForm: React.FC<CallbackConfigFormProps> = ({ showHelp
 
       <Form.Item name={['callbackConfig', 'delivery']} label="Callback Delivery">
         <Select
+          virtual={false}
           options={[
             { value: 'direct', label: 'Direct (default)' },
             { value: 'btw', label: 'BTW digest' },
@@ -114,8 +115,9 @@ export const CallbackConfigForm: React.FC<CallbackConfigFormProps> = ({ showHelp
       </Form.Item>
       {showHelpText && (
         <Paragraph type="secondary" style={{ fontSize: 12, marginTop: -16 }}>
-          Advanced: Customize the callback message template using Handlebars syntax. Available
-          variables: <Text code>childSessionId</Text>, <Text code>childSessionTitle</Text>,{' '}
+          This template formats callbacks this session receives, not the reports it sends to its
+          callback target. Customize it using Handlebars syntax. Available variables:{' '}
+          <Text code>childSessionId</Text>, <Text code>childSessionTitle</Text>,{' '}
           <Text code>spawnPrompt</Text>, <Text code>status</Text>, <Text code>messageCount</Text>,{' '}
           <Text code>recordedToolCount</Text> (absent when unknown),{' '}
           <Text code>lastAssistantMessage</Text>
