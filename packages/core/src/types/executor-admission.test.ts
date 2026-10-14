@@ -12,7 +12,7 @@ describe('executor admission classes', () => {
       .map(([command]) => command)
       .sort();
     expect(agents).toEqual(['agentic-tool.invoke', 'prompt', 'zellij.attach', 'zellij.tab']);
-    expect(Object.keys(EXECUTOR_COMMAND_ADMISSION)).toHaveLength(34);
+    expect(Object.keys(EXECUTOR_COMMAND_ADMISSION)).toHaveLength(35);
     for (const admissionClass of Object.values(EXECUTOR_COMMAND_ADMISSION)) {
       expect(EXECUTOR_ADMISSION_CLASSES).toContain(admissionClass);
     }

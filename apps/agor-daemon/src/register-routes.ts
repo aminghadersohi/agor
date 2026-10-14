@@ -227,6 +227,7 @@ import {
 import { registerProfileImageRoutes } from './profile-image-routes.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
 import { createBranchFrontDeskRoute } from './services/branch-front-desk.js';
+import { createBranchSkillsRoute } from './services/branch-skills.js';
 import type { GatewayService } from './services/gateway.js';
 import { authorizeCatalogCaller } from './services/mcp-catalog-access.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
@@ -1492,6 +1493,18 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       create: { role: ROLES.MEMBER, action: 'pin a teammate front desk' },
       remove: { role: ROLES.MEMBER, action: 'clear a teammate front desk' },
     },
+    requireAuth
+  );
+
+  // Teammate Skills panel (fork). Read-only: Knowledge reads use the caller's
+  // own service params, and worktree scans go through the executor with the
+  // Files tab's access rule. No transaction: each request may run several
+  // executor scans, which must not hold one open.
+  registerPowerAuthenticatedRoute(
+    app,
+    '/branches/:id/skills',
+    createBranchSkillsRoute({ db, allowSuperadmin: () => superadminOpts.allowSuperadmin }),
+    { find: { role: ROLES.VIEWER, action: "view a teammate's skills" } },
     requireAuth
   );
 

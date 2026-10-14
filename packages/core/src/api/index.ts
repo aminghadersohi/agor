@@ -104,6 +104,7 @@ import type {
   Task,
   TaskQueueMutationResult,
   TeammateFrontDeskView,
+  TeammateSkillsReport,
   TeammateWelcomeNoteRequest,
   TemplateRenderRequest,
   TemplateRenderResponse,
@@ -399,6 +400,11 @@ export interface BranchFrontDeskService {
     id: null,
     params?: Params & { query?: { expected_session_id?: SessionID } }
   ): Promise<TeammateFrontDeskView>;
+}
+
+/** `branches/:id/skills` — read-only teammate skills view (`?include_drift=true` compares teammates). */
+export interface BranchSkillsService {
+  find(params?: Params & { query?: { include_drift?: boolean } }): Promise<TeammateSkillsReport>;
 }
 
 /**
@@ -1037,6 +1043,7 @@ export interface AgorClient
   service(path: 'power-management/essential-sessions'): PowerEssentialSessionsService;
   service(path: `sessions/${string}/power-priority`): SessionPowerPriorityService;
   service(path: `branches/${string}/front-desk`): BranchFrontDeskService;
+  service(path: `branches/${string}/skills`): BranchSkillsService;
   service(path: 'zone-workflow-transitions'): ZoneWorkflowTransitionsService;
   service(path: 'zone-workflow-advances'): ZoneWorkflowAdvancesService;
   service(path: 'schedules'): SchedulesService;
