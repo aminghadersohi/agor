@@ -7,10 +7,11 @@ import type {
   SpawnConfig,
 } from '@agor-live/client';
 import { getTeammateConfig, hasMinimumRole, isTeammate, ROLES } from '@agor-live/client';
-import { ExpandAltOutlined, LeftOutlined, PlusOutlined } from '@ant-design/icons';
+import { ExpandAltOutlined, LeftOutlined, PlusOutlined, ToolOutlined } from '@ant-design/icons';
 import {
   Badge,
   Button,
+  Drawer,
   Empty,
   Select,
   Skeleton,
@@ -49,6 +50,7 @@ import { CompactNotice } from '../CompactNotice';
 import { MarkdownRenderer } from '../MarkdownRenderer';
 import { TeammateBoardPortrait } from '../ProfileImage';
 import { BoardPartitionError } from '../SessionCanvas/BoardPartitionStatus';
+import { TeammateSkillsPanel } from '../TeammateSkillsPanel';
 
 type TeammateLookup =
   | { status: 'loading' }
@@ -313,6 +315,9 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
   const [teammatePortraitSize, setTeammatePortraitSize] = useState<TeammatePortraitSize>(
     initialTeammatePortraitSize
   );
+  // Fork: the read-only Skills view opens in a drawer. The tab bar has no
+  // room for a fifth tab at the panel's 320px minimum width.
+  const [skillsOpen, setSkillsOpen] = useState(false);
   const teammatePortraitDimensions = TEAMMATE_PORTRAIT_SIZES[teammatePortraitSize];
   const nextPortraitSize = nextTeammatePortraitSize(teammatePortraitSize);
   const portraitSizeControlLabel = `Portrait size: ${TEAMMATE_PORTRAIT_SIZE_LABELS[teammatePortraitSize]}. Click for ${TEAMMATE_PORTRAIT_SIZE_LABELS[nextPortraitSize]}.`;
@@ -560,6 +565,16 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
                   position: 'relative',
                 }}
               >
+                <Tooltip title="Skills">
+                  <Button
+                    type="text"
+                    shape="circle"
+                    icon={<ToolOutlined />}
+                    aria-label="Open skills"
+                    onClick={() => setSkillsOpen(true)}
+                    style={{ position: 'absolute', insetInlineStart: 0, top: 0, zIndex: 1 }}
+                  />
+                </Tooltip>
                 <Tooltip title={portraitSizeControlLabel}>
                   <Button
                     type="text"
@@ -634,6 +649,33 @@ const BoardTeammatePanelComponent: React.FC<BoardTeammatePanelProps> = ({
               </div>
             )}
           </div>
+
+          <Drawer
+            open={skillsOpen}
+            onClose={() => setSkillsOpen(false)}
+            title={null}
+            aria-label="Skills"
+            closable={false}
+            placement="right"
+            size="min(480px, 100vw)"
+            destroyOnHidden
+            styles={{ body: { padding: 0 } }}
+          >
+            <TeammateSkillsPanel
+              key={primaryTeammateBranch.branch_id}
+              branch={primaryTeammateBranch}
+              client={client}
+              onClose={() => setSkillsOpen(false)}
+              onOpenFiles={
+                onOpenSettings
+                  ? () => {
+                      setSkillsOpen(false);
+                      onOpenSettings(primaryTeammateBranch.branch_id, 'files');
+                    }
+                  : undefined
+              }
+            />
+          </Drawer>
 
           {sessionDetailsHydrated ? (
             <BranchSessionSections

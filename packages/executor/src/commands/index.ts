@@ -11,6 +11,7 @@ import {
   BRANCH_ARCHIVE_COMMAND,
   BRANCH_CLEANUP_COMMAND,
   BRANCH_DELETION_COMMAND,
+  BRANCH_SKILLS_SCAN_COMMAND,
   type ExecutorCommandName,
 } from '@agor/core/types';
 import { ToolRegistry } from '../handlers/sdk/tool-registry.js';
@@ -52,6 +53,7 @@ import {
   handleGitRepoRealignOrigin,
 } from './git.js';
 import { handleBranchKnowledgeRead, handleBranchKnowledgeWrite } from './knowledge.js';
+import { handleBranchSkillsScan } from './skills.js';
 import { handleBranchUploadMaterialize } from './upload.js';
 import { handleZellijAttach, handleZellijTab } from './zellij.js';
 
@@ -261,6 +263,7 @@ registerCommand(BRANCH_ARCHIVE_COMMAND, handleBranchArchive);
 registerCommand('branch.files.list', handleBranchFilesList);
 registerCommand('branch.files.browse', handleBranchFilesBrowse);
 registerCommand('branch.files.read', handleBranchFilesRead);
+registerCommand(BRANCH_SKILLS_SCAN_COMMAND, handleBranchSkillsScan);
 registerCommand('branch.files.write', handleBranchFilesWrite);
 registerCommand('branch.filesystem.status', handleBranchFilesystemStatus);
 registerCommand('branch.artifact.publish', handleBranchArtifactPublish);
