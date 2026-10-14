@@ -2129,8 +2129,9 @@ describe('agor_branches_set_zone', () => {
       type: 'zone',
       x: 0,
       y: 0,
-      width: 400,
-      height: 400,
+      // Large enough for #2540's contained card placement.
+      width: 740,
+      height: 720,
       label: 'Review',
       trigger: { template: 'Review {{branch.name}}', behavior: 'always_new' },
     };
@@ -2146,6 +2147,8 @@ describe('agor_branches_set_zone', () => {
         }
         if (name === 'board-objects') {
           return {
+            // Placement reads the zone's current occupants so it can avoid them.
+            find: vi.fn(async () => ({ data: [] })),
             findByBranchId: vi.fn(async () => null),
             create: vi.fn(async (data: Record<string, unknown>) => ({
               object_id: 'obj-1',
