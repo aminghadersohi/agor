@@ -149,6 +149,10 @@ export interface SkillProvider {
  */
 export const SKILLSETS_ROOT = 'skillsets' as const;
 
+/** Bounds shared by manifest reading and writing; a release that exceeds them is refused. */
+export const MAX_SKILLSET_SKILLS = 150;
+export const MAX_SKILLSET_MANIFEST_BYTES = 48 * 1024;
+
 export interface SkillSetEntry {
   /** Frontmatter `name` at release time. */
   name: string;

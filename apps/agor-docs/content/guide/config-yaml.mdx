@@ -636,7 +636,7 @@ skills:
 ```
 
 - `namespace` is the slug of an existing Knowledge namespace. Its `skills/<teammate>/…` and `skills/_shared/…` documents of kind `skill` are the team's skills. People still need ordinary Knowledge read access to see them.
-- `curator_branch_id` is the full id of the teammate branch whose sessions may cut skill set releases for that namespace.
+- `curator_branch_id` is the full id of the teammate branch whose sessions may cut skill set releases for that namespace. Admins can also cut releases with `agor skills release` from outside any session; that is how the first release is made.
 - Each namespace may appear only once. Restart the daemon after changing this section.
 
 See [Skill documents](/guide/knowledge#skill-documents) for the layout and tools.

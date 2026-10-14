@@ -8,36 +8,36 @@
  * to the version it read (0 = create-only for r1). Two concurrent releases
  * therefore conflict; neither overwrites the other.
  *
- * **Who may release** (see {@link releaseAuthorization}):
- * - the *curator*: a session on the teammate branch that owns the provider
- *   namespace, or a caller outside any teammate session with `own` on it;
- * - **bootstrap:** while a teammate has no manifest in the namespace yet,
- *   anyone with namespace write may cut its r1.
- *
- * Everything goes through `kb/*` with the caller's params.
+ * **Who may release.** Only two callers, both decided outside Knowledge:
+ * - the *curator*: a session whose authenticated branch is the provider's
+ *   `curator_branch_id` in config.yaml (`agor_skillsets_release`);
+ * - an *admin* outside any session, through `agor skills release` (the
+ *   `skills/releases` route). This is also how r1 is first cut.
+ * Every other write under `skillsets/` is refused by the Knowledge write path
+ * itself (`skill set governance`), so ordinary `agor_kb_*` edits, renames,
+ * archives or imports cannot forge or reopen a release.
  */
 
-import { Conflict, Forbidden } from '@agor/core/feathers';
+import type { AgorSkillsProviderSettings } from '@agor/core/config';
+import { BadRequest, Conflict, Forbidden } from '@agor/core/feathers';
 import {
   parseSkillSetManifest,
   renderSkillSetManifest,
   sameSkillPins,
   skillSetPath,
+  skillTextField,
 } from '@agor/core/knowledge';
 import type {
-  Branch,
-  BranchID,
   HydratedKnowledgeDocument,
   KnowledgeNamespace,
-  KnowledgeNamespaceEffectivePermission,
   SkillSetEntry,
   SkillSetEntryStatus,
   SkillSetManifest,
   SkillSummary,
 } from '@agor/core/types';
-import { isTeammate } from '@agor/core/types';
 import { isKnowledgeDocumentVersionMismatchError } from '../services/knowledge-errors.js';
 import type { KnowledgeSkillProvider } from './knowledge-skill-provider.js';
+import { withSkillsetReleaseWrite } from './skillset-governance.js';
 import type { SkillTeammate } from './teammate.js';
 
 export interface SkillSetRecord {
@@ -58,9 +58,10 @@ function paginatedData<T>(result: unknown): T[] {
 }
 
 function entryOf(skill: SkillSummary): SkillSetEntry {
+  const version = skillTextField(skill.version, 32);
   return {
-    name: skill.name,
-    ...(skill.version ? { version: skill.version } : {}),
+    name: skillTextField(skill.name, 64) || skill.path,
+    ...(version ? { version } : {}),
     document_id: skill.document_id,
     path: skill.path,
     version_id: skill.version_id,
@@ -69,61 +70,38 @@ function entryOf(skill: SkillSummary): SkillSetEntry {
   };
 }
 
-/** The teammate branch that owns a provider namespace (Fritz's for Fritz's namespace). */
-export function providerOwnerBranchId(namespace: KnowledgeNamespace): BranchID | undefined {
-  if (namespace.branch_id) return namespace.branch_id;
-  const metadata = namespace.metadata ?? {};
-  for (const key of ['teammate', 'assistant'] as const) {
-    const block = metadata[key];
-    if (block && typeof block === 'object' && !Array.isArray(block)) {
-      const branchId = (block as Record<string, unknown>).branch_id;
-      if (typeof branchId === 'string' && branchId) return branchId as BranchID;
-    }
-  }
-  return undefined;
-}
-
-const RANK: Record<KnowledgeNamespaceEffectivePermission, number> = {
-  none: 0,
-  read: 1,
-  write: 2,
-  own: 3,
-};
-
 export type ReleaseAuthorization =
-  | { allowed: true; as: 'curator' | 'bootstrap' }
+  | { allowed: true; as: 'curator' | 'admin' }
   | { allowed: false; reason: string };
 
 /**
- * Whether the caller may cut a release in `namespace`.
- *
- * @param callerBranch The calling session's branch, or null outside a session.
- * @param manifestExists Whether this teammate already has a manifest there.
- * @param branchVerified Whether `callerBranch` comes from the authenticated
- *   session identity. A claimed (header-supplied) session can only take the
- *   curator role away from a caller, never grant it.
+ * Whether a session may cut releases in a provider namespace: only when its
+ * authenticated branch is the configured curator. A claimed (unverified)
+ * session never qualifies, and neither does namespace ownership.
  */
-export function releaseAuthorization(
-  namespace: KnowledgeNamespace,
-  callerBranch: Pick<Branch, 'branch_id' | 'custom_context'> | null,
-  manifestExists: boolean,
-  branchVerified = true
+export function curatorAuthorization(
+  provider: Pick<AgorSkillsProviderSettings, 'namespace' | 'curator_branch_id'> | undefined,
+  callerBranchId: string | null | undefined,
+  branchVerified: boolean
 ): ReleaseAuthorization {
-  const permission = namespace.effective_permission ?? 'none';
-  const owner = providerOwnerBranchId(namespace);
-  const inTeammateSession = !!callerBranch && isTeammate(callerBranch);
-  if (inTeammateSession && branchVerified && owner && callerBranch.branch_id === owner) {
+  if (
+    provider &&
+    branchVerified &&
+    callerBranchId &&
+    callerBranchId === provider.curator_branch_id
+  ) {
     return { allowed: true, as: 'curator' };
   }
-  if (!inTeammateSession && permission === 'own') return { allowed: true, as: 'curator' };
-  if (!manifestExists && RANK[permission] >= RANK.write) return { allowed: true, as: 'bootstrap' };
   return {
     allowed: false,
-    reason: manifestExists
-      ? `Only the curator can release skill sets in ${namespace.slug}: a session on the teammate that owns it, or a caller outside a teammate session with own access.`
-      : `Cutting the first release in ${namespace.slug} needs write access to it.`,
+    reason: provider
+      ? `Only the curator session can release skill sets in ${provider.namespace} (its configured curator_branch_id). Admins can run \`agor skills release\` outside a session.`
+      : 'This namespace is not a configured skills provider.',
   };
 }
+
+/** Teammate keys tried when looking for an existing manifest. */
+const MAX_MANIFEST_KEYS = 8;
 
 export interface ReleasePlan {
   record: SkillSetRecord;
@@ -170,30 +148,32 @@ export class SkillSets {
   }
 
   /**
-   * The teammate's manifest in `namespace`. The key is the first of the
-   * teammate's keys that already has a manifest; otherwise the key of the
-   * folder its skills are filed under; otherwise its full-name slug.
+   * The teammate's existing manifest in `namespace`: a direct path read of
+   * `skillsets/<key>.md` for each of the teammate's keys (at most
+   * {@link MAX_MANIFEST_KEYS}). Never lists skills. `document` is null when
+   * no manifest exists; `key` is then the teammate's full-name slug.
    */
-  async find(
-    namespace: KnowledgeNamespace,
-    teammate: SkillTeammate,
-    skills?: SkillSummary[]
-  ): Promise<SkillSetRecord> {
-    for (const key of teammate.keys) {
+  async find(namespace: KnowledgeNamespace, teammate: SkillTeammate): Promise<SkillSetRecord> {
+    for (const key of teammate.keys.slice(0, MAX_MANIFEST_KEYS)) {
       const record = await this.readManifest(namespace, key);
       if (record.document) return record;
     }
-    const assigned = skills ?? (await this.namespaceSkills(namespace, teammate));
+    const key = teammate.keys.at(-1) ?? teammate.name;
+    return { namespace, key, path: skillSetPath(key), document: null, manifest: null };
+  }
+
+  /** Where a new manifest goes: the teammate's skill folder key, else its full-name slug. */
+  private newManifestKey(teammate: SkillTeammate, skills: SkillSummary[]): string {
     const folders = new Set(
-      assigned.flatMap((skill) =>
+      skills.flatMap((skill) =>
         skill.assignment.kind === 'teammate' ? [skill.assignment.key] : []
       )
     );
-    const key =
+    return (
       teammate.keys.find((candidate) => folders.has(candidate)) ??
       teammate.keys.at(-1) ??
-      teammate.name;
-    return { namespace, key, path: skillSetPath(key), document: null, manifest: null };
+      teammate.name
+    );
   }
 
   /** The teammate's skills in one provider namespace, current versions. */
@@ -201,9 +181,7 @@ export class SkillSets {
     namespace: KnowledgeNamespace,
     teammate: SkillTeammate
   ): Promise<SkillSummary[]> {
-    return (await this.provider.list({ teammateKeys: teammate.keys })).filter(
-      (skill) => skill.namespace_id === namespace.namespace_id
-    );
+    return this.provider.listNamespace(namespace, { teammateKeys: teammate.keys });
   }
 
   /** Per-skill status of a release against what is stored now. */
@@ -251,7 +229,13 @@ export class SkillSets {
     options: { actor: string; expectedVersion?: number | string; now?: Date }
   ): Promise<ReleasePlan> {
     const skills = await this.namespaceSkills(namespace, teammate);
-    const record = await this.find(namespace, teammate, skills);
+    const found = await this.find(namespace, teammate);
+    const record = found.document
+      ? found
+      : (() => {
+          const key = this.newManifestKey(teammate, skills);
+          return { ...found, key, path: skillSetPath(key) };
+        })();
     const current = record.document?.current_version;
     const currentVersion = current?.version_number ?? 0;
     if (options.expectedVersion !== undefined) {
@@ -269,7 +253,7 @@ export class SkillSets {
     }
     const manifest: SkillSetManifest = {
       name: record.key,
-      teammate: teammate.name,
+      teammate: skillTextField(teammate.name, 120) || record.key,
       release: (record.manifest?.release ?? 0) + 1,
       created_at: (options.now ?? new Date()).toISOString(),
       created_by: options.actor,
@@ -280,16 +264,33 @@ export class SkillSets {
 
   /**
    * Write a planned release, unless it pins exactly what the current release
-   * pins (`unchanged`) or there is nothing to pin and no release yet (`skipped`).
+   * pins (`unchanged`) or there is nothing to pin and no release yet
+   * (`skipped`). The manifest is rendered and round-trip checked first, so an
+   * oversized or unreadable release fails without touching the current one.
    * A write that loses a race throws Conflict.
+   *
+   * Callers must have authorized the release (curator session or admin route);
+   * this method carries the governance capability the Knowledge write path
+   * requires. `writeParams` adds actor attribution (session, teammate).
    */
-  async commit(plan: ReleasePlan): Promise<ReleaseOutcome> {
+  async commit(
+    plan: ReleasePlan,
+    writeParams: Record<string, unknown> = {}
+  ): Promise<ReleaseOutcome> {
     const { record, manifest } = plan;
     if (record.manifest && sameSkillPins(record.manifest.skills, manifest.skills)) {
       return { status: 'unchanged', record };
     }
     if (!record.manifest && manifest.skills.length === 0) {
       return { status: 'skipped', record, reason: 'no skills are assigned to this teammate' };
+    }
+    let content: string;
+    try {
+      content = renderSkillSetManifest(manifest);
+    } catch (error) {
+      throw new BadRequest(
+        `Release r${manifest.release} of ${record.namespace.slug}/${record.path} was not written: ${(error as Error).message}`
+      );
     }
     try {
       const documents = this.app.service('kb/documents') as unknown as {
@@ -300,13 +301,13 @@ export class SkillSets {
           namespace_slug: record.namespace.slug,
           path: record.path,
           kind: 'bundle',
-          content_text: renderSkillSetManifest(manifest),
+          content_text: content,
           title: `Skill set: ${manifest.teammate}`,
           first_line_is_title: false,
           change_summary: `Release r${manifest.release}`,
           expected_version: plan.expectedVersion,
         },
-        this.provider.paramsWith()
+        withSkillsetReleaseWrite({ ...this.provider.paramsWith(), ...writeParams })
       )) as HydratedKnowledgeDocument;
       const reread = await this.readManifest(record.namespace, record.key);
       return {
