@@ -11,7 +11,8 @@
  * - every skill under `skills/<own key>/` in any namespace the caller can
  *   read, and
  * - every other skill in its own primary namespace, except those filed under
- *   another teammate's folder.
+ *   another teammate's folder, and
+ * - every skill under `skills/_shared/` in a skills provider namespace.
  *
  * So a shared namespace that is also one teammate's primary namespace shows
  * that teammate only its own folder and its unfoldered skills.
@@ -57,6 +58,8 @@ export interface SkillAssignmentContext {
   otherKeys: Iterable<string>;
   /** The teammate's primary Knowledge namespace, when it has one. */
   primaryNamespaceId?: string | null;
+  /** Skills provider namespaces, whose `skills/_shared/` skills go to every teammate. */
+  sharedNamespaceIds?: Iterable<string>;
 }
 
 /** The documents that belong to the teammate, deduplicated by document id, input order kept. */
@@ -67,12 +70,14 @@ export function assignTeammateSkillDocs<T extends SkillDocRef>(
   const own = new Set(context.ownKeys);
   // A key both teammates share stays assignable through the owner's own folder rule.
   const others = new Set([...context.otherKeys].filter((key) => !own.has(key)));
+  const shared = new Set(context.sharedNamespaceIds ?? []);
   const seen = new Set<string>();
   const assigned: T[] = [];
   for (const doc of docs) {
     if (seen.has(doc.document_id)) continue;
     const folder = skillFolder(doc.path);
-    const inOwnFolder = folder !== undefined && own.has(folder);
+    const inSharedFolder = folder === SKILLS_SHARED_FOLDER && shared.has(doc.namespace_id);
+    const inOwnFolder = (folder !== undefined && own.has(folder)) || inSharedFolder;
     const inOwnNamespace =
       !!context.primaryNamespaceId && doc.namespace_id === context.primaryNamespaceId;
     const inOtherFolder = folder !== undefined && others.has(folder);

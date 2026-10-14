@@ -198,6 +198,12 @@ export const PromptPayloadSchema = BasePayloadSchema.extend({
         z.object({ kind: z.literal('channel'), server: z.string().min(1) }),
       ])
       .optional(),
+    /**
+     * Team skills index the daemon resolved for this session (teammate
+     * branches only). Appended after the Agor system prompt by every
+     * harness. Older executors drop it because this schema is non-strict.
+     */
+    skillsIndex: z.string().max(16_000).optional(),
   }),
 });
 

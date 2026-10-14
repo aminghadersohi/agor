@@ -37,6 +37,7 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import { type Application, BadRequest, NotAuthenticated, NotFound } from '@agor/core/feathers';
+import { isSkillsProviderNamespace } from '@agor/core/knowledge';
 import {
   type AuthenticatedParams,
   BRANCH_SKILLS_SCAN_COMMAND,
@@ -50,12 +51,22 @@ import {
   type KnowledgeNamespace,
   type Params,
   ROLES,
+  type SessionID,
+  type SessionSkillsReceipt,
+  type SkillPinStatus,
+  type SkillSetEntryStatus,
   TEAMMATE_SKILL_GAPS_PATH,
+  type TeammateSkill,
+  type TeammateSkillRelease,
   type TeammateSkillSourceState,
   type TeammateSkillsReport,
   type UserID,
   type UserRole,
 } from '@agor/core/types';
+import { sessionSkillsReceipt } from '../skills/delivery.js';
+import { KnowledgeSkillProvider } from '../skills/knowledge-skill-provider.js';
+import { SkillSets } from '../skills/skillsets.js';
+import { skillTeammateOf } from '../skills/teammate.js';
 import {
   assembleTeammateSkills,
   type GapsDocInput,
@@ -237,6 +248,36 @@ async function mapLimited<T, R>(
   return results;
 }
 
+/** A Knowledge skill row with its release pin and whether the last receipt delivered it. */
+export function withReleaseInfo(
+  skill: TeammateSkill,
+  pins: Map<string, SkillSetEntryStatus>,
+  deliveredVersions: Set<string>,
+  release: number | undefined
+): TeammateSkill {
+  const pin = skill.document_id && release !== undefined ? pins.get(skill.document_id) : undefined;
+  const delivered =
+    (pin && deliveredVersions.has(pin.version_id)) ||
+    (!!skill.version_id && deliveredVersions.has(skill.version_id));
+  if (!pin && !delivered) return skill;
+  return {
+    ...skill,
+    ...(pin
+      ? {
+          pin: {
+            release: release as number,
+            version_number: pin.version_number,
+            status: pin.status,
+            ...(pin.latest_version_number !== undefined
+              ? { latest_version_number: pin.latest_version_number }
+              : {}),
+          },
+        }
+      : {}),
+    ...(delivered ? { delivered: true } : {}),
+  };
+}
+
 export function createBranchSkillsRoute(options: {
   db: TenantScopeAwareDatabase;
   /** Read per request, like every other route's superadmin check. */
@@ -367,7 +408,14 @@ export function createBranchSkillsRoute(options: {
     const assigned = assignTeammateSkillDocs(
       // Drafts are imports under review, not equipped skills.
       [...own.docs, ...shared.docs].filter((doc) => doc.status !== 'draft'),
-      { ownKeys, otherKeys, primaryNamespaceId: primary?.namespace_id }
+      {
+        ownKeys,
+        otherKeys,
+        primaryNamespaceId: primary?.namespace_id,
+        sharedNamespaceIds: [...namespaces.values()]
+          .filter((ns) => isSkillsProviderNamespace(ns))
+          .map((ns) => ns.namespace_id),
+      }
     );
     const selected = assigned.slice(0, KNOWLEDGE_SKILL_LIMIT);
     const hydrated = await mapLimited(selected, KNOWLEDGE_HYDRATE_CONCURRENCY, async (doc) => {
@@ -467,6 +515,7 @@ export function createBranchSkillsRoute(options: {
   ): Promise<{
     state: TeammateSkillsReport['sources']['harness'];
     harness: HarnessSkillsInput | null;
+    receipt: { session_id: SessionID; receipt: SessionSkillsReceipt } | null;
   }> {
     const { data } = await new SessionRepository(db).findPage({
       branchId: branch.branch_id,
@@ -475,6 +524,13 @@ export function createBranchSkillsRoute(options: {
       includeTotal: false,
       ...(ctx.bypass ? {} : { visibleToUserId: ctx.userId }),
     });
+    const receiptSession = data.find((session) => sessionSkillsReceipt(session));
+    const receipt = receiptSession
+      ? {
+          session_id: receiptSession.session_id,
+          receipt: sessionSkillsReceipt(receiptSession) as SessionSkillsReceipt,
+        }
+      : null;
     for (const session of data) {
       const skills = (session.custom_context as Record<string, unknown> | undefined)?.skills;
       if (!Array.isArray(skills)) continue;
@@ -482,12 +538,80 @@ export function createBranchSkillsRoute(options: {
       return {
         state: { status: 'ok', session_id: session.session_id, session_at: at },
         harness: { skills: skills.filter((name): name is string => typeof name === 'string'), at },
+        receipt,
       };
     }
     return {
       state: unavailable('No recent session has reported its loaded skills.'),
       harness: null,
+      receipt,
     };
+  }
+
+  /** The teammate's latest skill set release and the pin of each released skill. */
+  async function loadRelease(
+    featherApp: Application,
+    branch: Branch,
+    ctx: RequestContext
+  ): Promise<{ release: TeammateSkillRelease; pins: Map<string, SkillSetEntryStatus> }> {
+    const enabled = getTeammateConfig(branch)?.skills?.enabled !== false;
+    const teammate = skillTeammateOf(branch);
+    const pins = new Map<string, SkillSetEntryStatus>();
+    if (!teammate) return { release: { status: 'none', enabled }, pins };
+    try {
+      const provider = new KnowledgeSkillProvider(featherApp, ctx.serviceParams);
+      const sets = new SkillSets(provider);
+      for (const namespace of await provider.providerNamespaces()) {
+        const assigned = await sets.namespaceSkills(namespace, teammate);
+        const record = await sets.find(namespace, teammate, assigned);
+        if (record.document && !record.manifest) {
+          return {
+            release: {
+              status: 'unavailable',
+              enabled,
+              namespace_slug: namespace.slug,
+              path: record.path,
+              reason: `The skill set manifest could not be read: ${record.error}`,
+            },
+            pins,
+          };
+        }
+        if (!record.manifest) continue;
+        const statuses = await sets.status(record.manifest);
+        const counts: Partial<Record<SkillPinStatus, number>> = {};
+        for (const status of statuses) {
+          pins.set(status.document_id, status);
+          counts[status.status] = (counts[status.status] ?? 0) + 1;
+        }
+        const released = new Set(statuses.map((status) => status.document_id));
+        return {
+          release: {
+            status: 'ok',
+            enabled,
+            namespace_slug: namespace.slug,
+            path: record.path,
+            release: record.manifest.release,
+            created_at: record.manifest.created_at,
+            manifest_version_number: record.document?.current_version?.version_number,
+            counts,
+            unreleased: assigned.filter((skill) => !released.has(skill.document_id)).length,
+          },
+          pins,
+        };
+      }
+      return { release: { status: 'none', enabled }, pins };
+    } catch (error) {
+      const code = errorCode(error);
+      if (code !== 403 && code !== 404) throw error;
+      return {
+        release: {
+          status: 'unavailable',
+          enabled,
+          reason: "You can't read this teammate's skill set.",
+        },
+        pins,
+      };
+    }
   }
 
   async function scanOwn(
@@ -558,10 +682,11 @@ export function createBranchSkillsRoute(options: {
       const ctx = requestContext(params);
       const branch = await loadViewableTeammate(routeBranchId(params), ctx);
 
-      const [knowledge, own, harness] = await Promise.all([
+      const [knowledge, own, harness, release] = await Promise.all([
         loadKnowledge(featherApp, branch, ctx),
         scanOwn(featherApp, branch, ctx),
         loadHarness(branch, ctx),
+        loadRelease(featherApp, branch, ctx),
       ]);
 
       let drift: Awaited<ReturnType<typeof scanPeers>> = {
@@ -584,10 +709,30 @@ export function createBranchSkillsRoute(options: {
         gapsDocs: knowledge.gapsDocs,
       });
 
+      const delivered = harness.receipt;
+      const deliveredVersions = new Set(
+        delivered?.receipt.skills.map((skill) => skill.version_id) ?? []
+      );
       return {
         branch_id: branch.branch_id,
-        skills,
+        skills: skills.map((skill) =>
+          withReleaseInfo(skill, release.pins, deliveredVersions, release.release.release)
+        ),
         gaps,
+        release: {
+          ...release.release,
+          ...(delivered
+            ? {
+                delivered: {
+                  session_id: delivered.session_id,
+                  release: delivered.receipt.release,
+                  delivered_at: delivered.receipt.delivered_at,
+                  harness: delivered.receipt.harness,
+                  skills: delivered.receipt.skills.length,
+                },
+              }
+            : {}),
+        },
         sources: {
           knowledge: knowledge.state,
           in_repo: own.state,
