@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assembleTeammateSkills,
   type KnowledgeSkillInput,
+  mergeSkillGaps,
   parseSkillGaps,
   readSkillOrigin,
   skillKey,
@@ -43,7 +44,7 @@ function repoFile(overrides: Partial<BranchSkillFile> = {}): BranchSkillFile {
   };
 }
 
-const empty = { knowledge: [], inRepo: [], peers: null, harness: null, gapsDoc: null };
+const empty = { knowledge: [], inRepo: [], peers: null, harness: null, gapsDocs: [] };
 
 describe('assembleTeammateSkills: sources', () => {
   it('maps a Knowledge skill to its version pin and doc timestamps', () => {
@@ -254,7 +255,11 @@ describe('parseSkillGaps', () => {
 
   it('closes gaps against every source, including harness-only skills', () => {
     const gapsDoc = doc('---\ngaps:\n  - skill: pdf\n    priority: P2\n---\n');
-    const { gaps } = assembleTeammateSkills({ ...empty, harness: { skills: ['pdf'] }, gapsDoc });
+    const { gaps } = assembleTeammateSkills({
+      ...empty,
+      harness: { skills: ['pdf'] },
+      gapsDocs: [gapsDoc],
+    });
     expect(gaps.items).toEqual([{ skill: 'pdf', priority: 'P2', closed: true }]);
   });
 });
@@ -274,5 +279,72 @@ describe('helpers', () => {
   it('vendorPinLabel falls back without a GitHub URI', () => {
     expect(vendorPinLabel({ provider: 'marketplace' })).toBe('marketplace');
     expect(vendorPinLabel({ uri: 'https://github.com/o/r.git' })).toBe('o/r');
+  });
+});
+
+describe('mergeSkillGaps', () => {
+  const gapDoc = (path: string, body: string, namespace_slug?: string) => ({
+    uri: `agor://kb/${path}`,
+    path,
+    namespace_slug,
+    content: `---\ngaps:\n${body}---\n`,
+  });
+
+  it('reports missing with no documents', () => {
+    expect(mergeSkillGaps([], [])).toEqual({ status: 'missing', items: [] });
+  });
+
+  it('merges documents, the first to list a skill winning, and records every source', () => {
+    const folder = gapDoc(
+      'skills/fritz/_gaps.md',
+      '  - skill: release-evidence-pack\n    priority: P0\n',
+      'team'
+    );
+    const primary = gapDoc(
+      'skills/_gaps.md',
+      '  - skill: Release-Evidence-Pack\n    priority: P2\n  - skill: pdf\n    priority: P1\n',
+      'teammate-fritz'
+    );
+    const merged = mergeSkillGaps([folder, primary], ['pdf']);
+    expect(merged.status).toBe('ok');
+    expect(merged.uri).toBe('agor://kb/skills/fritz/_gaps.md');
+    expect(merged.items).toEqual([
+      { skill: 'release-evidence-pack', priority: 'P0', closed: false },
+      { skill: 'pdf', priority: 'P1', closed: true },
+    ]);
+    expect(merged.documents).toEqual([
+      {
+        uri: 'agor://kb/skills/fritz/_gaps.md',
+        path: 'skills/fritz/_gaps.md',
+        namespace_slug: 'team',
+      },
+      {
+        uri: 'agor://kb/skills/_gaps.md',
+        path: 'skills/_gaps.md',
+        namespace_slug: 'teammate-fritz',
+      },
+    ]);
+  });
+
+  it('skips an unreadable document when another one parses', () => {
+    const broken = { uri: 'agor://kb/broken', path: 'skills/fritz/_gaps.md', content: '# prose' };
+    const good = gapDoc('skills/_gaps.md', '  - skill: pdf\n    priority: P1\n');
+    expect(mergeSkillGaps([broken, good], []).items).toHaveLength(1);
+    expect(mergeSkillGaps([broken], []).status).toBe('invalid');
+  });
+});
+
+describe('Knowledge namespace on skills', () => {
+  it('carries the namespace through so a shared source is visible', () => {
+    const { skills } = assembleTeammateSkills({
+      ...empty,
+      knowledge: [
+        kbDoc({ content: 'Body', namespace_slug: 'team-skills', namespace_name: 'Team skills' }),
+      ],
+    });
+    expect(skills[0]).toMatchObject({
+      namespace_slug: 'team-skills',
+      namespace_name: 'Team skills',
+    });
   });
 });

@@ -32,6 +32,8 @@ export interface KnowledgeSkillInput {
   version_number?: number | null;
   content_sha256?: string | null;
   content: string;
+  namespace_slug?: string;
+  namespace_name?: string;
 }
 
 export interface PeerSkillsInput {
@@ -48,6 +50,8 @@ export interface HarnessSkillsInput {
 export interface GapsDocInput {
   uri: string;
   url?: string | null;
+  path?: string;
+  namespace_slug?: string;
   content: string;
 }
 
@@ -57,7 +61,8 @@ export interface AssembleTeammateSkillsInput {
   /** `null` when drift was not computed; an empty array means no other readable teammate. */
   peers: PeerSkillsInput[] | null;
   harness: HarnessSkillsInput | null;
-  gapsDoc: GapsDocInput | null;
+  /** Gap documents in priority order; the first to list a skill wins. */
+  gapsDocs: GapsDocInput[];
 }
 
 export interface AssembledTeammateSkills {
@@ -137,6 +142,8 @@ function knowledgeSkill(doc: KnowledgeSkillInput): TeammateSkill {
     path: doc.path,
     uri: doc.uri,
     url: doc.url ?? undefined,
+    namespace_slug: doc.namespace_slug,
+    namespace_name: doc.namespace_name,
     sha256: doc.content_sha256 ?? undefined,
     document_id: doc.document_id,
     version_id: doc.version_id ?? undefined,
@@ -241,6 +248,51 @@ export function parseSkillGaps(
   return { ...base, status: 'ok', items };
 }
 
+/**
+ * Merge several gap documents. Items are deduplicated by skill name, the
+ * first document to list a skill winning; the list is `invalid` only when no
+ * document could be read.
+ */
+export function mergeSkillGaps(
+  docs: GapsDocInput[],
+  equippedNames: Iterable<string>
+): TeammateSkillGapList {
+  if (docs.length === 0) return { status: 'missing', items: [] };
+  const equipped = [...equippedNames];
+  const parsed = docs.map((doc) => ({ doc, list: parseSkillGaps(doc, equipped) }));
+  const readable = parsed.filter(({ list }) => list.status === 'ok');
+  if (readable.length === 0) return parsed[0].list;
+
+  const seen = new Set<string>();
+  const items: TeammateSkillGap[] = [];
+  for (const { list } of readable) {
+    for (const item of list.items) {
+      const key = skillKey(item.skill);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push(item);
+    }
+  }
+  items.sort(
+    (a, b) =>
+      Number(a.closed) - Number(b.closed) ||
+      a.priority.localeCompare(b.priority) ||
+      a.skill.localeCompare(b.skill)
+  );
+  const first = readable[0].doc;
+  return {
+    status: 'ok',
+    items,
+    uri: first.uri,
+    url: first.url ?? undefined,
+    documents: readable.map(({ doc }) => ({
+      uri: doc.uri,
+      path: doc.path ?? '',
+      ...(doc.namespace_slug ? { namespace_slug: doc.namespace_slug } : {}),
+    })),
+  };
+}
+
 export function assembleTeammateSkills(
   input: AssembleTeammateSkillsInput
 ): AssembledTeammateSkills {
@@ -268,8 +320,8 @@ export function assembleTeammateSkills(
   skills.sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
   return {
     skills,
-    gaps: parseSkillGaps(
-      input.gapsDoc,
+    gaps: mergeSkillGaps(
+      input.gapsDocs,
       skills.map((skill) => skill.name)
     ),
   };

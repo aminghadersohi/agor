@@ -3,17 +3,21 @@
  *
  * Assembled on request from four places, none of which this route writes:
  *
- * - **Knowledge**: `kind: skill` documents in the teammate's primary
- *   namespace, read through `kb/documents` with the caller's params, so the
- *   normal namespace and visibility checks apply. A skill whose frontmatter
- *   or metadata carries `metadata.agor.origin` is shown as vendored.
+ * - **Knowledge**: `kind: skill` documents assigned by folder (see
+ *   `teammate-skills/assign.ts`): `skills/<teammate key>/…` in any namespace
+ *   the caller can read, plus the teammate's own primary namespace minus other
+ *   teammates' folders. Every read goes through `kb/documents` with the
+ *   caller's params, so the normal namespace and visibility checks apply. A
+ *   skill whose frontmatter or metadata carries `metadata.agor.origin` is
+ *   shown as vendored.
  * - **In-repo**: skill files in the branch worktree, scanned by the executor
  *   (`branch.skills.scan`). The daemon never reads the worktree itself; the
  *   caller needs the same member role, branch view and filesystem read access
  *   as the Files tab.
  * - **Harness**: skill names the Claude SDK reported for the branch's most
  *   recent visible session (`custom_context.skills`).
- * - **Gaps**: the optional `skills/_gaps.md` document in the same namespace.
+ * - **Gaps**: optional `skills/<teammate key>/_gaps.md` documents in readable
+ *   namespaces and `skills/_gaps.md` in the primary namespace, merged.
  *
  * `?include_drift=true` also scans up to {@link DRIFT_PEER_LIMIT} other
  * teammate branches the caller can read and reports, per in-repo skill name,
@@ -42,6 +46,7 @@ import {
   getTeammateConfig,
   type HydratedKnowledgeDocument,
   hasMinimumRole,
+  type KnowledgeDocument,
   type KnowledgeNamespace,
   type Params,
   ROLES,
@@ -58,6 +63,11 @@ import {
   type KnowledgeSkillInput,
   type PeerSkillsInput,
 } from '../teammate-skills/assemble.js';
+import {
+  assignTeammateSkillDocs,
+  teammateGapPaths,
+  teammateSkillKeys,
+} from '../teammate-skills/assign.js';
 import { isSuperAdmin } from '../utils/branch-authorization.js';
 import { resolveBranchExecutorSandboxMounts } from '../utils/branch-executor-sandbox.js';
 import { ensureBranchWorkspaceAccess } from '../utils/branch-workspace-path.js';
@@ -65,8 +75,16 @@ import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-ho
 import { getDaemonUrl, requestExecutor } from '../utils/spawn-executor.js';
 import { issueExecutorCommandToken } from './session-token-service.js';
 
-/** Knowledge skill documents read per teammate. */
+/** Knowledge skill documents shown per teammate (each is one hydrated read). */
 export const KNOWLEDGE_SKILL_LIMIT = 200;
+/** `kind: skill` documents listed across readable namespaces when assigning by folder. */
+export const KNOWLEDGE_LIST_LIMIT = 1000;
+/** `kb/documents` page size; the service caps `$limit` at 500. */
+const KNOWLEDGE_PAGE_SIZE = 500;
+const KNOWLEDGE_HYDRATE_CONCURRENCY = 8;
+/** Teammate branches read to learn other teammates' folder keys. */
+const TEAMMATE_KEY_LIMIT = 500;
+const GAP_DOCS_PER_PATH = 10;
 /** Other teammate branches scanned for drift. */
 export const DRIFT_PEER_LIMIT = 16;
 /** Executor runs in flight at once while scanning peers. */
@@ -256,6 +274,47 @@ export function createBranchSkillsRoute(options: {
     return branch;
   }
 
+  /** Folder keys of every other teammate the caller can see, archived ones included. */
+  async function otherTeammateKeys(branch: Branch, ctx: RequestContext): Promise<string[]> {
+    const teammates = await new BranchRepository(db).findTeammateBranches({
+      ...(ctx.bypass ? {} : { userId: ctx.userId, minimumPermission: 'view' as const }),
+      limit: TEAMMATE_KEY_LIMIT,
+    });
+    return teammates
+      .filter((peer) => peer.branch_id !== branch.branch_id && getTeammateConfig(peer))
+      .flatMap((peer) => teammateSkillKeys(getTeammateConfig(peer)?.displayName ?? peer.name));
+  }
+
+  /** Up to `cap` `kind: skill` documents the caller can read, optionally in one namespace. */
+  async function listSkillDocs(
+    featherApp: Application,
+    ctx: RequestContext,
+    cap: number,
+    namespaceId?: string
+  ): Promise<{ docs: KnowledgeDocument[]; truncated: boolean }> {
+    const docs: KnowledgeDocument[] = [];
+    let total = 0;
+    while (docs.length < cap) {
+      const page = paginatedData<KnowledgeDocument>(
+        await featherApp.service('kb/documents').find({
+          ...ctx.serviceParams,
+          query: {
+            ...(namespaceId ? { namespace_id: namespaceId } : {}),
+            kind: 'skill',
+            archived: false,
+            $limit: Math.min(KNOWLEDGE_PAGE_SIZE, cap - docs.length),
+            $skip: docs.length,
+            $sort: { path: 1 },
+          },
+        })
+      );
+      docs.push(...page.data);
+      total = page.total;
+      if (page.data.length === 0 || docs.length >= total) break;
+    }
+    return { docs, truncated: total > docs.length };
+  }
+
   async function loadKnowledge(
     featherApp: Application,
     branch: Branch,
@@ -263,71 +322,70 @@ export function createBranchSkillsRoute(options: {
   ): Promise<{
     state: TeammateSkillsReport['sources']['knowledge'];
     docs: KnowledgeSkillInput[];
-    gapsDoc: GapsDocInput | null;
+    gapsDocs: GapsDocInput[];
   }> {
-    const namespaceId = getTeammateConfig(branch)?.kb?.primary_namespace_id;
-    if (!namespaceId) {
-      return {
-        state: unavailable('This teammate has no Knowledge namespace yet.'),
-        docs: [],
-        gapsDoc: null,
-      };
-    }
-    let namespace: KnowledgeNamespace;
-    try {
-      namespace = (await featherApp
-        .service('kb/namespaces')
-        .get(namespaceId, ctx.serviceParams)) as KnowledgeNamespace;
-    } catch (error) {
-      const code = errorCode(error);
-      if (code === 403 || code === 404) {
-        return {
-          state: unavailable("You can't read this teammate's Knowledge namespace."),
-          docs: [],
-          gapsDoc: null,
-        };
+    const config = getTeammateConfig(branch);
+    const ownKeys = teammateSkillKeys(config?.displayName ?? branch.name);
+    const primaryNamespaceId = config?.kb?.primary_namespace_id ?? null;
+
+    // The primary namespace may be unreadable or missing; folder skills elsewhere still count.
+    let primary: KnowledgeNamespace | null = null;
+    let primaryProblem: string | undefined;
+    if (!primaryNamespaceId) {
+      primaryProblem = 'This teammate has no Knowledge namespace yet.';
+    } else {
+      try {
+        primary = (await featherApp
+          .service('kb/namespaces')
+          .get(primaryNamespaceId, ctx.serviceParams)) as KnowledgeNamespace;
+        if (primary.archived) {
+          primary = null;
+          primaryProblem = "This teammate's Knowledge namespace is archived.";
+        }
+      } catch (error) {
+        const code = errorCode(error);
+        if (code !== 403 && code !== 404) throw error;
+        primaryProblem = "You can't read this teammate's Knowledge namespace.";
       }
-      throw error;
-    }
-    if (namespace.archived) {
-      return {
-        state: unavailable("This teammate's Knowledge namespace is archived."),
-        docs: [],
-        gapsDoc: null,
-      };
     }
 
-    const documents = featherApp.service('kb/documents');
-    const [skillPage, gapsPage] = await Promise.all([
-      documents.find({
-        ...ctx.serviceParams,
-        query: {
-          namespace_id: namespaceId,
-          kind: 'skill',
-          archived: false,
-          include_content: true,
-          $limit: KNOWLEDGE_SKILL_LIMIT,
-          $sort: { path: 1 },
-        },
-      }),
-      documents.find({
-        ...ctx.serviceParams,
-        query: {
-          namespace_id: namespaceId,
-          path: TEAMMATE_SKILL_GAPS_PATH,
-          archived: false,
-          include_content: true,
-          $limit: 1,
-        },
-      }),
+    const [namespaceList, otherKeys, shared, own] = await Promise.all([
+      featherApp
+        .service('kb/namespaces')
+        .find({ ...ctx.serviceParams, query: { archived: false, $limit: 1000 } }),
+      otherTeammateKeys(branch, ctx),
+      listSkillDocs(featherApp, ctx, KNOWLEDGE_LIST_LIMIT),
+      primary
+        ? listSkillDocs(featherApp, ctx, KNOWLEDGE_PAGE_SIZE, primary.namespace_id)
+        : Promise.resolve({ docs: [], truncated: false }),
     ]);
+    const namespaces = new Map(
+      paginatedData<KnowledgeNamespace>(namespaceList).data.map((ns) => [ns.namespace_id, ns])
+    );
+    if (primary) namespaces.set(primary.namespace_id, primary);
 
-    const skills = paginatedData<HydratedKnowledgeDocument>(skillPage);
-    const docs = skills.data
+    const assigned = assignTeammateSkillDocs(
       // Drafts are imports under review, not equipped skills.
-      .filter((doc) => doc.status !== 'draft' && typeof doc.content === 'string')
-      .map(
-        (doc): KnowledgeSkillInput => ({
+      [...own.docs, ...shared.docs].filter((doc) => doc.status !== 'draft'),
+      { ownKeys, otherKeys, primaryNamespaceId: primary?.namespace_id }
+    );
+    const selected = assigned.slice(0, KNOWLEDGE_SKILL_LIMIT);
+    const hydrated = await mapLimited(selected, KNOWLEDGE_HYDRATE_CONCURRENCY, async (doc) => {
+      try {
+        return (await featherApp.service('kb/documents').get(doc.document_id, {
+          ...ctx.serviceParams,
+          query: { include_content: true },
+        })) as HydratedKnowledgeDocument;
+      } catch {
+        // Archived or no longer readable since it was listed.
+        return null;
+      }
+    });
+    const docs = hydrated
+      .filter((doc): doc is HydratedKnowledgeDocument => !!doc && typeof doc.content === 'string')
+      .map((doc): KnowledgeSkillInput => {
+        const namespace = namespaces.get(doc.namespace_id);
+        return {
           document_id: doc.document_id,
           path: doc.path,
           uri: doc.uri,
@@ -338,21 +396,69 @@ export function createBranchSkillsRoute(options: {
           version_number: doc.current_version?.version_number,
           content_sha256: doc.current_version?.content_sha256,
           content: doc.content ?? '',
+          namespace_slug: namespace?.slug,
+          namespace_name: namespace?.display_name,
+        };
+      });
+
+    const gapsDocs = await loadGapDocs(featherApp, ctx, ownKeys, primary, namespaces);
+    const truncated = shared.truncated || own.truncated || assigned.length > KNOWLEDGE_SKILL_LIMIT;
+    const state: TeammateSkillsReport['sources']['knowledge'] =
+      primaryProblem && docs.length === 0 && gapsDocs.length === 0
+        ? unavailable(primaryProblem)
+        : {
+            status: 'ok',
+            ...(primary ? { namespace_slug: primary.slug } : {}),
+            ...(truncated ? { truncated: true } : {}),
+          };
+    return { state, docs, gapsDocs };
+  }
+
+  /**
+   * Gap lists: `skills/<key>/_gaps.md` in any readable namespace, then
+   * `skills/_gaps.md` in the primary namespace.
+   */
+  async function loadGapDocs(
+    featherApp: Application,
+    ctx: RequestContext,
+    ownKeys: string[],
+    primary: KnowledgeNamespace | null,
+    namespaces: Map<string, KnowledgeNamespace>
+  ): Promise<GapsDocInput[]> {
+    const lookups = [
+      ...teammateGapPaths(ownKeys).map((path) => ({ path, namespace_id: undefined })),
+      ...(primary ? [{ path: TEAMMATE_SKILL_GAPS_PATH, namespace_id: primary.namespace_id }] : []),
+    ];
+    const pages = await Promise.all(
+      lookups.map(({ path, namespace_id }) =>
+        featherApp.service('kb/documents').find({
+          ...ctx.serviceParams,
+          query: {
+            ...(namespace_id ? { namespace_id } : {}),
+            path,
+            archived: false,
+            include_content: true,
+            $limit: GAP_DOCS_PER_PATH,
+          },
         })
-      );
-    const gaps = paginatedData<HydratedKnowledgeDocument>(gapsPage).data[0];
-    return {
-      state: {
-        status: 'ok',
-        namespace_slug: namespace.slug,
-        ...(skills.total > skills.data.length ? { truncated: true } : {}),
-      },
-      docs,
-      gapsDoc:
-        gaps && typeof gaps.content === 'string'
-          ? { uri: gaps.uri, url: gaps.url, content: gaps.content }
-          : null,
-    };
+      )
+    );
+    const seen = new Set<string>();
+    const docs: GapsDocInput[] = [];
+    for (const page of pages) {
+      for (const doc of paginatedData<HydratedKnowledgeDocument>(page).data) {
+        if (seen.has(doc.document_id) || typeof doc.content !== 'string') continue;
+        seen.add(doc.document_id);
+        docs.push({
+          uri: doc.uri,
+          url: doc.url,
+          path: doc.path,
+          namespace_slug: namespaces.get(doc.namespace_id)?.slug,
+          content: doc.content,
+        });
+      }
+    }
+    return docs;
   }
 
   async function loadHarness(
@@ -475,7 +581,7 @@ export function createBranchSkillsRoute(options: {
         inRepo: own.scan?.skills ?? [],
         peers: drift.peers,
         harness: harness.harness,
-        gapsDoc: knowledge.gapsDoc,
+        gapsDocs: knowledge.gapsDocs,
       });
 
       return {

@@ -25,6 +25,7 @@ import {
 } from '@agor/core/types';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type FrontDeskFixture, frontDeskFixture } from '../../test/front-desk-fixture';
+import { slugify } from '../teammate-skills/assign';
 import { requestExecutor } from '../utils/spawn-executor.js';
 import { createBranchSkillsRoute } from './branch-skills';
 import { ensureTeammateKnowledgeNamespace } from './teammate-knowledge';
@@ -80,28 +81,101 @@ function executorAnswers(scans: Map<string, BranchSkillScan>) {
   });
 }
 
-interface KnowledgeStub {
-  namespaces: { get: ReturnType<typeof vi.fn> };
-  documents: { find: ReturnType<typeof vi.fn> };
+interface StubNamespace {
+  namespace_id: string;
+  slug: string;
+  display_name: string;
+  archived?: boolean;
 }
 
-function fakeApp(knowledge?: KnowledgeStub): Application {
+interface StubDoc {
+  document_id: string;
+  namespace_id: string;
+  path: string;
+  kind: string;
+  content: string;
+  status?: string;
+  version_number?: number;
+}
+
+/**
+ * In-memory `kb/namespaces` + `kb/documents` honoring the query fields the
+ * route sends. Every call is a spy so tests can check the caller's params.
+ */
+function memoryKnowledge(
+  namespaces: StubNamespace[] = [],
+  docs: StubDoc[] = [],
+  options: { getNamespace?: (id: string) => Promise<unknown> } = {}
+) {
+  const hydrate = (doc: StubDoc) => ({
+    ...doc,
+    uri: `agor://kb/document/${doc.document_id}`,
+    url: null,
+    status: doc.status ?? 'published',
+    updated_at: new Date('2026-10-09T00:00:00.000Z'),
+    current_version: {
+      version_id: `${doc.document_id}-v`,
+      version_number: doc.version_number ?? 1,
+      content_sha256: SHA_B,
+    },
+  });
+  return {
+    namespaces: {
+      get: vi.fn(
+        options.getNamespace ??
+          (async (id: string) => {
+            const namespace = namespaces.find((ns) => ns.namespace_id === id);
+            if (!namespace) throw Object.assign(new Error('Not found'), { code: 404 });
+            return namespace;
+          })
+      ),
+      find: vi.fn(async () => namespaces),
+    },
+    documents: {
+      find: vi.fn(async (params: { query: Record<string, unknown> }) => {
+        const q = params.query;
+        const matches = docs
+          .filter(
+            (doc) =>
+              (!q.namespace_id || doc.namespace_id === q.namespace_id) &&
+              (!q.kind || doc.kind === q.kind) &&
+              (!q.path || doc.path === q.path)
+          )
+          .sort((x, y) => x.path.localeCompare(y.path));
+        const skip = Number(q.$skip ?? 0);
+        const limit = Number(q.$limit ?? 100);
+        return { total: matches.length, data: matches.slice(skip, skip + limit).map(hydrate) };
+      }),
+      get: vi.fn(async (id: string) => {
+        const doc = docs.find((d) => d.document_id === id);
+        if (!doc) throw Object.assign(new Error('Not found'), { code: 404 });
+        return hydrate(doc);
+      }),
+    },
+  };
+}
+
+type KnowledgeStub = ReturnType<typeof memoryKnowledge>;
+
+function fakeApp(knowledge: { current: KnowledgeStub }): Application {
   return {
     get: (key: string) => (key === 'config' ? { execution: {} } : undefined),
     sessionTokenService: { generateCommandToken: vi.fn(async () => 'command-token') },
     service: (path: string) => {
-      if (path === 'kb/namespaces' && knowledge) return knowledge.namespaces;
-      if (path === 'kb/documents' && knowledge) return knowledge.documents;
+      if (path === 'kb/namespaces') return knowledge.current.namespaces;
+      if (path === 'kb/documents') return knowledge.current.documents;
       throw new Error(`Unexpected service ${path}`);
     },
   } as unknown as Application;
 }
 
-async function setup(knowledge?: KnowledgeStub) {
+async function setup(knowledge: KnowledgeStub = memoryKnowledge(), displayName = 'Larkspur') {
   const f = await frontDeskFixture(await migratedSqliteDatabase());
-  const branch = await f.createTeammate({ name: 'larkspur', displayName: 'Larkspur' });
+  const branch = await f.createTeammate({ name: slugify(displayName), displayName });
   const route = createBranchSkillsRoute({ db: f.db, allowSuperadmin: () => false });
-  await route.setup(fakeApp(knowledge));
+  // Swappable, so a test can seed Knowledge after the namespace ids exist.
+  const holder = { current: knowledge };
+  await route.setup(fakeApp(holder));
   const find = (
     user: User,
     branchId: BranchID = branch.branch_id,
@@ -117,7 +191,10 @@ async function setup(knowledge?: KnowledgeStub) {
           ...(query ? { query } : {}),
         } as never) as Promise<TeammateSkillsReport>
     );
-  return { f, branch, find };
+  const useKnowledge = (stub: KnowledgeStub) => {
+    holder.current = stub;
+  };
+  return { f, branch, find, useKnowledge };
 }
 
 /** Give the teammate a real primary Knowledge namespace; returns its id. */
@@ -227,91 +304,113 @@ describe('branches/:id/skills sources', () => {
     });
   });
 
-  it('reads Knowledge skills and gaps through kb services with the caller as user', async () => {
-    const knowledge: KnowledgeStub = {
-      namespaces: {
-        get: vi.fn(async () => ({ namespace_id: 'ns-1', slug: 'teammate-x', archived: false })),
+  it('assigns Knowledge skills by teammate folder across readable namespaces', async () => {
+    const TEAM = 'ns-team';
+    const { f, branch, find, useKnowledge } = await setup(undefined, 'Professor Fritz');
+    const frinkNs = await provisionNamespace(f, branch.branch_id);
+    const freda = await f.createTeammate({ name: 'freda-lund', displayName: 'Freda Lund' });
+    const namespaces = [
+      { namespace_id: frinkNs, slug: 'teammate-fritz', display_name: 'Fritz' },
+      { namespace_id: TEAM, slug: 'team-skills', display_name: 'Team skills' },
+    ];
+    const docs: StubDoc[] = [
+      {
+        document_id: 'd1',
+        namespace_id: frinkNs,
+        path: 'skills/fritz/review.md',
+        kind: 'skill',
+        content: '---\nname: review\n---\n',
       },
-      documents: {
-        find: vi.fn(async (params: { query: { path?: string } }) =>
-          params.query.path === 'skills/_gaps.md'
-            ? {
-                total: 1,
-                data: [
-                  {
-                    uri: 'agor://kb/document/gaps',
-                    url: null,
-                    content:
-                      '---\ngaps:\n  - skill: release-evidence-pack\n    priority: P0\n---\n',
-                  },
-                ],
-              }
-            : {
-                total: 2,
-                data: [
-                  {
-                    document_id: 'doc-1',
-                    path: 'skills/verifying-a-fix/SKILL.md',
-                    uri: 'agor://kb/document/doc-1',
-                    url: null,
-                    status: 'published',
-                    updated_at: new Date('2026-10-09T00:00:00.000Z'),
-                    current_version: {
-                      version_id: 'ver-1',
-                      version_number: 3,
-                      content_sha256: SHA_B,
-                    },
-                    content: '---\nname: verifying-a-fix\n---\n',
-                  },
-                  {
-                    document_id: 'doc-2',
-                    path: 'quarantine/x/SKILL.md',
-                    uri: 'agor://kb/document/doc-2',
-                    status: 'draft',
-                    content: '---\nname: under-review\n---\n',
-                  },
-                ],
-              }
-        ),
+      {
+        document_id: 'd2',
+        namespace_id: frinkNs,
+        path: 'skills/freda/triage.md',
+        kind: 'skill',
+        content: '---\nname: triage\n---\n',
       },
-    };
-    const { f, branch, find } = await setup(knowledge);
-    const namespaceId = await provisionNamespace(f, branch.branch_id);
-    executorAnswers(new Map([[branch.branch_id, scanOf()]]));
+      {
+        document_id: 'd3',
+        namespace_id: frinkNs,
+        path: 'skills/connect-saas/SKILL.md',
+        kind: 'skill',
+        content: 'Body',
+      },
+      {
+        document_id: 'd4',
+        namespace_id: frinkNs,
+        path: 'skills/README.md',
+        kind: 'doc',
+        content: '# index',
+      },
+      {
+        document_id: 'd5',
+        namespace_id: TEAM,
+        path: 'skills/professor/deep-dive.md',
+        kind: 'skill',
+        content: 'Body',
+      },
+      {
+        document_id: 'd6',
+        namespace_id: TEAM,
+        path: 'skills/loose.md',
+        kind: 'skill',
+        content: 'Body',
+      },
+      {
+        document_id: 'd7',
+        namespace_id: TEAM,
+        path: 'skills/fritz/draft.md',
+        kind: 'skill',
+        content: 'Body',
+        status: 'draft',
+      },
+      {
+        document_id: 'g1',
+        namespace_id: TEAM,
+        path: 'skills/fritz/_gaps.md',
+        kind: 'doc',
+        content: '---\ngaps:\n  - skill: release-evidence-pack\n    priority: P0\n---\n',
+      },
+    ];
+    const stub = memoryKnowledge(namespaces, docs);
+    useKnowledge(stub);
+    executorAnswers(
+      new Map([
+        [branch.branch_id, scanOf()],
+        [freda.branch_id, scanOf()],
+      ])
+    );
 
     const report = await find(f.owner);
 
-    expect(knowledge.namespaces.get).toHaveBeenCalledWith(
-      namespaceId,
-      expect.objectContaining({ user: f.owner, provider: 'rest' })
-    );
-    expect(knowledge.documents.find).toHaveBeenCalledWith(
-      expect.objectContaining({
-        user: f.owner,
-        query: expect.objectContaining({ namespace_id: namespaceId, kind: 'skill' }),
-      })
-    );
-    expect(report.sources.knowledge).toEqual({ status: 'ok', namespace_slug: 'teammate-x' });
-    expect(report.skills).toEqual([
-      expect.objectContaining({
-        name: 'verifying-a-fix',
-        source: 'knowledge',
-        version_label: 'v3',
-        updated_at: '2026-10-09T00:00:00.000Z',
-      }),
+    expect(report.skills.map((skill) => [skill.name, skill.namespace_slug])).toEqual([
+      ['connect-saas', 'teammate-fritz'],
+      ['deep-dive', 'team-skills'],
+      ['review', 'teammate-fritz'],
     ]);
+    expect(report.skills[1]).toMatchObject({ namespace_name: 'Team skills', version_label: 'v1' });
+    expect(report.sources.knowledge).toEqual({ status: 'ok', namespace_slug: 'teammate-fritz' });
     expect(report.gaps).toMatchObject({
       status: 'ok',
       items: [{ skill: 'release-evidence-pack', priority: 'P0', closed: false }],
+      documents: [{ path: 'skills/fritz/_gaps.md', namespace_slug: 'team-skills' }],
     });
+    // The owner's namespace is listed twice (on its own and across namespaces); each doc is read once.
+    expect(stub.documents.get.mock.calls.map(([id]) => id).sort()).toEqual(['d1', 'd3', 'd5']);
+    for (const call of [...stub.documents.find.mock.calls, ...stub.documents.get.mock.calls]) {
+      expect(call.at(-1)).toMatchObject({ user: f.owner, provider: 'rest' });
+    }
+
+    const frejaReport = await find(f.owner, freda.branch_id);
+    expect(frejaReport.skills.map((skill) => skill.name)).toEqual(['triage']);
+    expect(frejaReport.sources.knowledge.status).toBe('ok');
   });
 
-  it('reports an unreadable Knowledge namespace instead of failing the view', async () => {
+  it('reports an unreadable Knowledge namespace when nothing else is found', async () => {
     const forbidden = Object.assign(new Error('Forbidden'), { code: 403 });
-    const knowledge: KnowledgeStub = {
-      namespaces: { get: vi.fn(async () => Promise.reject(forbidden)) },
-      documents: { find: vi.fn() },
-    };
+    const knowledge = memoryKnowledge([], [], {
+      getNamespace: async () => Promise.reject(forbidden),
+    });
     const { f, branch, find } = await setup(knowledge);
     await provisionNamespace(f, branch.branch_id);
     executorAnswers(new Map([[branch.branch_id, scanOf()]]));
@@ -323,6 +422,6 @@ describe('branches/:id/skills sources', () => {
       reason: "You can't read this teammate's Knowledge namespace.",
     });
     expect(report.gaps.status).toBe('missing');
-    expect(knowledge.documents.find).not.toHaveBeenCalled();
+    expect(knowledge.documents.get).not.toHaveBeenCalled();
   });
 });

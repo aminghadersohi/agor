@@ -88,9 +88,22 @@ export interface TeammateSkillsPanelProps {
   onClose?: () => void;
 }
 
-function knowledgeHref(report: TeammateSkillsReport, path: string | undefined): string | undefined {
-  const slug = report.sources.knowledge.namespace_slug;
+function knowledgeHref(slug: string | undefined, path: string | undefined): string | undefined {
   return slug && path ? uiRouteHref(knowledgePath(slug, path)) : undefined;
+}
+
+/** The first gap document, or the primary namespace's `skills/_gaps.md`. */
+function gapListHref(report: TeammateSkillsReport): string | undefined {
+  if (report.gaps.status === 'missing') return undefined;
+  const first = report.gaps.documents?.[0];
+  return first
+    ? knowledgeHref(first.namespace_slug, first.path)
+    : knowledgeHref(report.sources.knowledge.namespace_slug, TEAMMATE_SKILL_GAPS_PATH);
+}
+
+/** A Knowledge/vendor skill's namespace, shown so a shared namespace is visible. */
+function namespaceLabel(skill: TeammateSkill): string | undefined {
+  return skill.namespace_name ?? skill.namespace_slug;
 }
 
 const SourceTag: React.FC<{ source: TeammateSkillSource }> = ({ source }) => (
@@ -339,6 +352,14 @@ const SkillRow: React.FC<{ skill: TeammateSkill; onOpen: () => void }> = ({ skil
         </Flex>
         <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
           {skill.version_label} · <UpdatedText value={skill.updated_at} />
+          {namespaceLabel(skill) && (
+            <>
+              {' · '}
+              <Tooltip title={`Knowledge namespace ${skill.namespace_slug ?? ''}`}>
+                <span data-testid="teammate-skill-namespace">{namespaceLabel(skill)}</span>
+              </Tooltip>
+            </>
+          )}
         </Typography.Text>
       </Flex>
     </List.Item>
@@ -353,7 +374,9 @@ const SkillDrawer: React.FC<{
 }> = ({ report, skill, onClose, onOpenFiles }) => {
   const { token } = theme.useToken();
   const kbHref =
-    skill && skill.source !== 'in-repo' ? knowledgeHref(report, skill.path) : undefined;
+    skill && skill.source !== 'in-repo'
+      ? knowledgeHref(skill.namespace_slug ?? report.sources.knowledge.namespace_slug, skill.path)
+      : undefined;
   const origin = skill?.origin;
   const harnessSession = report.sources.harness.session_id;
   return (
@@ -398,6 +421,17 @@ const SkillDrawer: React.FC<{
                 </>
               )}
             </Descriptions.Item>
+            {namespaceLabel(skill) && (
+              <Descriptions.Item label="Namespace">
+                {namespaceLabel(skill)}
+                {skill.namespace_name && skill.namespace_slug && (
+                  <>
+                    {' '}
+                    <Typography.Text code>{skill.namespace_slug}</Typography.Text>
+                  </>
+                )}
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label="Updated">
               {skill.updated_at ? formatAbsoluteTime(skill.updated_at) : '—'}
             </Descriptions.Item>
@@ -639,11 +673,11 @@ export const TeammateSkillsPanel: React.FC<TeammateSkillsPanelProps> = ({
           <Typography.Text type="secondary" strong style={{ fontSize: token.fontSizeSM }}>
             GAPS
           </Typography.Text>
-          {report.gaps.status !== 'missing' && knowledgeHref(report, TEAMMATE_SKILL_GAPS_PATH) && (
+          {gapListHref(report) && (
             <Button
               type="link"
               size="small"
-              href={knowledgeHref(report, TEAMMATE_SKILL_GAPS_PATH)}
+              href={gapListHref(report)}
               target="_blank"
               rel="noreferrer"
               style={{ padding: 0 }}

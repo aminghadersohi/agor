@@ -172,6 +172,39 @@ describe('TeammateSkillsPanel', () => {
     );
   });
 
+  it('shows which namespace a shared Knowledge skill comes from, and links there', async () => {
+    const report = baseReport();
+    report.skills[1] = {
+      ...report.skills[1],
+      path: 'skills/larkspur/verifying-a-fix.md',
+      namespace_slug: 'team-skills',
+      namespace_name: 'Team skills',
+    };
+    report.gaps.documents = [
+      {
+        uri: 'agor://kb/document/gaps',
+        path: 'skills/larkspur/_gaps.md',
+        namespace_slug: 'team-skills',
+      },
+    ];
+    const { client } = clientAnswering(async () => report);
+    renderPanel(client);
+    await screen.findByTestId('teammate-skills-summary');
+
+    expect(screen.getByTestId('teammate-skill-namespace')).toHaveTextContent('Team skills');
+    expect(screen.getByRole('link', { name: 'Open gap list' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('/kb/team-skills/skills/larkspur/_gaps.md')
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'verifying-a-fix' }));
+    const drawer = await screen.findByRole('dialog');
+    expect(within(drawer).getByText('team-skills')).toBeInTheDocument();
+    expect(within(drawer).getByRole('link', { name: 'Open in Knowledge' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('/kb/team-skills/skills/larkspur/verifying-a-fix.md')
+    );
+  });
+
   it('shows a vendored skill as not reviewed in the drawer', async () => {
     const { client } = clientAnswering(async () => baseReport());
     renderPanel(client);

@@ -58,6 +58,9 @@ export interface TeammateSkill {
   path?: string;
   /** `agor://kb/...` reference for Knowledge/vendor skills. */
   uri?: string;
+  /** Knowledge namespace a Knowledge/vendor skill lives in; may be shared by several teammates. */
+  namespace_slug?: string;
+  namespace_name?: string;
   /** Browser deep link for Knowledge/vendor skills, when the daemon knows its base URL. */
   url?: string;
   sha256?: string;
@@ -84,16 +87,22 @@ export interface TeammateSkillGap {
   closed: boolean;
 }
 
-/** `skills/_gaps.md` in the teammate's Knowledge namespace. */
+/**
+ * `skills/_gaps.md` in the teammate's primary Knowledge namespace. Gap lists
+ * are also read from `skills/<teammate key>/_gaps.md` in any readable namespace.
+ */
 export const TEAMMATE_SKILL_GAPS_PATH = 'skills/_gaps.md';
 
 export interface TeammateSkillGapList {
   /** `missing` when the doc does not exist; `invalid` when its frontmatter has no usable `gaps`. */
   status: 'ok' | 'missing' | 'invalid';
   items: TeammateSkillGap[];
+  /** First readable gap document; see `documents` for all of them. */
   uri?: string;
   url?: string;
   error?: string;
+  /** Every gap document merged into `items`, teammate folders first. */
+  documents?: Array<{ uri: string; path: string; namespace_slug?: string }>;
 }
 
 /** Why a source contributed nothing, so the UI can say so instead of showing an empty list. */

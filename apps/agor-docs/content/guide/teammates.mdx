@@ -118,14 +118,14 @@ Skills make teammates practical for real workflows, not just coding, but the coo
 
 The **Skills** view lists every skill a teammate has. Open it with the tool button on the teammate's portrait in the board sidebar, or from **Open Skills** in the teammate's settings. It is read-only and shows skills from four places:
 
-- **Knowledge**: documents of kind `skill` in the teammate's Knowledge namespace, with their version.
+- **Knowledge**: documents of kind `skill`, with their version and the namespace they live in. A teammate gets every skill filed under `skills/<name>/` in any namespace you can read, where `<name>` is its display name or any word of it ("Freda Lund" matches `freda`, `lund` and `freda-lund`). It also gets the other skills in its own Knowledge namespace, except those filed under another teammate's folder. So one shared namespace can hold the whole team's skills.
 - **vendor**: Knowledge skills imported from elsewhere. Their `metadata.agor.origin` frontmatter records the source repo, commit, license and reviewer.
 - **in-repo**: `skills/*.md`, `skills/<name>/SKILL.md` and `.claude/skills/<name>/SKILL.md` files in the teammate's branch. Reading these needs file read access to the branch.
 - **harness**: skills the agent reported loading in its most recent session that Agor has no file for.
 
 An in-repo skill whose content differs between the teammates you can read is marked with how many versions exist. Click any skill for its description, path, hash and provenance.
 
-To track missing skills, add `skills/_gaps.md` to the teammate's Knowledge namespace with a `gaps` list in its frontmatter:
+To track missing skills, add `skills/_gaps.md` to the teammate's Knowledge namespace, or `skills/<name>/_gaps.md` to any namespace, with a `gaps` list in its frontmatter:
 
 ```yaml
 ---
