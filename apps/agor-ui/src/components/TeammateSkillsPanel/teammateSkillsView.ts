@@ -13,7 +13,7 @@ export const SKILL_SOURCE_LABELS: Record<TeammateSkillSource, string> = {
   harness: 'harness',
 };
 
-/** AntD preset tag colors; they follow the active theme. */
+/** Built-in AntD tag colors; they follow the active theme. */
 export const SKILL_SOURCE_COLORS: Record<TeammateSkillSource, string | undefined> = {
   knowledge: 'blue',
   vendor: 'purple',
