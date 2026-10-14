@@ -1,4 +1,5 @@
 export * from './edit-ops.js';
+export * from './frontmatter.js';
 export * from './repository.js';
 export * from './transfer.js';
 export * from './transfer-links.js';

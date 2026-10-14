@@ -114,6 +114,31 @@ Examples of what skills enable:
 
 Skills make teammates practical for real workflows, not just coding, but the coordination and communication around it.
 
+#### Seeing a teammate's skills
+
+The **Skills** view lists every skill a teammate has. Open it with the tool button on the teammate's portrait in the board sidebar, or from **Open Skills** in the teammate's settings. It is read-only and shows skills from four places:
+
+- **Knowledge**: documents of kind `skill`, with their version and the namespace they live in. A teammate gets every skill filed under `skills/<name>/` in any namespace you can read, where `<name>` is its display name or any word of it ("Freda Lund" matches `freda`, `lund` and `freda-lund`). It also gets the other skills in its own Knowledge namespace, except those filed under another teammate's folder. So one shared namespace can hold the whole team's skills.
+- **vendor**: Knowledge skills imported from elsewhere. Their `metadata.agor.origin` frontmatter records the source repo, commit, license and reviewer.
+- **in-repo**: `skills/*.md`, `skills/<name>/SKILL.md` and `.claude/skills/<name>/SKILL.md` files in the teammate's branch. Reading these needs file read access to the branch.
+- **harness**: skills the agent reported loading in its most recent session that Agor has no file for.
+
+An in-repo skill whose content differs between the teammates you can read is marked with how many versions exist. Click any skill for its description, path, hash and provenance.
+
+To track missing skills, add `skills/_gaps.md` to the teammate's Knowledge namespace, or `skills/<name>/_gaps.md` to any namespace, with a `gaps` list in its frontmatter:
+
+```yaml
+---
+gaps:
+  - skill: release-evidence-pack
+    priority: P0 # P0, P1 or P2
+    source: https://example.com/role-audit
+    note: no canonical skill yet
+---
+```
+
+A gap shows as closed once the teammate has a skill with that name.
+
 ### Workspace orchestration
 
 Through Agor's [MCP tools](/guide/internal-mcp), teammates can:
@@ -196,6 +221,7 @@ Click any teammate's branch card to open its modal. The **Teammate** tab shows:
 - Editable display name
 - Framework repo and version
 - Creation method (onboarding vs manual)
+- A skills summary (counts and open gaps) with a link to the full Skills view
 
 ### Boards
 

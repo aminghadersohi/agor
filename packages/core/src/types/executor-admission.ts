@@ -1,5 +1,6 @@
 import { BRANCH_ARCHIVE_COMMAND, BRANCH_CLEANUP_COMMAND } from './branch-cleanup';
 import { BRANCH_DELETION_COMMAND } from './branch-deletion';
+import { BRANCH_SKILLS_SCAN_COMMAND } from './teammate-skills';
 
 /**
  * Admission class of an executor run. A launcher that gates admissions may
@@ -31,6 +32,7 @@ export const EXECUTOR_COMMAND_ADMISSION = {
   'branch.files.list': 'utility',
   'branch.files.browse': 'utility',
   'branch.files.read': 'utility',
+  [BRANCH_SKILLS_SCAN_COMMAND]: 'utility',
   'branch.files.write': 'utility',
   'branch.filesystem.status': 'utility',
   'branch.artifact.publish': 'utility',
