@@ -13,6 +13,7 @@ import {
   runWithTenantDatabaseScope,
   SessionRepository,
   sql,
+  TaskRepository,
   UsersRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
@@ -138,6 +139,46 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
 
       await expect(service.archive(treeA.root.session_id)).rejects.toThrow(/tenant.*scope/i);
     }, 30_000);
+
+    it('does not reveal another tenant’s unfinished tasks or archive its session', async () => {
+      const tenantA = `archive-busy-a-${generateId()}` as TenantID;
+      const tenantB = `archive-busy-b-${generateId()}` as TenantID;
+      const db = createTenantScopedDatabaseProxy(rawDb, { requireScope: true });
+      const tree = await runWithTenantDatabaseScope(db, tenantA, async (scoped) => {
+        const tree = await createTree(scoped, 'busy-a');
+        await new TaskRepository(scoped).create({
+          session_id: tree.child.session_id,
+          created_by: tree.child.created_by!,
+          status: 'queued',
+        });
+        return tree;
+      });
+      const service = new SessionsService(db, {
+        get: () => ({ execution: { branch_rbac: false } }),
+        service: () => ({ emit: () => undefined }),
+      } as unknown as Application);
+      await runWithTenantDatabaseScope(db, tenantA, async (scoped) => {
+        expect(
+          await new TaskRepository(scoped).findSessionIdsWithNonterminalTasks([
+            tree.child.session_id,
+          ])
+        ).toEqual(new Set([tree.child.session_id]));
+        await expect(service.archive(tree.root.session_id)).rejects.toMatchObject({ code: 409 });
+      });
+      await runWithTenantDatabaseScope(db, tenantB, async (scoped) => {
+        expect(
+          await new TaskRepository(scoped).findSessionIdsWithNonterminalTasks([
+            tree.child.session_id,
+          ])
+        ).toEqual(new Set());
+        await expect(service.archive(tree.root.session_id)).rejects.toMatchObject({ code: 404 });
+      });
+      await runWithTenantDatabaseScope(db, tenantA, async (scoped) => {
+        expect((await new SessionRepository(scoped).findById(tree.root.session_id))?.archived).toBe(
+          false
+        );
+      });
+    });
 
     it('rejects branch archive transitions while the tenant write gate is active', async () => {
       const tenantId = `archive-gated-${generateId()}` as TenantID;
