@@ -45,6 +45,7 @@ export type { ClaudeCodePermissionMode, CodexPermissionMode, PermissionMode } fr
 export * from './session';
 export * from './session-memory';
 export * from './task';
+export * from './teammate-skills';
 export * from './template';
 export * from './tenant';
 export * from './tenant-agentic-tool';
