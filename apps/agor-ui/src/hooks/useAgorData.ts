@@ -1517,6 +1517,13 @@ export function useAgorData(
     };
     const enqueueAuthoritativeSession = (session: Session) => {
       if (!subscriptionIsCurrent() || terminalReconciliationCancelled) return;
+      // Board list counts follow the lifecycle actually applied, so a held
+      // terminal downgrade only refreshes counts once it is confirmed.
+      const previousCountState =
+        realtimeSessionCountState.get(session.session_id) ??
+        agorStore.getState().sessionById.get(session.session_id);
+      realtimeSessionCountState.set(session.session_id, session);
+      if (countMembershipChanged(previousCountState, session)) noteCountAffectingEvent();
       realtimeSessionLifecycleState.set(session.session_id, session);
       bumpRevision('sessions');
       enqueueSessionPatch(subscriptionAuthorityScope, session);
@@ -1601,17 +1608,9 @@ export function useAgorData(
       const previous =
         realtimeSessionLifecycleState.get(session.session_id) ??
         agorStore.getState().sessionById.get(session.session_id);
-      // Fork board-list counts keep their own previous view and must observe
-      // every patch — including the terminal downgrade below, which returns
-      // early before the lifecycle path reaches the store.
-      const previousForCounts =
-        realtimeSessionCountState.get(session.session_id) ??
-        agorStore.getState().sessionById.get(session.session_id);
-      realtimeSessionCountState.set(session.session_id, session);
-      if (countMembershipChanged(previousForCounts, session)) noteCountAffectingEvent();
       if (previous && isSessionExecuting(previous) && !isSessionExecuting(session)) {
-        // The event still fences any load already in flight (its row stays
-        // live), even though its lifecycle downgrade is held for confirmation.
+        // The event still invalidates any hydration snapshot already in flight,
+        // even though its lifecycle downgrade is held for confirmation.
         bumpRevision('sessions', session.session_id);
         reconcileTerminalSession(session.session_id);
         return;
@@ -1627,10 +1626,10 @@ export function useAgorData(
     // store write.
     const sessionCreatedSync = (session: Session) => {
       if (!subscriptionIsCurrent()) return;
-      realtimeSessionCountState.set(session.session_id, session);
-      if (countsAsVisible(session)) noteCountAffectingEvent();
       cancelTerminalReconciliation(session.session_id);
       realtimeSessionLifecycleState.set(session.session_id, session);
+      realtimeSessionCountState.set(session.session_id, session);
+      if (countsAsVisible(session)) noteCountAffectingEvent();
       untombstoneSession(subscriptionAuthorityScope, session.session_id);
       scopedRealtime.sessionCreated(session);
     };

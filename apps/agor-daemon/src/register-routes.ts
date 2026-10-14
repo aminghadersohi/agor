@@ -2781,17 +2781,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         const promptProvenanceStamp =
           !params.provider && !data.idempotencyTaskId ? params._promptProvenance : undefined;
         const provenance = promptProvenanceStamp
-          ? await runWithTenantDatabaseScope(db, promptTenantId, (operationDb) =>
-              resolvePromptProvenance({
-                stamp: promptProvenanceStamp,
-                body: escapedBody.text,
-                escapedSentinels: escapedBody.escaped,
-                recipientSession: session,
-                branchRepo: new BranchRepository(operationDb),
-                findUserRole: async (userId) =>
-                  (await new UsersRepository(operationDb).findById(userId))?.role,
-              })
-            )
+          ? resolvePromptProvenance({
+              stamp: promptProvenanceStamp,
+              body: escapedBody.text,
+              escapedSentinels: escapedBody.escaped,
+            })
           : undefined;
         const admittedPrompt = provenance?.prompt ?? escapedBody.text;
 
@@ -2922,15 +2916,15 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
             }
             const compactionRequestId = (data.idempotencyTaskId ?? generateId()) as TaskID;
             const hasAttachmentSemantics =
-              data.prompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
-              data.prompt.includes('/_uploads/');
+              admittedPrompt.includes('Attachments — use `agor_upload_materialize` to access:') ||
+              admittedPrompt.includes('/_uploads/');
             const compactionEligible =
               !data.idempotencyTaskId &&
               !params._taskCompletionCallback &&
               data.metadata === undefined &&
               (messageSource === undefined || (!!params.provider && messageSource === 'agor')) &&
               !hasAttachmentSemantics &&
-              !data.prompt.trimStart().startsWith('/');
+              !admittedPrompt.trimStart().startsWith('/');
             // A preflight hint avoids preparation for known-busy sessions. The
             // repository rechecks queue/active work under its durable locks.
             // Stable-ID callback/widget producers keep their existing protocol.

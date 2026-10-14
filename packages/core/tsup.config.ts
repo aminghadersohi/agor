@@ -91,25 +91,19 @@ export default defineConfig({
     'mcp-catalog/index': 'src/mcp-catalog/index.ts', // MCP marketplace catalog: the checked-in file, and the connect probe
     'mcp-catalog/query': 'src/mcp-catalog/query.ts', // Browser-safe catalog filtering/ordering (no loader, no fs)
   },
-  format: ['cjs', 'esm'],
+  format: ['esm'],
   dts: false,
   clean: process.env.TSUP_CLEAN !== 'false',
-  // `splitting` is deliberately unset: tsup then splits the ESM build into
-  // shared root-level chunks (so the schema and repositories are not copied
-  // into every entry) and leaves CJS unsplit, avoiding tsup's experimental CJS
-  // splitting. Asset lookups that use __dirname/import.meta.url must accept
-  // both the entry directory and the dist root.
-  esbuildOptions(options) {
-    options.define = {
-      ...options.define,
-      __AGOR_CORE_CJS__: String(options.format === 'cjs'),
-    };
-  },
+  // Shared modules go to chunks evaluated once, so entries share one copy of
+  // tenant-scope stores and other module state (scripts/packaged-tenant-scope-
+  // smoke.mjs pins this). Under splitting, esbuild can't resolve names through
+  // `export * from '<external>'`; internal callers import @agor/git directly.
+  splitting: true,
   // These pure-JS, high-fanout feature dependencies are compiled into the
   // copied core artifact. Keeping them out of the consumer dependency graph
   // materially lowers cold-cache npm extraction concurrency and inode use.
   noExternal: [/^analytics$/, /^open$/, /^@octokit\/(auth-app|rest)$/],
-  shims: true, // Enable shims for import.meta.url in CJS builds
+  shims: true,
   // Don't bundle agent SDKs and Node.js-only dependencies
   external: [
     // Independently bundled tools and tenant-aware config resolution must share

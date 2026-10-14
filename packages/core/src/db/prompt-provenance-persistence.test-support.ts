@@ -36,9 +36,6 @@ export function stampedPrompt(): { prompt: string; block: string } {
     origin: {
       sessionId: ORIGIN_SESSION_ID,
       sessionShortId: '01a0d369',
-      branchVisible: true,
-      branchName: 'elena',
-      teammateName: 'Elena',
       agenticTool: 'claude-code',
     },
     userLabel: 'relay@example.invalid',
