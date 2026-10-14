@@ -166,7 +166,20 @@ type KnowledgeStub = ReturnType<typeof memoryKnowledge>;
 
 function fakeApp(knowledge: { current: KnowledgeStub }): Application {
   return {
-    get: (key: string) => (key === 'config' ? { execution: {} } : undefined),
+    get: (key: string) =>
+      key === 'config'
+        ? {
+            execution: {},
+            skills: {
+              providers: [
+                {
+                  namespace: 'team-skills',
+                  curator_branch_id: '01a00000-0000-7000-8000-000000000001',
+                },
+              ],
+            },
+          }
+        : undefined,
     sessionTokenService: { generateCommandToken: vi.fn(async () => 'command-token') },
     service: (path: string) => {
       if (path === 'kb/namespaces') return knowledge.current.namespaces;
@@ -455,7 +468,6 @@ describe('branches/:id/skills skill set release', () => {
         owner_user_id: f.owner.user_id as UserID,
         others_can: 'read',
         visibility_default: 'public',
-        metadata: { skills_provider: true },
       })
     );
     const put = (path: string, content: string) =>
@@ -502,7 +514,9 @@ describe('branches/:id/skills skill set release', () => {
             skills: [
               {
                 name: 'research-loop',
+                document_id: pinnedLoop.document_id,
                 version_id: pinnedLoop.version_id,
+                version_number: pinnedLoop.version_number,
                 sha256: pinnedLoop.sha256,
               },
             ],
