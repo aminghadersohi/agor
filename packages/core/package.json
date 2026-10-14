@@ -513,6 +513,18 @@
       "types": "./dist/oauth/rotating-grant-refresh.d.ts",
       "import": "./dist/oauth/rotating-grant-refresh.js",
       "default": "./dist/oauth/rotating-grant-refresh.js"
+    },
+    "./layout/rectangle-packing": {
+      "source": "./src/layout/rectangle-packing.ts",
+      "types": "./dist/layout/rectangle-packing.d.ts",
+      "import": "./dist/layout/rectangle-packing.js",
+      "default": "./dist/layout/rectangle-packing.js"
+    },
+    "./layout/justified-zones": {
+      "source": "./src/layout/justified-zones.ts",
+      "types": "./dist/layout/justified-zones.d.ts",
+      "import": "./dist/layout/justified-zones.js",
+      "default": "./dist/layout/justified-zones.js"
     }
   },
   "scripts": {

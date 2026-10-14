@@ -3,6 +3,8 @@ import { defineConfig } from 'tsup';
 
 export default defineConfig({
   entry: {
+    'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
+    'layout/justified-zones': 'src/layout/justified-zones.ts',
     index: 'src/index.ts',
     'analytics/index': 'src/analytics/index.ts', // Backend analytics logger and plugin resolution
     'telemetry/index': 'src/telemetry/index.ts', // Community install telemetry helpers
