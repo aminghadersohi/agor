@@ -64,6 +64,9 @@
       "kb": {
         "description": "Plan and migrate current Knowledge namespaces"
       },
+      "skills": {
+        "description": "Cut team skill set releases (admin)"
+      },
       "local": {
         "description": "Run local filesystem operations"
       },

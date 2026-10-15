@@ -138,6 +138,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'none',
     why: 'Pin/clear return the fresh front-desk view to the caller; other viewers refetch when they open the teammate.',
   },
+  'skills/releases': {
+    audience: 'none',
+    why: 'RPC-shaped admin command; the manifest write publishes through kb/documents.',
+  },
   'branches/:id/skills': {
     audience: 'none',
     why: 'Read-only query route; the Skills panel refetches on open.',

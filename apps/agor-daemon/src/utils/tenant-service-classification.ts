@@ -231,6 +231,10 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
     scopeClass: 'scoped',
     why: 'Fork teammate front desk. Registered through createTenantScopedAuthenticatedRouteRegistrar; reads and compare-and-swaps tenant-owned branch_front_desk_sessions rows under the tenant authorization fence in the armed request scope.',
   },
+  'skills/releases': {
+    scopeClass: 'scoped',
+    why: "Fork admin route behind `agor skills release`. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false); Knowledge reads and the manifest write go through the tenant-scoped kb/* services with the caller's params, and teammate lookups run in the armed request scope.",
+  },
   'branches/:id/skills': {
     scopeClass: 'scoped',
     why: 'Fork teammate Skills panel. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false, because one request may await several executor scans); read-only branch, session and Knowledge reads run in the armed request scope.',

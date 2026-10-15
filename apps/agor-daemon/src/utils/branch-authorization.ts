@@ -906,14 +906,18 @@ export function ensureSessionImmutability() {
   };
 }
 
+/** `custom_context` keys only the daemon writes. */
+const SERVER_MANAGED_SESSION_CONTEXT_KEYS = ['gateway_source', 'skills_receipt'] as const;
+
 /**
- * Keep gateway provenance under daemon ownership.
+ * Keep gateway provenance and the skills receipt under daemon ownership.
  *
- * Gateway integrations create sessions through provider-less service calls.
- * Browser, REST, Socket.IO, and MCP callers may still use the rest of
- * `custom_context`, but cannot create, replace, or clear `gateway_source`.
- * Session repository patches deep-merge nested context, so omitting this key
- * preserves an existing gateway stamp.
+ * Gateway integrations create sessions through provider-less service calls,
+ * and the executor launch records which skill set release a session was
+ * given. Browser, REST, Socket.IO, and MCP callers may still use the rest of
+ * `custom_context`, but cannot create, replace, or clear these keys. Session
+ * repository patches deep-merge nested context, so omitting a key preserves
+ * the existing value.
  */
 export function protectGatewaySourceMetadata(context: HookContext): HookContext {
   if (!context.params.provider) return context;
@@ -926,8 +930,10 @@ export function protectGatewaySourceMetadata(context: HookContext): HookContext 
     if (!customContext || typeof customContext !== 'object' || Array.isArray(customContext)) {
       throw new BadRequest('session.custom_context must be an object');
     }
-    if (Object.hasOwn(customContext, 'gateway_source')) {
-      throw new Forbidden('session.custom_context.gateway_source is server-managed');
+    for (const key of SERVER_MANAGED_SESSION_CONTEXT_KEYS) {
+      if (Object.hasOwn(customContext, key)) {
+        throw new Forbidden(`session.custom_context.${key} is server-managed`);
+      }
     }
   }
 

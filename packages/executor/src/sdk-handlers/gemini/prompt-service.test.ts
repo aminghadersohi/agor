@@ -98,6 +98,7 @@ vi.mock('@agor/core/agentic-integrations', () => ({
 }));
 
 import { expectSignalQuiescence } from '../../../test/helpers/signal-quiescence.js';
+import { setAgorSkillsIndex } from '../../agor-skills-index.js';
 import { GeminiPromptService, resolveGeminiInvocationModel } from './prompt-service.js';
 import { findGeminiRecording } from './runtime.js';
 import { Gemini } from './sdk.js';
@@ -217,6 +218,24 @@ describe('Gemini prompt boundary', () => {
       usage: { input_tokens: 4, output_tokens: 2 },
     });
     expect(state.dispose).toHaveBeenCalledOnce();
+  });
+  it('appends the team skills index to userMemory', async () => {
+    state.events = [[event('content', 'answer'), event('finished', {})]];
+    setAgorSkillsIndex(
+      '## Team skills (Frink r2)\n- research-loop v1 [ns/skills/frink/research-loop.md]'
+    );
+    try {
+      await collect();
+    } finally {
+      setAgorSkillsIndex(undefined);
+    }
+    const memory = (state.config.mock.calls.at(-1)![0] as { userMemory: string }).userMemory;
+    expect(memory).toContain('agor_sessions_get_current_context');
+    expect(
+      memory.endsWith(
+        '\n\n## Team skills (Frink r2)\n- research-loop v1 [ns/skills/frink/research-loop.md]'
+      )
+    ).toBe(true);
   });
   it('records every tool result and sums model turns, keeping last context usage', async () => {
     state.events = [

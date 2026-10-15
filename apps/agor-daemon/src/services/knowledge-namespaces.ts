@@ -23,7 +23,9 @@ import type {
   User,
   UserID,
 } from '@agor/core/types';
+import { normalizeKnowledgeNamespaceSlug } from '@agor/core/types';
 import { DrizzleService } from '../adapters/drizzle';
+import { configuredProviderSlugs } from '../skills/skillset-governance.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import { isKnowledgeAdmin } from './knowledge-access.js';
 
@@ -314,6 +316,17 @@ export class KnowledgeNamespacesService extends DrizzleService<
     params?: KnowledgeNamespaceParams
   ): Promise<KnowledgeNamespace> {
     const userId = params?.user?.user_id as UserID | undefined;
+    if (
+      typeof data.slug === 'string' &&
+      configuredProviderSlugs(this.app?.get?.('config')).has(
+        normalizeKnowledgeNamespaceSlug(data.slug)
+      ) &&
+      !this.isAdmin(params?.user as User | undefined)
+    ) {
+      throw new Forbidden(
+        `${data.slug} is a configured skills provider namespace; only an admin can create it.`
+      );
+    }
     const createdBy = this.attributionUserId(params, data.created_by);
     const result = await this.repo.create({
       ...data,

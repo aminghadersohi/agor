@@ -138,6 +138,104 @@ describe('TeammateSkillsPanel', () => {
     expect(screen.getByText('Skills — Lagertha')).toBeInTheDocument();
   });
 
+  it('shows the equipped release, each pin and what the last session got', async () => {
+    const base = baseReport();
+    const report = baseReport({
+      skills: base.skills
+        .map((skill) =>
+          skill.name === 'verifying-a-fix'
+            ? {
+                ...skill,
+                pin: {
+                  release: 3,
+                  version_number: 2,
+                  status: 'update_available',
+                  latest_version_number: 3,
+                },
+                delivered: true,
+              }
+            : skill
+        )
+        .concat([
+          {
+            name: 'tampered',
+            source: 'knowledge',
+            status: 'ok',
+            version_label: 'v1',
+            pin: { release: 3, version_number: 1, status: 'hash_mismatch' },
+          },
+          {
+            name: 'steady',
+            source: 'knowledge',
+            status: 'ok',
+            version_label: 'v4',
+            pin: { release: 3, version_number: 4, status: 'current', latest_version_number: 4 },
+            delivered: true,
+          },
+        ]),
+      release: {
+        status: 'ok',
+        enabled: true,
+        namespace_slug: 'assistant-frink',
+        path: 'skillsets/lagertha.md',
+        release: 3,
+        created_at: '2026-10-10T00:00:00.000Z',
+        counts: { current: 1, update_available: 1, hash_mismatch: 1 },
+        unreleased: 2,
+        delivered: {
+          session_id: 'session-1' as never,
+          release: 3,
+          delivered_at: '2026-10-11T00:00:00.000Z',
+          harness: 'codex',
+          skills: 2,
+        },
+      },
+    });
+    const { client } = clientAnswering(async () => report);
+    renderPanel(client);
+
+    const line = await screen.findByTestId('teammate-skills-release');
+    expect(within(line).getByText('Release r3')).toBeInTheDocument();
+    expect(within(line).getByText('1 update available')).toBeInTheDocument();
+    expect(within(line).getByText('1 hash mismatch')).toBeInTheDocument();
+    expect(within(line).getByText(/2 not in a release yet/)).toBeInTheDocument();
+    expect(within(line).getByTestId('teammate-skills-delivered')).toHaveTextContent(
+      /Last session got r3 \(2 skills, codex\)/
+    );
+    expect(screen.getAllByTestId('teammate-skill-pin').map((tag) => tag.textContent)).toEqual([
+      'update available',
+      'hash mismatch',
+      'r3 · v4',
+    ]);
+    expect(screen.getAllByTestId('teammate-skill-delivered')).toHaveLength(2);
+
+    // A changed pin is a problem; an available update is not.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only problems' }));
+    expect(
+      screen
+        .getAllByTestId('teammate-skill-row')
+        .map((row) => within(row).getAllByRole('button')[0].textContent)
+    ).toEqual(['django-perf-review', 'tampered']);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only problems' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'verifying-a-fix' }));
+    const drawer = await screen.findByRole('dialog');
+    expect(
+      within(drawer).getByText('r3 pins v2 · v3 is newer (update available)')
+    ).toBeInTheDocument();
+    expect(within(drawer).getByText(/In the last session, as part of r3/)).toBeInTheDocument();
+  });
+
+  it('says when there is no release, or delivery is off', async () => {
+    const { client } = clientAnswering(async () =>
+      baseReport({ release: { status: 'none', enabled: false } })
+    );
+    renderPanel(client);
+    const line = await screen.findByTestId('teammate-skills-release');
+    expect(within(line).getByText('Skills delivery off for this teammate')).toBeInTheDocument();
+    expect(within(line).getByText('No skill set release yet.')).toBeInTheDocument();
+  });
+
   it('filters by search, source and problems', async () => {
     const { client } = clientAnswering(async () => baseReport());
     renderPanel(client);
