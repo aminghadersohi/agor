@@ -386,6 +386,8 @@ export interface SessionPanelProps {
   branch?: Branch | null;
   currentUserId?: string;
   sessionMcpServerIds?: string[];
+  sessionMcpLoadFailed?: boolean;
+  onSessionMcpRetry?: () => void;
   open: boolean;
   onClose: () => void;
   /** Opens the chat collections manager on this session; the header action hides without it. */
@@ -403,6 +405,8 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
   branch = null,
   currentUserId,
   sessionMcpServerIds = [],
+  sessionMcpLoadFailed = false,
+  onSessionMcpRetry,
   open,
   onClose,
   onPinToChatCollection,
@@ -1614,6 +1618,8 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
       latestContextWindow={latestContextWindow}
       footerGradient={footerGradient}
       sessionMcpServerIds={sessionMcpServerIds}
+      sessionMcpLoadFailed={sessionMcpLoadFailed}
+      onSessionMcpRetry={onSessionMcpRetry}
       unauthedMcpServers={unauthedMcpServers}
       mcpServerById={mcpServerById}
       userAuthenticatedMcpServerIds={userAuthenticatedMcpServerIds}

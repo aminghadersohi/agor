@@ -97,7 +97,11 @@ export const SessionPage: React.FC<SessionPageProps> = ({
   usePinnedOpenRows({ sessions: [canonicalSessionId] });
 
   // Loaded on first need; the footer's edit control waits for it.
-  const { ids: sessionMcpServerIds } = useSessionMcpServerIds(client, canonicalSessionId);
+  const {
+    ids: sessionMcpServerIds,
+    failed: sessionMcpLoadFailed,
+    retry: retrySessionMcpLoad,
+  } = useSessionMcpServerIds(client, canonicalSessionId);
 
   const loading = useAgorStore((state) => state.loading);
   // "Not loaded" only once the targeted read missed (`useAgorData`), or once a
@@ -203,6 +207,8 @@ export const SessionPage: React.FC<SessionPageProps> = ({
           branch={branch}
           currentUserId={currentUser?.user_id}
           sessionMcpServerIds={sessionMcpServerIds}
+          sessionMcpLoadFailed={sessionMcpLoadFailed}
+          onSessionMcpRetry={retrySessionMcpLoad}
           open
           onClose={closeSession}
           onPinToChatCollection={onPinToChatCollection}
