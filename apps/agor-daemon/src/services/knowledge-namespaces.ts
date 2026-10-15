@@ -23,6 +23,7 @@ import type {
   User,
   UserID,
 } from '@agor/core/types';
+import { normalizeKnowledgeNamespaceSlug } from '@agor/core/types';
 import { DrizzleService } from '../adapters/drizzle';
 import { configuredProviderSlugs } from '../skills/skillset-governance.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
@@ -317,7 +318,9 @@ export class KnowledgeNamespacesService extends DrizzleService<
     const userId = params?.user?.user_id as UserID | undefined;
     if (
       typeof data.slug === 'string' &&
-      configuredProviderSlugs(this.app?.get?.('config')).has(data.slug.trim()) &&
+      configuredProviderSlugs(this.app?.get?.('config')).has(
+        normalizeKnowledgeNamespaceSlug(data.slug)
+      ) &&
       !this.isAdmin(params?.user as User | undefined)
     ) {
       throw new Forbidden(

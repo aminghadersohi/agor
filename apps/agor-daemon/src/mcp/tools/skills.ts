@@ -344,8 +344,11 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
         namespaces,
         teammate: single,
         listAllTeammates: (namespace) =>
-          runWithMcpTenantDatabaseScope(ctx, (db) =>
-            releaseAllTeammates(db, ctx.userId, provider, namespace)
+          releaseAllTeammates(
+            (work) => runWithMcpTenantDatabaseScope(ctx, work),
+            ctx.userId,
+            provider,
+            namespace
           ),
         authorize: (namespace) =>
           curatorAuthorization(

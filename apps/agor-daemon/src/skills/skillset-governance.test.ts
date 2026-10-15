@@ -4,7 +4,7 @@
  * an admin outside any session reaches the admin release route.
  */
 
-import { createTenantScopedDatabaseProxy } from '@agor/core/db';
+import { createTenantScopedDatabaseProxy, KnowledgeNamespaceRepository } from '@agor/core/db';
 import { ROLES, type User } from '@agor/core/types';
 import { describe, expect, it } from 'vitest';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
@@ -21,7 +21,9 @@ import { EXECUTOR_SESSION_TOKEN_TYPE } from '../auth/executor-session-token';
 import { KnowledgeDocumentEditsService } from '../services/knowledge-document-edits';
 import { KnowledgeTransfersService } from '../services/knowledge-transfers';
 import { assertAdminOutsideSession, createSkillReleasesRoute } from '../services/skill-releases';
+import { KnowledgeSkillProvider } from './knowledge-skill-provider';
 import { SKILLSET_GOVERNED_MESSAGE } from './skillset-governance';
+import { SkillSets } from './skillsets';
 
 const FORBIDDEN =
   /skillsets\/ in a skills provider namespace is written only by skill set releases/;
@@ -52,7 +54,12 @@ async function releasedNamespace(db: Parameters<typeof skillsKnowledgeApp>[0]) {
 }
 
 function adminCli(user: User) {
-  return { user, provider: 'rest', authentication: { strategy: 'jwt', payload: {} } } as never;
+  return {
+    user,
+    provider: 'rest',
+    authentication: { strategy: 'jwt', payload: {} },
+    tenant: { tenant_id: 'default', source: 'explicit' },
+  } as never;
 }
 
 function put(fixture: SkillsKnowledgeFixture, user: User, data: Record<string, unknown>) {
@@ -155,6 +162,63 @@ describe('skill set governance on Knowledge writes', () => {
     expect(SKILLSET_GOVERNED_MESSAGE).toMatch(FORBIDDEN);
   });
 
+  dbTest.for(['patch', 'update'] as const)(
+    'a forged namespace in a %s cannot smuggle a release into skillsets/',
+    async (method, { db }) => {
+      const { fixture, admin, member, ns } = await releasedNamespace(db);
+      const elsewhere = await seedSkillsNamespace(db, member, {
+        provider: false,
+        othersCan: 'write',
+      });
+      // A forged r99 pinning an unapproved version, parked under notes/ in the provider.
+      const forged = await put(fixture, member, {
+        namespace_slug: ns.slug,
+        path: 'notes/forged.md',
+        kind: 'bundle',
+        content_text:
+          '---\nname: professor\nteammate: Professor Frink\nrelease: 99\nskills:\n  - name: research-loop\n    document_id: x\n    path: skills/frink/research-loop.md\n    version_id: y\n    version_number: 2\n    sha256: z\n---\n',
+      });
+      const move = (data: Record<string, unknown>) =>
+        method === 'patch'
+          ? fixture.documents.patch(forged.document_id, data as never, userParams(member) as never)
+          : fixture.documents.update(
+              forged.document_id,
+              { ...data, kind: 'bundle', title: 'forged' } as never,
+              userParams(member) as never
+            );
+      // Naming another namespace is refused outright, whatever path it claims.
+      await expect(
+        move({ namespace_id: elsewhere.namespace_id, path: 'skillsets/professor.md' })
+      ).rejects.toThrow(/namespace_id does not match the document/);
+      await expect(
+        move({ namespace_slug: elsewhere.slug, path: 'skillsets/professor.md' })
+      ).rejects.toThrow(/namespace_slug does not match the document/);
+      // Without the forged namespace it is an ordinary write into skillsets/: governed.
+      await expect(move({ path: 'skillsets/professor.md' })).rejects.toThrow(FORBIDDEN);
+      // The matching namespace, with surrounding whitespace, is still the same namespace: governed.
+      await expect(
+        move({ namespace_slug: ` ${ns.slug} `, path: 'skillsets/professor.md' })
+      ).rejects.toThrow(FORBIDDEN);
+
+      // The legitimate release is still the one a teammate resolves to.
+      const sets = new SkillSets(new KnowledgeSkillProvider(fixture.app, userParams(admin)));
+      const [namespace] = await new KnowledgeSkillProvider(
+        fixture.app,
+        userParams(admin)
+      ).providerNamespaces();
+      const record = await sets.find(namespace, {
+        name: 'Professor Frink',
+        keys: ['professor', 'frink', 'professor-frink'],
+      });
+      expect(record).toMatchObject({ path: 'skillsets/frink.md', manifest: { release: 1 } });
+      const shadow = await fixture.documents.find({
+        ...userParams(admin),
+        query: { namespace_id: ns.namespace_id, path: 'skillsets/professor.md' },
+      } as never);
+      expect(shadow.data).toEqual([]);
+    }
+  );
+
   dbTest('leaves other namespaces and other paths alone', async ({ db }) => {
     const { fixture, member, ns } = await releasedNamespace(db);
     const plain = await seedSkillsNamespace(db, member, { provider: false, othersCan: 'write' });
@@ -195,6 +259,21 @@ describe('skill set governance on Knowledge writes', () => {
         userParams(member) as never
       )
     ).rejects.toThrow(/only an admin can create it/);
+    // Whitespace around the slug is the same slug (M2).
+    for (const variant of [' not-created-yet ', '\tnot-created-yet\n']) {
+      await expect(
+        put(fixture, member, {
+          namespace_slug: variant,
+          path: 'skills/x/README.md',
+          content_text: '# x',
+          create_namespace: true,
+        })
+      ).rejects.toThrow(/only an admin can create it/);
+      await expect(
+        fixture.namespaces.create({ slug: variant, display_name: 'x' }, userParams(member) as never)
+      ).rejects.toThrow(/only an admin can create it/);
+    }
+    expect(await new KnowledgeNamespaceRepository(db).findBySlug('not-created-yet')).toBeNull();
     const transfers = new KnowledgeTransfersService(
       createTenantScopedDatabaseProxy(db, { requireScope: false }) as never,
       fixture.app
@@ -212,6 +291,20 @@ describe('skill set governance on Knowledge writes', () => {
         { user: member } as never
       )
     ).rejects.toThrow(/only an admin can create it/);
+    await expect(
+      transfers.create(
+        {
+          action: 'namespace',
+          bundle: 'b'.repeat(64),
+          slug: ' not-created-yet ',
+          display_name: 'x',
+          description: null,
+          resume: false,
+        } as never,
+        { user: member } as never
+      )
+    ).rejects.toThrow();
+    expect(await new KnowledgeNamespaceRepository(db).findBySlug('not-created-yet')).toBeNull();
   });
 });
 

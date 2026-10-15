@@ -53,17 +53,20 @@ export async function releaseNamespaces(
  * visible teammate claims, addressed by its folder key.
  */
 export async function releaseAllTeammates(
-  db: TenantScopeAwareDatabase,
+  /** Runs `work` in a tenant-bound database unit (the caller's scope). */
+  withDb: <T>(work: (db: TenantScopeAwareDatabase) => Promise<T>) => Promise<T>,
   userId: UserID,
   provider: KnowledgeSkillProvider,
   namespace: KnowledgeNamespace
 ): Promise<SkillTeammate[]> {
-  const branches = await new BranchRepository(db).findTeammateBranches({
-    archived: false,
-    userId,
-    minimumPermission: 'view',
-    limit: RELEASE_ALL_TEAMMATE_LIMIT,
-  });
+  const branches = await withDb((db) =>
+    new BranchRepository(db).findTeammateBranches({
+      archived: false,
+      userId,
+      minimumPermission: 'view',
+      limit: RELEASE_ALL_TEAMMATE_LIMIT,
+    })
+  );
   const teammates = new Map<string, SkillTeammate>();
   for (const branch of branches) {
     const teammate = skillTeammateOf(branch);
