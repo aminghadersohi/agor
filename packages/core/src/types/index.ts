@@ -45,6 +45,7 @@ export * from './schedule';
 export type { ClaudeCodePermissionMode, CodexPermissionMode, PermissionMode } from './session';
 export * from './session';
 export * from './session-memory';
+export * from './skills';
 export * from './task';
 export * from './teammate-skills';
 export * from './template';
