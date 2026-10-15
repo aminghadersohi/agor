@@ -23,7 +23,7 @@ import {
   Typography,
 } from 'antd';
 import type { CSSProperties } from 'react';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mapToArray, mapToSortedArray } from '@/utils/mapHelpers';
 import { filterBySettingsSearch } from '@/utils/settingsSearch';
 import { uiRouteHref } from '@/utils/uiRoutes';
@@ -32,10 +32,10 @@ import { useEnsureBranches } from '../../hooks/useEnsureRows';
 import { ArtifactBindingsList } from '../artifacts/ArtifactBindingsList';
 import { boardSelectFilter, boardSelectOptions, getBoardEmoji } from '../BoardTile';
 import { HighlightMatch } from '../HighlightMatch';
-import { AdaptiveSettingsModal } from './AdaptiveSettingsModal';
 import { ResponsiveSettingsHeader } from './ResponsiveSettingsHeader';
 import { ResponsiveTable } from './ResponsiveTable';
 import { SettingsActionGroup } from './SettingsActionGroup';
+import { DrillInFrame, useDrillFormDraft, useSettingsDrill } from './SettingsDrill';
 import { SettingsIdentity } from './SettingsIdentity';
 
 interface ArtifactsTableProps {
@@ -80,12 +80,14 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
   onDelete,
   onClose,
 }) => {
-  const [editModalOpen, setEditModalOpen] = useState(false);
-  const [editingArtifact, setEditingArtifact] = useState<Artifact | null>(null);
+  // Edit artifact is a drill-in (no stacked modal on top of Settings).
+  const { drill, openDrill, closeDrill } = useSettingsDrill();
   const [searchTerm, setSearchTerm] = useState('');
   const [bindings, setBindings] = useState<BindingsState | null>(null);
   const bindingsRequestRef = useRef(0);
   const [form] = Form.useForm();
+  const editingArtifact =
+    drill?.mode === 'edit' && drill.recordId ? (artifactById.get(drill.recordId) ?? null) : null;
   // The store holds only the loaded scopes' branches: read the ones artifacts name.
   useEnsureBranches(
     client,
@@ -107,58 +109,68 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
     [onClose, navigation]
   );
 
-  // The canvas list hydrates metadata only, so the declared bindings
-  // (`agor_runtime.interactions`) come from a point read when the modal opens.
-  const loadBindings = async (artifactId: string) => {
-    const requestId = ++bindingsRequestRef.current;
-    if (!client) {
-      setBindings(null);
-      return;
-    }
-    setBindings({ status: 'loading' });
-    try {
-      const artifact = await client.service('artifacts').get(artifactId);
-      if (bindingsRequestRef.current !== requestId) return;
-      setBindings({ status: 'loaded', config: artifact.agor_runtime?.interactions });
-    } catch (error) {
-      if (bindingsRequestRef.current !== requestId) return;
-      setBindings({
-        status: 'error',
-        message: error instanceof Error ? error.message : 'Failed to load bindings',
-      });
-    }
-  };
+  const handleEdit = (artifact: Artifact) =>
+    openDrill({ mode: 'edit', recordId: artifact.artifact_id });
 
-  const handleEdit = (artifact: Artifact) => {
-    setEditingArtifact(artifact);
-    form.setFieldsValue({
-      name: artifact.name,
-      description: artifact.description || '',
-      board_id: artifact.board_id,
-    });
-    setEditModalOpen(true);
-    void loadBindings(artifact.artifact_id);
-  };
+  // Seeds an opened artifact once; later record updates never overwrite the draft.
+  const isDraftDirty = useDrillFormDraft(
+    form,
+    drill,
+    useMemo(
+      () =>
+        editingArtifact && {
+          name: editingArtifact.name,
+          description: editingArtifact.description || '',
+          board_id: editingArtifact.board_id,
+        },
+      [editingArtifact]
+    )
+  );
+
+  // Read bindings when the editor opens; fence responses after close or switch.
+  useEffect(() => {
+    const requestId = ++bindingsRequestRef.current;
+    const artifactId = editingArtifact?.artifact_id;
+    setBindings(null);
+    if (!client || !artifactId) return;
+    setBindings({ status: 'loading' });
+    void client
+      .service('artifacts')
+      .get(artifactId)
+      .then(
+        (artifact) => {
+          if (bindingsRequestRef.current === requestId) {
+            setBindings({ status: 'loaded', config: artifact.agor_runtime?.interactions });
+          }
+        },
+        (error: unknown) => {
+          if (bindingsRequestRef.current === requestId) {
+            setBindings({
+              status: 'error',
+              message: error instanceof Error ? error.message : 'Failed to load bindings',
+            });
+          }
+        }
+      );
+    return () => {
+      bindingsRequestRef.current += 1;
+    };
+  }, [client, editingArtifact?.artifact_id]);
 
   const handleUpdate = () => {
     if (!editingArtifact) return;
     form.validateFields().then((values) => {
-      // Build a patch of only fields that actually changed. If nothing
-      // changed, skip the network round-trip entirely — avoids firing a
-      // spurious `patched` broadcast for a no-op submit.
+      // Patch only what this draft changed since it was seeded, so a
+      // concurrent edit to another field survives; a no-op submit sends nothing.
+      const changed = isDraftDirty.changedValues();
       const updates: Partial<Artifact> = {};
-      const nextName = values.name;
-      const nextDescription = values.description || undefined;
-      const currentDescription = editingArtifact.description || undefined;
-      if (nextName !== editingArtifact.name) updates.name = nextName;
-      if (nextDescription !== currentDescription) updates.description = nextDescription;
-      if (values.board_id && values.board_id !== editingArtifact.board_id) {
-        updates.board_id = values.board_id;
-      }
+      if ('name' in changed) updates.name = values.name;
+      if ('description' in changed) updates.description = values.description || undefined;
+      if ('board_id' in changed && values.board_id) updates.board_id = values.board_id;
       if (Object.keys(updates).length > 0) {
         onUpdate?.(editingArtifact.artifact_id, updates);
       }
-      setEditModalOpen(false);
+      closeDrill();
     });
   };
 
@@ -325,19 +337,85 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
     ]);
   }, [artifactById, searchTerm, branchById, boardById, userById]);
 
+  // Edit artifact drills in place of the list (no stacked modal). Early-returned
+  // so the Content pane swaps list↔editor; the shell footer renders Save/Cancel
+  // and the breadcrumb ("Artifacts ›") backs out via closeDrill.
+  if (editingArtifact) {
+    return (
+      <DrillInFrame
+        title="Edit Artifact"
+        dirty={isDraftDirty}
+        onSave={handleUpdate}
+        onBack={() => {
+          form.resetFields();
+          closeDrill();
+        }}
+      >
+        <Typography.Paragraph type="secondary">
+          Created {new Date(editingArtifact.created_at).toLocaleString()}
+          <br />
+          Source branch:{' '}
+          {editingArtifact.branch_id
+            ? branchById.get(editingArtifact.branch_id)?.name || 'Unavailable branch'
+            : 'Not recorded'}
+        </Typography.Paragraph>
+        <Form form={form} layout="vertical" style={{ maxWidth: 520 }}>
+          <Form.Item
+            label="Name"
+            name="name"
+            rules={[{ required: true, message: 'Please enter a name' }]}
+          >
+            <Input placeholder="My Artifact" />
+          </Form.Item>
+          <Form.Item label="Description" name="description">
+            <Input.TextArea rows={3} placeholder="Optional description" />
+          </Form.Item>
+          <Form.Item
+            label="Board"
+            name="board_id"
+            tooltip="Move this artifact to a different board. Its position on the board is preserved."
+            rules={[{ required: true, message: 'Please select a board' }]}
+          >
+            <Select
+              showSearch
+              placeholder="Select board..."
+              options={boardOptions}
+              filterOption={boardSelectFilter}
+            />
+          </Form.Item>
+          {bindings && (
+            <Form.Item
+              label="Interaction bindings"
+              tooltip="What this artifact's buttons and live data can do. Read-only here; agents change bindings with agor_artifacts_update."
+            >
+              {bindings.status === 'loading' ? (
+                <Spin size="small" />
+              ) : bindings.status === 'error' ? (
+                <Typography.Text type="danger">{bindings.message}</Typography.Text>
+              ) : (
+                <ArtifactBindingsList config={bindings.config} />
+              )}
+            </Form.Item>
+          )}
+        </Form>
+      </DrillInFrame>
+    );
+  }
+
   return (
     <div>
       <ResponsiveSettingsHeader
+        title="Artifacts"
         description="Live web application artifacts created by agents via MCP tools."
-        actions={(compact) => (
+        search={
           <Input
             allowClear
             placeholder="Search name, description, template, branch, board, or owner"
             value={searchTerm}
             onChange={(event) => setSearchTerm(event.target.value)}
-            style={{ width: compact ? '100%' : 360, maxWidth: '100%' }}
           />
-        )}
+        }
+        count={`${dataSource.length} ${dataSource.length === 1 ? 'artifact' : 'artifacts'}`}
       />
 
       {dataSource.length === 0 ? (
@@ -368,72 +446,6 @@ export const ArtifactsTable: React.FC<ArtifactsTableProps> = ({
           tableLayout="fixed"
           scroll={{ x: 700 }}
         />
-      )}
-
-      {editingArtifact && (
-        <AdaptiveSettingsModal
-          title="Edit Artifact"
-          open={editModalOpen}
-          onOk={handleUpdate}
-          onCancel={() => {
-            setEditModalOpen(false);
-          }}
-          afterClose={() => {
-            form.resetFields();
-            setEditingArtifact(null);
-            bindingsRequestRef.current += 1;
-            setBindings(null);
-          }}
-          okText="Save"
-        >
-          <Typography.Paragraph type="secondary">
-            Created {new Date(editingArtifact.created_at).toLocaleString()}
-            <br />
-            Source branch:{' '}
-            {editingArtifact.branch_id
-              ? branchById.get(editingArtifact.branch_id)?.name || 'Unavailable branch'
-              : 'Not recorded'}
-          </Typography.Paragraph>
-          <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
-            <Form.Item
-              label="Name"
-              name="name"
-              rules={[{ required: true, message: 'Please enter a name' }]}
-            >
-              <Input placeholder="My Artifact" />
-            </Form.Item>
-            <Form.Item label="Description" name="description">
-              <Input.TextArea rows={3} placeholder="Optional description" />
-            </Form.Item>
-            <Form.Item
-              label="Board"
-              name="board_id"
-              tooltip="Move this artifact to a different board. Its position on the board is preserved."
-              rules={[{ required: true, message: 'Please select a board' }]}
-            >
-              <Select
-                showSearch
-                placeholder="Select board..."
-                options={boardOptions}
-                filterOption={boardSelectFilter}
-              />
-            </Form.Item>
-            {bindings && (
-              <Form.Item
-                label="Interaction bindings"
-                tooltip="What this artifact's buttons and live data can do. Read-only here; agents change bindings with agor_artifacts_update."
-              >
-                {bindings.status === 'loading' ? (
-                  <Spin size="small" />
-                ) : bindings.status === 'error' ? (
-                  <Typography.Text type="danger">{bindings.message}</Typography.Text>
-                ) : (
-                  <ArtifactBindingsList config={bindings.config} />
-                )}
-              </Form.Item>
-            )}
-          </Form>
-        </AdaptiveSettingsModal>
       )}
     </div>
   );

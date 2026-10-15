@@ -57,6 +57,9 @@ it('renders an asynchronously created branch in its zone without remounting the 
   setRealtimeAuthorityScope('creation-user:member:1');
   markBoardLoaded(board.board_id);
   const client = {
+    on: vi.fn(),
+    off: vi.fn(),
+    io: { on: vi.fn(), off: vi.fn(), emit: vi.fn(), volatile: { emit: vi.fn() } },
     service: () => ({
       find: async () => ({ data: [], capabilities: [] }),
       get: async () => ({ capabilities: [] }),

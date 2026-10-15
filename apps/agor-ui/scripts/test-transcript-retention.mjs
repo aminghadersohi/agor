@@ -170,15 +170,21 @@ test('a reopened file edit, keyboard focus or a selection keeps its turn while e
     });
     // A reader selects text in turn 21.
     const selected = await page.evaluate(
-      (id) => {
+      async (id) => {
         const root = document.querySelector(`[data-task-block="${id}"]`);
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
         let node = walker.nextNode();
         while (node && !node.data.includes('Answer 21')) node = walker.nextNode();
         const range = document.createRange();
         range.selectNodeContents(node);
+        // Let the native selectionchange reach the retention listener before
+        // injecting another turn that can evict unprotected detail.
+        const changed = new Promise((resolve) =>
+          document.addEventListener('selectionchange', resolve, { once: true })
+        );
         document.getSelection().removeAllRanges();
         document.getSelection().addRange(range);
+        await changed;
         return document.getSelection().toString();
       },
       await page.evaluate(() => window.transcriptRetentionFixture.taskId(21))
