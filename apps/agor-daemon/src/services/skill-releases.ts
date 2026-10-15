@@ -13,7 +13,11 @@
  * Knowledge version and in the manifest is the admin.
  */
 
-import type { TenantScopeAwareDatabase } from '@agor/core/db';
+import {
+  requireCurrentTenantId,
+  runWithTenantDatabaseScope,
+  type TenantScopeAwareDatabase,
+} from '@agor/core/db';
 import { type Application, BadRequest, Forbidden, NotAuthenticated } from '@agor/core/feathers';
 import {
   type AuthenticatedParams,
@@ -129,14 +133,24 @@ export function createSkillReleasesRoute(options: { db: TenantScopeAwareDatabase
         throw new BadRequest('expectedVersion needs --namespace when several providers exist.');
       }
       const userId = user.user_id as UserID;
+      // The route has tenant context but no request-long transaction
+      // (`transaction: false`); each direct read opens its own short,
+      // tenant-bound unit. Knowledge reads and writes go through kb/* services.
+      const tenantId =
+        authenticated.tenant?.tenant_id ??
+        requireCurrentTenantId('Missing tenant context for skill releases');
+      const withDb = <T>(work: (scoped: TenantScopeAwareDatabase) => Promise<T>): Promise<T> =>
+        runWithTenantDatabaseScope(db, tenantId, (scoped) =>
+          work(scoped as unknown as TenantScopeAwareDatabase)
+        );
       const teammate = request.teammate
-        ? await resolveSkillTeammate(db, request.teammate, userId)
+        ? await withDb((scoped) => resolveSkillTeammate(scoped, request.teammate as string, userId))
         : null;
       return runReleases({
         provider,
         namespaces,
         teammate,
-        listAllTeammates: (namespace) => releaseAllTeammates(db, userId, provider, namespace),
+        listAllTeammates: (namespace) => releaseAllTeammates(withDb, userId, provider, namespace),
         authorize: () => ({ allowed: true, as: 'admin' }),
         actor: userId,
         ...(request.expectedVersion !== undefined

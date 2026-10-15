@@ -30,6 +30,7 @@ import {
   knowledgeTransferHash,
   knowledgeTransferSlug,
   knowledgeTransferWriteSchema,
+  normalizeKnowledgeNamespaceSlug,
   ROLES,
 } from '@agor/core/types';
 import { z } from 'zod';
@@ -261,7 +262,9 @@ export class KnowledgeTransfersService {
         if (await namespaces.findBySlug(data.slug))
           throw new Conflict('Destination namespace already exists');
         if (
-          configuredProviderSlugs(this.app?.get?.('config')).has(data.slug) &&
+          configuredProviderSlugs(this.app?.get?.('config')).has(
+            normalizeKnowledgeNamespaceSlug(data.slug)
+          ) &&
           !isKnowledgeAdmin(user as never)
         ) {
           throw new Forbidden(

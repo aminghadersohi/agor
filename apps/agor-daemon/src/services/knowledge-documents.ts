@@ -46,6 +46,7 @@ import {
   extractKnowledgeLinks,
   KNOWLEDGE_ARCHIVE_FILTERS,
   normalizeKnowledgeDocumentIconEmoji,
+  normalizeKnowledgeNamespaceSlug,
   parseKnowledgeUri,
   titleFromKnowledgeContent,
 } from '@agor/core/types';
@@ -274,7 +275,8 @@ export class KnowledgeDocumentsService extends DrizzleService<
 
   /** Refuse to create a namespace whose slug is a configured provider, unless an admin does. */
   private assertMayCreateNamespaceSlug(slug: string, user?: User): void {
-    if (configuredProviderSlugs(this.app?.get?.('config')).has(slug) && !this.isAdmin(user)) {
+    const canonical = normalizeKnowledgeNamespaceSlug(slug);
+    if (configuredProviderSlugs(this.app?.get?.('config')).has(canonical) && !this.isAdmin(user)) {
       throw new Forbidden(
         `${slug} is a configured skills provider namespace; only an admin can create it.`
       );
@@ -319,6 +321,35 @@ export class KnowledgeDocumentsService extends DrizzleService<
     const namespace = await this.namespaces.findById(document.namespace_id);
     if (!namespace || namespace.archived) {
       throw new NotFound('Knowledge document not found');
+    }
+  }
+
+  /**
+   * A document never changes namespace through put/patch/update: persistence
+   * keeps `existing.namespace_id`. A request naming a different namespace is
+   * refused rather than ignored, so nothing (in particular skill set
+   * governance) is ever decided against a namespace the write won't touch.
+   */
+  private async assertNamespaceUnchanged(
+    existing: KnowledgeDocument,
+    fields: { namespace_id?: unknown; namespace_slug?: unknown }
+  ): Promise<void> {
+    if (
+      fields.namespace_id !== undefined &&
+      fields.namespace_id !== null &&
+      String(fields.namespace_id) !== existing.namespace_id
+    ) {
+      throw new BadRequest(
+        'namespace_id does not match the document; documents cannot move between namespaces'
+      );
+    }
+    if (typeof fields.namespace_slug === 'string') {
+      const namespace = await this.namespaces.findById(existing.namespace_id);
+      if (normalizeKnowledgeNamespaceSlug(fields.namespace_slug) !== namespace?.slug) {
+        throw new BadRequest(
+          'namespace_slug does not match the document; documents cannot move between namespaces'
+        );
+      }
     }
   }
 
@@ -748,7 +779,13 @@ export class KnowledgeDocumentsService extends DrizzleService<
     const userId = this.attributionUserId(params, data.created_by);
 
     const parsed = parseKnowledgeUri(data.uri);
-    const namespaceSlug = data.namespace_slug ?? parsed?.namespace_slug;
+    const rawNamespaceSlug = data.namespace_slug ?? parsed?.namespace_slug;
+    // Canonical form first: lookups, the provider-slug reservation and creation
+    // must all see the slug persistence will store.
+    const namespaceSlug =
+      rawNamespaceSlug === undefined
+        ? undefined
+        : normalizeKnowledgeNamespaceSlug(rawNamespaceSlug);
     const path = data.path ?? parsed?.path;
     const existing = await this.resolveDocumentRef({
       document_id: data.document_id,
@@ -759,6 +796,10 @@ export class KnowledgeDocumentsService extends DrizzleService<
 
     if (existing) {
       await this.assertActiveDocument(existing);
+      await this.assertNamespaceUnchanged(existing, {
+        namespace_id: (data as { namespace_id?: unknown }).namespace_id,
+        namespace_slug: namespaceSlug,
+      });
       const releaseWrite = await this.assertSkillsetGovernance(
         [
           { namespace_id: existing.namespace_id, path: existing.path },
@@ -948,14 +989,12 @@ export class KnowledgeDocumentsService extends DrizzleService<
     const existing = await this.repo.findById(String(id));
     if (!existing) throw new NotFound(`Knowledge document not found: ${id}`);
     await this.assertActiveDocument(existing);
+    await this.assertNamespaceUnchanged(existing, data as KnowledgeDocumentWriteData);
+    // Governance is decided on the persisted namespace, the only one this write touches.
     const releaseWrite = await this.assertSkillsetGovernance(
       [
         { namespace_id: existing.namespace_id, path: existing.path },
-        {
-          namespace_id: (data as KnowledgeDocumentWriteData).namespace_id ?? existing.namespace_id,
-          slug: (data as KnowledgeDocumentWriteData).namespace_slug,
-          path: data.path ?? existing.path,
-        },
+        { namespace_id: existing.namespace_id, path: data.path ?? existing.path },
       ],
       params
     );
@@ -1013,14 +1052,12 @@ export class KnowledgeDocumentsService extends DrizzleService<
     const existing = await this.repo.findById(String(id));
     if (!existing) throw new NotFound(`Knowledge document not found: ${id}`);
     await this.assertActiveDocument(existing);
+    await this.assertNamespaceUnchanged(existing, data as KnowledgeDocumentWriteData);
+    // Governance is decided on the persisted namespace, the only one this write touches.
     const releaseWrite = await this.assertSkillsetGovernance(
       [
         { namespace_id: existing.namespace_id, path: existing.path },
-        {
-          namespace_id: (data as KnowledgeDocumentWriteData).namespace_id ?? existing.namespace_id,
-          slug: (data as KnowledgeDocumentWriteData).namespace_slug,
-          path: data.path ?? existing.path,
-        },
+        { namespace_id: existing.namespace_id, path: data.path ?? existing.path },
       ],
       params
     );

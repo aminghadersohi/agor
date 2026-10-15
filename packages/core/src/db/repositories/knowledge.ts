@@ -50,6 +50,7 @@ import {
   KNOWLEDGE_UNIT_URI_PREFIX,
   normalizeKnowledgeDocumentIconEmoji,
   normalizeKnowledgeFolderPath,
+  normalizeKnowledgeNamespaceSlug,
   normalizeKnowledgePath,
   parseKnowledgeUri,
   titleFromKnowledgePath,
@@ -436,7 +437,7 @@ export class KnowledgeNamespaceRepository
 
   private namespaceToInsert(data: Partial<KnowledgeNamespace>): KBNamespaceInsert {
     const now = Date.now();
-    const slug = data.slug?.trim();
+    const slug = data.slug === undefined ? undefined : normalizeKnowledgeNamespaceSlug(data.slug);
     if (!slug) throw new RepositoryError('Knowledge namespace slug is required');
     if (!/^[a-z0-9][a-z0-9._-]*$/.test(slug)) {
       throw new RepositoryError(
@@ -512,7 +513,12 @@ export class KnowledgeNamespaceRepository
   async findBySlug(slug: string): Promise<KnowledgeNamespace | null> {
     const row = await select(this.db)
       .from(kbNamespaces)
-      .where(and(eq(kbNamespaces.slug, slug), eq(kbNamespaces.archived, false)))
+      .where(
+        and(
+          eq(kbNamespaces.slug, normalizeKnowledgeNamespaceSlug(slug)),
+          eq(kbNamespaces.archived, false)
+        )
+      )
       .one();
     return row ? this.rowToNamespace(row) : null;
   }

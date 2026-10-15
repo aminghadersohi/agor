@@ -399,6 +399,7 @@ describe('agor_skillsets_release / agor_skillsets_get', () => {
         user: admin,
         provider: 'rest',
         authentication: { strategy: 'jwt', payload: {} },
+        tenant: { tenant_id: 'default', source: 'explicit' },
       } as never);
       expect(first.counts).toEqual({ released: 2 });
       expect(first.results.map((r) => [r.teammate, r.path, r.release, r.authorized_as])).toEqual([
