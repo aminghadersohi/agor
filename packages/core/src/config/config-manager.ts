@@ -557,6 +557,7 @@ function validateConfig(config: AgorConfig): void {
     'security',
     'branches',
     'teammates',
+    'skills',
     'paths',
     'analytics',
     'telemetry',
@@ -1093,6 +1094,39 @@ function validateConfig(config: AgorConfig): void {
   ]);
   only(legacyConfig.branches, 'branches', RETIRED_CONFIG_KEYS.branches);
   only(config.teammates, 'teammates', ['framework_repo_url']);
+  only(config.skills, 'skills', ['providers']);
+  if (config.skills?.providers !== undefined) {
+    if (!Array.isArray(config.skills.providers)) {
+      throw new Error("Config error: 'skills.providers' must be an array");
+    }
+    const namespaces = new Set<string>();
+    for (const [index, provider] of config.skills.providers.entries()) {
+      const path = `skills.providers[${index}]`;
+      only(provider, path, ['namespace', 'curator_branch_id']);
+      const record = provider as unknown as Record<string, unknown>;
+      for (const key of ['namespace', 'curator_branch_id'] as const) {
+        if (typeof record[key] !== 'string' || !(record[key] as string).trim()) {
+          throw new Error(`Config error: '${path}.${key}' must be a non-empty string`);
+        }
+      }
+      if (!/^[a-z0-9][a-z0-9._-]*$/.test(provider.namespace)) {
+        throw new Error(`Config error: '${path}.namespace' must be a Knowledge namespace slug`);
+      }
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          provider.curator_branch_id
+        )
+      ) {
+        throw new Error(
+          `Config error: '${path}.curator_branch_id' must be a full branch id (UUID)`
+        );
+      }
+      if (namespaces.has(provider.namespace)) {
+        throw new Error(`Config error: '${path}.namespace' repeats ${provider.namespace}`);
+      }
+      namespaces.add(provider.namespace);
+    }
+  }
   only(config.paths, 'paths', ['data_home']);
   only(config.analytics, 'analytics', ['enabled', 'client', 'extras', 'filters', 'plugins']);
   only(config.analytics?.client, 'analytics.client', ['app', 'version', 'debug']);

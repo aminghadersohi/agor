@@ -125,8 +125,39 @@ Common workflows:
 - **Round-trip through a worktree** with `agor_kb_materialize` and `agor_kb_publish_from_worktree`, where branch permissions allow local workspace access.
 - **Inspect history** with `agor_kb_history`.
 - **Connect the graph** with `agor_kb_link` and `agor_kb_graph_neighbors`.
+- **Find and read team skills** with `agor_skills_list` and `agor_skills_get` (see [Skill documents](#skill-documents)).
 
 This makes Knowledge a natural companion to [Teammates](/guide/teammates): teammates can still keep file-based identity and memory where that is useful, while using Agor Knowledge as shared, searchable operational memory for the whole workspace.
+
+### Skill documents
+
+A document of kind `skill` is an [Agent Skills](https://agentskills.io) procedure. It starts with YAML frontmatter:
+
+```markdown
+---
+name: release-checklist
+description: Steps to cut a release. Use when tagging a version or writing release notes.
+license: MIT
+metadata:
+  version: "1.2.0"
+---
+# Release checklist
+...
+```
+
+- `name` is required: lowercase letters, digits and single hyphens, at most 64 characters. It must equal the file name without `.md`, or the folder name for a `SKILL.md` file.
+- `description` is required, at most 1024 characters. Say what the skill does and when to use it.
+- `metadata.version` is optional: your own version label. It must be one short token of at most 32 letters, digits, dots, hyphens, plus signs or underscores, such as `1.2.0`. Knowledge still keeps every saved version with its sha256.
+
+`agor_kb_put` and `agor_kb_edit` reject a skill whose frontmatter breaks these rules and explain what to fix. A skill saved before these checks existed can still be edited without fixing it, as long as the edit leaves its frontmatter, path and kind alone. Agor logs a warning in that case.
+
+**Skills provider namespaces.** Team skills come only from namespaces that an operator lists under [`skills.providers` in config.yaml](/guide/config-yaml#team-skills-providers). Namespace metadata and document settings cannot make a namespace a provider. Within a configured namespace:
+
+- `skills/<teammate>/<skill>.md` goes to that teammate. `<teammate>` is the teammate's display name or one word of it, as in the [Skills view](/guide/teammates#seeing-a-teammates-skills).
+- `skills/_shared/<skill>.md` goes to every teammate.
+- `README.md` files, drafts and documents of other kinds are not skills.
+
+`agor_skills_list` shows the calling teammate's skills by default, or the skills of the teammate you pass as `teammate`. Each entry has the name, version, a short description and where the skill lives. `agor_skills_get` takes a `name` or `documentId` and returns the skill body. A short header above the body gives the namespace, path, version number, sha256 and license. Both tools only return skills you could also read with `agor_kb_get`. Values taken from frontmatter, such as the name, version and license, are reduced to one plain line before they are shown.
 
 ---
 
