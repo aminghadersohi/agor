@@ -1,3 +1,5 @@
+import { normalizeZoneLayoutPolicy, zoneLayoutBinding } from '@agor/core/layout/zone-layout';
+import type { BoardZoneLayoutDefaultsExpected } from '@agor/core/types';
 import type {
   AgorClient,
   Board,
@@ -6,8 +8,9 @@ import type {
   EffectiveCapabilityPolicyAccess,
   Group,
   User,
+  ZoneLayoutPolicy,
 } from '@agor-live/client';
-import { Alert, Form, Modal, Skeleton } from 'antd';
+import { Alert, Checkbox, Form, Modal, Skeleton, Space, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { useThemedMessage } from '@/utils/message';
 import { useAgorStore } from '../../store/agorStore';
@@ -17,6 +20,8 @@ import { JSONEditor, validateJSON } from '../JSONEditor';
 import { ProfileImageGalleryEditor } from '../ProfileImage';
 import { BoardCapabilityPolicyModalEditor } from '../permissions/CapabilityPolicyEditor';
 import { OwnershipTransfer } from '../permissions/CapabilityPolicyEditor/OwnershipTransfer';
+import { ZoneLayoutPolicyEditor } from '../SessionCanvas/canvas/ZoneLayoutPolicyEditor';
+import { DrillInFrame, useDrillFormDraft } from '../SettingsModal/SettingsDrill';
 
 export interface BoardEditModalProps {
   board: Board | null;
@@ -25,6 +30,13 @@ export interface BoardEditModalProps {
   onClose: () => void;
   onUpdate?: (boardId: string, updates: Partial<Board>) => unknown;
   currentUser?: User | null;
+  /**
+   * Render the body as an in-place drill-in (no outer Modal) for the Workspace
+   * Settings shell: the shared drill footer drives Save/Cancel and the
+   * unsaved-changes guard. Default false → the standalone Modal used by the
+   * navbar board-settings shortcut is unchanged.
+   */
+  embedded?: boolean;
 }
 
 /** The single board-settings editor used by Settings and the navbar shortcut. */
@@ -35,6 +47,7 @@ export function BoardEditModal({
   onClose,
   onUpdate,
   currentUser,
+  embedded = false,
 }: BoardEditModalProps) {
   const userById = useAgorStore(selectUserById);
   const [form] = Form.useForm();
@@ -52,6 +65,13 @@ export function BoardEditModal({
   const [loadedBoard, setLoadedBoard] = useState<Board | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [zoneDefaults, setZoneDefaults] = useState<ZoneLayoutPolicy>(() =>
+    normalizeZoneLayoutPolicy(undefined)
+  );
+  const [initialZoneDefaults, setInitialZoneDefaults] = useState<ZoneLayoutPolicy>(() =>
+    normalizeZoneLayoutPolicy(undefined)
+  );
+  const [applyZoneDefaultsToExisting, setApplyZoneDefaultsToExisting] = useState(false);
   const permissionUsers = useMemo(() => {
     const knownUsers = new Map(userById);
     for (const user of allUsers) knownUsers.set(user.user_id, user);
@@ -121,6 +141,10 @@ export function BoardEditModal({
         // editor mounts against fully-initialized field values (rather than
         // relying on render batching). loadedBoard is set last, below.
         form.resetFields();
+        const normalizedZoneDefaults = normalizeZoneLayoutPolicy(fresh.zone_layout_defaults);
+        setZoneDefaults(normalizedZoneDefaults);
+        setInitialZoneDefaults(normalizedZoneDefaults);
+        setApplyZoneDefaultsToExisting(false);
         form.setFieldsValue({
           name: fresh.name,
           icon: fresh.icon,
@@ -163,6 +187,15 @@ export function BoardEditModal({
     setLoadedPolicy(saved);
   };
 
+  // Unsaved-changes guard for the drill-in: form values vs the loaded board
+  // (covers programmatic edits such as background presets) or a policy draft.
+  const isFormDirty = useDrillFormDraft(form, loadedBoard);
+  const isDirty = () =>
+    isFormDirty() ||
+    applyZoneDefaultsToExisting ||
+    JSON.stringify(zoneDefaults) !== JSON.stringify(initialZoneDefaults) ||
+    (policy !== null && JSON.stringify(policy) !== JSON.stringify(loadedPolicy));
+
   const close = () => {
     form.resetFields();
     onClose();
@@ -173,11 +206,59 @@ export function BoardEditModal({
     try {
       setSaving(true);
       await form.validateFields();
-      const updated = await onUpdate?.(
-        board.board_id,
-        extractBoardFormValues(form, { includeLegacyPermissions: false })
+      // The normalized permission service is the only supported persistence
+      // route for board access. Generic board writes reject legacy fields, so they
+      // must never hitchhike on an otherwise unrelated settings/defaults save.
+      const formValues = extractBoardFormValues(form, {
+        includeLegacyPermissions: false,
+      });
+      const generalSettingsChanged = Object.entries(formValues).some(
+        ([field, value]) =>
+          JSON.stringify(value) !== JSON.stringify(loadedBoard?.[field as keyof Board])
       );
-      if (updated === false) return;
+      if (
+        client &&
+        (applyZoneDefaultsToExisting ||
+          JSON.stringify(zoneDefaults) !== JSON.stringify(initialZoneDefaults))
+      ) {
+        // Refresh only the optimistic baseline, not the user's draft. A zone
+        // created or edited while this editor is open must not poison retries.
+        const fresh = await client.service('boards').get(board.board_id);
+        const expected: BoardZoneLayoutDefaultsExpected = {
+          defaults: normalizeZoneLayoutPolicy(fresh.zone_layout_defaults),
+          zones: Object.fromEntries(
+            Object.entries(fresh.objects ?? {}).flatMap(([objectId, object]) =>
+              object.type === 'zone'
+                ? [
+                    [
+                      objectId,
+                      {
+                        binding: zoneLayoutBinding(object),
+                        layout: normalizeZoneLayoutPolicy(object.layout),
+                      },
+                    ] as const,
+                  ]
+                : []
+            )
+          ),
+        };
+        await client.service('boards').patch(board.board_id, {
+          _action: 'setZoneLayoutDefaults',
+          defaults: normalizeZoneLayoutPolicy(zoneDefaults),
+          applyToExisting: applyZoneDefaultsToExisting,
+          expected,
+        } as unknown as Partial<Board>);
+        // If a later settings/permission write fails, retry from the saved
+        // defaults rather than repeatedly applying the same zone mutation.
+        setInitialZoneDefaults(zoneDefaults);
+        setApplyZoneDefaultsToExisting(false);
+      }
+      // Layout is the conflict-prone write: do it before general settings so
+      // a rejected layout cannot leave unrelated settings half-saved.
+      if (generalSettingsChanged) {
+        const updated = await onUpdate?.(board.board_id, formValues);
+        if (updated === false) return;
+      }
       await syncPermissions();
       close();
     } catch (error) {
@@ -186,6 +267,119 @@ export function BoardEditModal({
       setSaving(false);
     }
   };
+
+  const body = loadError ? (
+    <Alert type="error" showIcon title="Board settings unavailable" description={loadError} />
+  ) : !loadedBoard ? (
+    // Render the form only once the full board has loaded, so its fields —
+    // including the background editor's mode — initialize from real values
+    // rather than the empty pre-load state (the cause of the mode/checkbox
+    // resetting on reopen).
+    <Skeleton active paragraph={{ rows: 6 }} style={{ marginTop: 16 }} />
+  ) : (
+    <Form form={form} layout="vertical" preserve style={{ marginTop: 16 }}>
+      <BoardFormFields
+        key={loadedBoard.board_id}
+        form={form}
+        backgroundResetSignal={loadedBoard.board_id}
+        canEditGeneral={canEditGeneral}
+        zoneDefaultsEditor={
+          <Space orientation="vertical" size="middle" style={{ width: '100%' }}>
+            <Alert
+              type="info"
+              showIcon
+              title="One policy for new and inherited zones"
+              description="New zones follow these defaults. Existing zones remain explicit overrides unless you intentionally apply the policy below; inherited zones continue following future changes."
+            />
+            <ZoneLayoutPolicyEditor
+              value={zoneDefaults}
+              onChange={setZoneDefaults}
+              disabled={!canEditGeneral}
+              idPrefix="board-zone-defaults"
+            />
+            <Checkbox
+              checked={applyZoneDefaultsToExisting}
+              disabled={!canEditGeneral}
+              onChange={(event) => setApplyZoneDefaultsToExisting(event.target.checked)}
+            >
+              Apply to existing zones
+            </Checkbox>
+            <Typography.Text type="secondary">
+              This resets every existing zone to these values and makes it follow the board
+              defaults. Zone names, colors, prompts, positions, sizes, and locks are preserved.
+              Clear this checkbox to preserve current overrides.
+            </Typography.Text>
+          </Space>
+        }
+        capabilityPolicyEditor={
+          policy ? (
+            <BoardCapabilityPolicyModalEditor
+              ownershipAction={
+                <OwnershipTransfer
+                  kind="board"
+                  resourceId={loadedBoard.board_id}
+                  ownerUserId={policy.primary_owner_user_id}
+                  client={client}
+                  users={permissionUsers}
+                  currentUser={currentUser}
+                  disabled={saving || loading}
+                  onTransferred={close}
+                />
+              }
+              value={policy}
+              onChange={setPolicy}
+              client={client}
+              users={permissionUsers}
+              groups={allGroups}
+              currentUser={currentUser}
+              workspacePreferences={workspacePreferences}
+            />
+          ) : (
+            <Alert type="error" showIcon description="Permissions are unavailable." />
+          )
+        }
+        extra={
+          <Form.Item
+            label="Custom Context (JSON)"
+            name="custom_context"
+            help="Add custom fields for use in zone trigger templates (e.g., {{ board.context.yourField }})"
+            rules={[{ validator: validateJSON }]}
+          >
+            <JSONEditor
+              placeholder='{"team": "Backend", "sprint": 42}'
+              rows={4}
+              disabled={!canEditGeneral}
+            />
+          </Form.Item>
+        }
+      />
+      <ProfileImageGalleryEditor
+        subject={{ type: 'board', id: loadedBoard.board_id }}
+        canEdit={canEditGeneral}
+        label="Board images"
+      />
+    </Form>
+  );
+
+  // Drill-in mode for the Workspace Settings shell: no outer Modal. The shared
+  // shell footer drives Save/Cancel and the unsaved-changes guard; the caller
+  // gates this on its drill state and early-returns it in place of the list.
+  if (embedded) {
+    if (!open) return null;
+    return (
+      <DrillInFrame
+        title="Edit Board"
+        dirty={isDirty}
+        onBack={close}
+        saving={loading || saving}
+        saveLabel="Save"
+        saveDisabled={loading || saving || Boolean(loadError) || !canEditGeneral}
+        onSave={() => void save()}
+      >
+        {body}
+      </DrillInFrame>
+    );
+  }
 
   return (
     <Modal
@@ -199,72 +393,7 @@ export function BoardEditModal({
       okText="Save"
       destroyOnHidden
     >
-      {loadError ? (
-        <Alert type="error" showIcon title="Board settings unavailable" description={loadError} />
-      ) : !loadedBoard ? (
-        // Render the form only once the full board has loaded, so its fields —
-        // including the background editor's mode — initialize from real values
-        // rather than the empty pre-load state (the cause of the mode/checkbox
-        // resetting on reopen).
-        <Skeleton active paragraph={{ rows: 6 }} style={{ marginTop: 16 }} />
-      ) : (
-        <Form form={form} layout="vertical" preserve style={{ marginTop: 16 }}>
-          <BoardFormFields
-            key={loadedBoard.board_id}
-            form={form}
-            backgroundResetSignal={loadedBoard.board_id}
-            canEditGeneral={canEditGeneral}
-            capabilityPolicyEditor={
-              policy ? (
-                <BoardCapabilityPolicyModalEditor
-                  ownershipAction={
-                    <OwnershipTransfer
-                      kind="board"
-                      resourceId={loadedBoard.board_id}
-                      ownerUserId={policy.primary_owner_user_id}
-                      client={client}
-                      users={permissionUsers}
-                      currentUser={currentUser}
-                      disabled={saving || loading}
-                      onTransferred={close}
-                    />
-                  }
-                  value={policy}
-                  onChange={setPolicy}
-                  client={client}
-                  users={permissionUsers}
-                  groups={allGroups}
-                  currentUser={currentUser}
-                  workspacePreferences={workspacePreferences}
-                />
-              ) : (
-                <Alert type="error" showIcon description="Permissions are unavailable." />
-              )
-            }
-            extra={
-              <Form.Item
-                label="Custom Context (JSON)"
-                name="custom_context"
-                help="Add custom fields for use in zone trigger templates (e.g., {{ board.context.yourField }})"
-                rules={[{ validator: validateJSON }]}
-              >
-                <JSONEditor
-                  placeholder='{"team": "Backend", "sprint": 42}'
-                  rows={4}
-                  disabled={!canEditGeneral}
-                />
-              </Form.Item>
-            }
-          />
-          {/* Gallery changes save immediately through the profile-image routes,
-              independent of this modal's Save. */}
-          <ProfileImageGalleryEditor
-            subject={{ type: 'board', id: loadedBoard.board_id }}
-            canEdit={canEditGeneral}
-            label="Board images"
-          />
-        </Form>
-      )}
+      {body}
     </Modal>
   );
 }

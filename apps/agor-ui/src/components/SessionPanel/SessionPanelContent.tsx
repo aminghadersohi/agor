@@ -423,6 +423,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
               <Button
                 type="text"
                 size="small"
+                aria-label="Scroll to top of conversation"
                 icon={<VerticalAlignTopOutlined />}
                 onClick={() => scrollToTop?.()}
                 disabled={!scrollToTop}
@@ -432,6 +433,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
               <Button
                 type="text"
                 size="small"
+                aria-label="Scroll to bottom of conversation"
                 icon={<VerticalAlignBottomOutlined />}
                 onClick={() => scrollToBottom?.()}
                 disabled={!scrollToBottom}

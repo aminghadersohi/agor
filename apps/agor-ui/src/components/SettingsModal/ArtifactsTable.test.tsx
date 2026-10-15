@@ -1,8 +1,9 @@
 import type { AgorClient, Artifact, Board, Branch, User } from '@agor-live/client';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { ArtifactsTable } from './ArtifactsTable';
+import { renderWithSettingsShell } from './settingsDrillTestUtils';
 
 const artifact = {
   artifact_id: 'artifact-1',
@@ -22,7 +23,7 @@ function setup(
 ) {
   const onUpdate = vi.fn();
   const onDelete = vi.fn();
-  render(
+  renderWithSettingsShell(
     <MemoryRouter>
       <ArtifactsTable
         artifactById={new Map(rows.map((row) => [row.artifact_id, row]))}
@@ -65,10 +66,12 @@ describe('ArtifactsTable', () => {
   it('keeps provenance in the editor and avoids no-op updates', async () => {
     const { onUpdate } = setup();
     fireEvent.click(screen.getByRole('button', { name: 'Edit artifact' }));
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/Source branch: Not recorded/)).toBeVisible();
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // Drill-in (no stacked dialog): the editor renders in place.
+    expect(await screen.findByText(/Source branch: Not recorded/)).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() =>
+      expect(screen.queryByText(/Source branch: Not recorded/)).not.toBeInTheDocument()
+    );
     expect(onUpdate).not.toHaveBeenCalled();
   });
 
@@ -115,7 +118,7 @@ describe('ArtifactsTable edit modal', () => {
     const client = { service: () => ({ get }) } as unknown as AgorClient;
     const artifact = makeArtifact();
 
-    render(
+    renderWithSettingsShell(
       <MemoryRouter>
         <ArtifactsTable
           client={client}
@@ -132,5 +135,37 @@ describe('ArtifactsTable edit modal', () => {
     expect(get).toHaveBeenCalledWith('artifact-1');
     expect(screen.getByText('run-now')).toBeInTheDocument();
     expect(screen.getByText('Confirms first')).toBeInTheDocument();
+  });
+});
+
+describe('ArtifactsTable live updates', () => {
+  it('keeps a typed draft over a remote rename and saves only the description', async () => {
+    const onUpdate = vi.fn();
+    const view = (row: Artifact) => (
+      <MemoryRouter>
+        <ArtifactsTable
+          artifactById={new Map([[row.artifact_id, row]])}
+          boardById={new Map([['board-1', { board_id: 'board-1', name: 'Engineering' } as Board]])}
+          branchById={new Map()}
+          userById={new Map()}
+          onUpdate={onUpdate}
+        />
+      </MemoryRouter>
+    );
+    const rendered = renderWithSettingsShell(view(artifact));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit artifact' }));
+    fireEvent.change(await screen.findByLabelText('Description'), {
+      target: { value: 'My draft' },
+    });
+
+    rendered.rerender(view({ ...artifact, name: 'API explorer v2', description: 'Remote edit' }));
+    // Neither the draft nor an untouched field follows the record while it is open.
+    await waitFor(() => expect(screen.getByLabelText('Description')).toHaveValue('My draft'));
+    expect(screen.getByLabelText('Name')).toHaveValue(artifact.name);
+
+    // The save leaves the remote rename alone.
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/ }));
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledOnce());
+    expect(onUpdate).toHaveBeenCalledWith(artifact.artifact_id, { description: 'My draft' });
   });
 });

@@ -297,7 +297,12 @@ describe('HomePage ask box truncation', () => {
   // The client resolves tm1, the long-named teammate, as the caller's primary.
   const primary = teammate('tm1', LONG_TEAMMATE);
   const client = {
-    service: () => ({ getPrimaryTeammate: async () => primary, find: async () => [] }),
+    service: () => ({
+      getPrimaryTeammate: async () => primary,
+      find: async () => [],
+      on: vi.fn(),
+      off: vi.fn(),
+    }),
   } as unknown as AgorClient;
   // Long enough to cut even in the desktop card.
   const title = [LONG, LONG, LONG].join(' / ');

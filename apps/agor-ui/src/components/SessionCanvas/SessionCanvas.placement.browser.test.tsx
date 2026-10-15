@@ -202,6 +202,9 @@ it('shows skipped-default warnings from an always_new drop response', async () =
   // transport response is stubbed. No prompt/provider is invoked.
   const create = vi.fn(async () => ({ session: { mcp_defaults_skipped: 2 } }));
   const client = {
+    on: vi.fn(),
+    off: vi.fn(),
+    io: { on: vi.fn(), off: vi.fn(), emit: vi.fn(), volatile: { emit: vi.fn() } },
     service: () => ({
       create,
       patch: async (_id: string, data: Partial<BoardEntityObject>) => {
