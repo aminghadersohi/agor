@@ -39,14 +39,18 @@ describe('open command deployment selection', () => {
       const result = await runCli(home, args, openedUrlFile);
       expect(result.code).toBe(0);
       expect(result.output).toContain('URL: http://localhost:5173');
-      await expect(readFile(openedUrlFile, 'utf8')).resolves.toBe('http://localhost:5173');
+      await expect
+        .poll(() => readFile(openedUrlFile, 'utf8'), { timeout: 5_000 })
+        .toBe('http://localhost:5173');
     }
 
     await rm(openedUrlFile, { force: true });
     const remoteResult = await runCli(home, ['open', '--remote'], openedUrlFile);
     expect(remoteResult.code).toBe(0);
     expect(remoteResult.output).toContain(`URL: ${remote.url}/ui`);
-    await expect(readFile(openedUrlFile, 'utf8')).resolves.toBe(`${remote.url}/ui`);
+    await expect
+      .poll(() => readFile(openedUrlFile, 'utf8'), { timeout: 5_000 })
+      .toBe(`${remote.url}/ui`);
   }, 30_000);
 
   it('requires a connected target only when --remote is explicit', async () => {

@@ -192,6 +192,7 @@ it.each(['dirty', 'failure'])(
           find: async () => seed,
           findAll: async () => seed,
           get: async () => {
+            if (name !== 'sessions') return {};
             reads++;
             if (reads === 1) {
               await gate;
@@ -221,7 +222,10 @@ it.each(['dirty', 'failure'])(
         authGeneration: 1,
       })
     );
-    await waitFor(() => expect(result.current.initialLoadComplete).toBe(true));
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(result.current.initialLoadComplete).toBe(true);
+    });
     // Let the initial background hydration finish before injecting the race.
     await act(async () => new Promise<void>((resolve) => setTimeout(resolve, 0)));
     function LiveIndicator() {
@@ -270,7 +274,7 @@ it.each(['dirty', 'failure'])(
     await expect.poll(() => Number(animation.currentTime)).toBeGreaterThan(before);
     await act(async () => release());
     expect(rowSpinner()).toBe(spinner);
-    await waitFor(() => expect(reads).toBe(2));
+    await waitFor(() => expect(reads).toBe(2), { timeout: 5_000 });
     // The follow-up is deliberately pending too: retention must not depend
     // on the runner completing an assertion before the retry delay elapses.
     expect(rowSpinner()).toBe(spinner);

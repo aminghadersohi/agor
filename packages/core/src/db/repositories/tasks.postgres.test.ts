@@ -4,7 +4,7 @@ import { generateId } from '../../lib/ids';
 import type { UUID } from '../../types/id';
 import { TaskStatus } from '../../types/task';
 import { createDatabase, type Database } from '../client';
-import { isPostgresDatabase } from '../database-wrapper';
+import { executeRaw, isPostgresDatabase, rawRows } from '../database-wrapper';
 import { initializeDatabase } from '../migrate';
 import { BranchRepository } from './branches';
 import { RepoRepository } from './repos';
@@ -110,10 +110,21 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('TaskRepository PostgreSQL'
       [task.task_id, secondTask.task_id].sort().slice(1)
     );
 
-    const beforeClaim = Date.now();
+    // Use the database clock on both sides: a disposable PostgreSQL VM may
+    // have a small clock offset from the host running this test.
+    const serverNow = async () => {
+      const rows = rawRows<{ epoch_ms: string }>(
+        await executeRaw(
+          db,
+          sql`SELECT (extract(epoch from clock_timestamp()) * 1000)::text AS epoch_ms`
+        )
+      );
+      return Number(rows[0].epoch_ms);
+    };
+    const beforeClaim = await serverNow();
     const first = await tasks.connectExecutor(task.task_id);
     const second = await tasks.connectExecutor(task.task_id);
-    const afterClaim = Date.now();
+    const afterClaim = await serverNow();
 
     expect(first?.transitioned).toBe(true);
     expect(second).toEqual({ task: first?.task, transitioned: false });
@@ -121,7 +132,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('TaskRepository PostgreSQL'
     const connectedAt = Date.parse(first!.task.executor_connected_at!);
     // PostgreSQL retains microseconds while the driver exposes JavaScript
     // milliseconds; flooring that round-trip can land one millisecond before
-    // the client-side wall-clock sample taken immediately before the claim.
+    // the server-side clock sample taken immediately before the claim.
     expect(connectedAt).toBeGreaterThanOrEqual(beforeClaim - 1);
     expect(connectedAt).toBeLessThanOrEqual(afterClaim);
 

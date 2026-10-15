@@ -42,6 +42,8 @@ const sessions = [
 
 beforeEach(() => {
   localStorage.clear();
+  // Keep every row visible: this suite measures selection geometry, not portrait scrolling.
+  localStorage.setItem('agor:teammate-panel-portrait-size', 'tiny');
   agorStore.setState({ ...EMPTY_MAPS, sessionsByBranch: new Map([[branch.branch_id, sessions]]) });
 });
 afterEach(() => {

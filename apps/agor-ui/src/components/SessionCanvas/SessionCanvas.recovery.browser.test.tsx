@@ -44,7 +44,12 @@ it('board primary excluded from the canvas still exposes recovery in its panel',
     on: vi.fn(),
     off: vi.fn(),
   }));
-  const client = { service } as unknown as AgorClient;
+  const client = {
+    on: vi.fn(),
+    off: vi.fn(),
+    service,
+    io: { on: vi.fn(), off: vi.fn(), emit: vi.fn(), volatile: { emit: vi.fn() } },
+  } as unknown as AgorClient;
   const compose = (current: Branch) => (
     <App>
       <ConnectionProvider

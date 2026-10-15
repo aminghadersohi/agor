@@ -259,6 +259,17 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema).each(['HTTP', 'MCP'] as con
       } as never);
       reposService = new ReposService(db, app);
       app.use('repos', reposService as never);
+      // MCP resolves the repository through the scoped service before entering
+      // the identity-only import route. Mirror the production get hook too.
+      app.service('repos').hooks({
+        around: {
+          get: [
+            async (context, next) => {
+              await runWithTenantDatabaseScope(db, context.params.tenant?.tenant_id, next);
+            },
+          ],
+        },
+      });
       for (const path of INERT_SERVICES) app.use(path, { find: async () => [] });
 
       // Real Feathers registration and hooks. Registration stops right after

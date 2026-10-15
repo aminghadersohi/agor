@@ -330,12 +330,30 @@ describe('NavbarComposeButton', () => {
     });
     renderCompose({ primary: withEmoji });
     // Resolved eagerly on mount — no popover open needed.
-    expect(await screen.findByText('🎨')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('🎨')).toBeInTheDocument());
+  });
+
+  it('does not call the lazy popover form while the composer is collapsed', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      renderCompose({ primary: primaryBranch });
+      await waitFor(() => expect(screen.getByRole('img', { name: 'robot' })).toBeInTheDocument());
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+      expect(
+        consoleError.mock.calls.some(([message]) =>
+          String(message).includes('Instance created by `useForm` is not connected')
+        )
+      ).toBe(false);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it('shows the robot placeholder on the trigger when no primary is set', async () => {
     renderCompose({ primary: null });
-    expect(await screen.findByRole('img', { name: 'robot' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('img', { name: 'robot' })).toBeInTheDocument());
   });
 
   it('shows a "Start quick session" tooltip on the trigger', async () => {

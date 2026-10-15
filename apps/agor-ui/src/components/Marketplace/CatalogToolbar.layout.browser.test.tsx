@@ -152,7 +152,7 @@ it.each([
     </ConfigProvider>
   );
   await screen.findByRole('button', { name: 'Open DeepWiki' });
-  expect(expectOneControlRow()).toBe(state);
+  await expect.poll(expectOneControlRow).toBe(state);
 });
 
 it.each([
@@ -183,7 +183,7 @@ it.each([
       </ConfigProvider>
     );
     await screen.findByRole('button', { name: 'Open DeepWiki' });
-    expect(expectOneControlRow()).toBe(state);
+    await expect.poll(expectOneControlRow).toBe(state);
   }
 );
 
@@ -212,6 +212,9 @@ function ModalHarness({ motion }: { motion: boolean }) {
 
 async function openFiltersWithKeyboard() {
   await screen.findByRole('button', { name: 'Open DeepWiki' });
+  // Modal entry and the ResizeObserver layout must settle before keyboard focus.
+  await expect.poll(() => document.querySelector('.ant-zoom-appear, .ant-zoom-enter')).toBeNull();
+  await expect.poll(expectOneControlRow).toBe('collapsed');
   screen.getByRole('textbox', { name: 'Search MCP servers' }).focus();
   await userEvent.tab();
   expect(screen.getByRole('button', { name: 'Filters' })).toHaveFocus();
@@ -227,10 +230,19 @@ it.each([true, false])(
     const sheet = await openFiltersWithKeyboard();
     const category = within(sheet).getByRole('combobox', { name: 'Filter by category' });
     await expect.poll(() => document.activeElement).toBe(category);
-    await userEvent.keyboard('{ArrowDown}{ArrowDown}{Enter}');
-    await screen.findByRole('button', { name: 'Filters, 1 active' });
+    // Let the combobox open and expose an active option before each key; on a loaded runner
+    // back-to-back keys otherwise land before the popup is ready and the selection is lost.
+    const activeOption = () => category.getAttribute('aria-activedescendant');
     await userEvent.keyboard('{ArrowDown}');
-    expect(category).toHaveAttribute('aria-expanded', 'true');
+    await expect.poll(() => category.getAttribute('aria-expanded')).toBe('true');
+    await expect.poll(activeOption).toBeTruthy();
+    const firstActive = activeOption();
+    await userEvent.keyboard('{ArrowDown}');
+    await expect.poll(activeOption).not.toBe(firstActive);
+    await userEvent.keyboard('{Enter}');
+    await screen.findByRole('button', { name: 'Filters, 1 active' }, { timeout: 5000 });
+    await userEvent.keyboard('{ArrowDown}');
+    await expect.poll(() => category.getAttribute('aria-expanded')).toBe('true');
     await userEvent.keyboard('{Escape}');
     await expect.poll(() => category.getAttribute('aria-expanded')).toBe('false');
     // Escape belongs to the popup until its exit animation releases the portal.

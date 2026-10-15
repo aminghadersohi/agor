@@ -58,11 +58,11 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
           client.begin(async (tx) => {
             await tx`SELECT set_config('search_path', ${searchPath}, true)`;
             const actual = await readFile(
-              join(migrationsFolder, '0102_mcp_oauth_client_registrations.sql'),
+              join(migrationsFolder, '9015_mcp_oauth_client_registrations.sql'),
               'utf8'
             );
             const reconciliation = await readFile(
-              join(migrationsFolder, '0103_oauth_authority_watermark_reconciliation.sql'),
+              join(migrationsFolder, '9016_oauth_authority_watermark_reconciliation.sql'),
               'utf8'
             );
             // Stop immediately before the reported guard, with both real references
@@ -95,7 +95,7 @@ describe.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       const client = (db as Database & { $client: Sql }).$client;
       await client.begin(async (tx) => {
         const source = await readFile(
-          join(migrationsFolder, '0102_mcp_oauth_client_registrations.sql'),
+          join(migrationsFolder, '9015_mcp_oauth_client_registrations.sql'),
           'utf8'
         );
         for (const statement of source.split('--> statement-breakpoint')) {
