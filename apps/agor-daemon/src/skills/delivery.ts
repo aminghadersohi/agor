@@ -111,6 +111,8 @@ export class SkillsDeliveryDeadline {
 
 export interface SkillsIndexEntry {
   name: string;
+  /** Knowledge document id, so two skills with the same name stay addressable. */
+  documentId?: string;
   version?: string;
   description?: string;
   namespace: string;
@@ -129,7 +131,8 @@ function renderEntry(entry: SkillsIndexEntry): string {
   return (
     `- ${indexField(entry.name, f.name) || 'unnamed'}${version ? ` v${version}` : ''}` +
     `${description ? ` — ${description}` : ''}` +
-    ` [${indexField(entry.namespace, f.namespace)}/${indexField(entry.path, f.path)}]`
+    ` [${indexField(entry.namespace, f.namespace)}/${indexField(entry.path, f.path)}]` +
+    `${entry.documentId ? ` id:${indexField(entry.documentId, 40)}` : ''}`
   );
 }
 
@@ -158,7 +161,7 @@ export function renderSkillsIndex(input: {
   ];
   const footer = [
     SKILLS_INDEX_CLOSE,
-    'Before doing one of these kinds of task, read the full skill with `agor_skills_get` (pass its name). It returns the version pinned for this session.',
+    'Before doing one of these kinds of task, read the full skill with `agor_skills_get` (pass its name, or its id as documentId when two share a name). It returns the version pinned for this session.',
   ];
   const fixed = [...header, ...footer].join('\n').length + 1;
   // Room for the truncation note.
@@ -344,6 +347,7 @@ export async function resolveSkillsDelivery(input: {
     release: release.manifest.release,
     entries: delivered.map(({ entry, skill }) => ({
       name: skill.name,
+      documentId: entry.document_id,
       ...(skill.version ? { version: skill.version } : {}),
       ...(skill.description ? { description: skill.description } : {}),
       namespace: skill.namespace_slug,

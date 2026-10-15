@@ -665,4 +665,38 @@ describe('agor_skillsets_release / agor_skillsets_get', () => {
       payload(await fritz.agor_skills_get({ name: 'research-loop', version: 'latest' })).provenance
     ).toMatchObject({ version: '9.0.0', selected_by: 'requested version' });
   });
+  dbTest('a name two pinned skills share is ambiguous, never silently resolved', async ({ db }) => {
+    const { fixture, owner, ns } = await frinkNamespace(db);
+    const shared = await putSkillDoc(
+      fixture,
+      owner,
+      ns,
+      'skills/_shared/loop.md',
+      skillMarkdown('loop', { body: '# Shared loop' })
+    );
+    const own = await putSkillDoc(
+      fixture,
+      owner,
+      ns,
+      'skills/fritz/loop.md',
+      skillMarkdown('loop', { body: '# Fritz loop' })
+    );
+    const fritz = toolsFor(fixture, owner, { branch: teammateBranch('Professor Fritz'), db });
+    await fritz.agor_skillsets_release({ teammate: 'fritz' });
+    await deliverTo(fixture, owner, teammateBranch('Professor Fritz'));
+
+    const ambiguous = fritz.agor_skills_get({ name: 'loop' });
+    await expect(ambiguous).rejects.toThrow(/"loop" is ambiguous in this session's release r1/);
+    await expect(fritz.agor_skills_get({ name: 'loop' })).rejects.toThrow(shared.document_id);
+    await expect(fritz.agor_skills_get({ name: 'loop' })).rejects.toThrow(own.document_id);
+    await expect(fritz.agor_skills_get({ name: 'loop' })).rejects.toThrow(/Pass documentId/);
+
+    // documentId picks exactly one, still at the session's pin.
+    expect(payload(await fritz.agor_skills_get({ documentId: own.document_id })).content).toContain(
+      '# Fritz loop'
+    );
+    expect(
+      payload(await fritz.agor_skills_get({ documentId: shared.document_id })).content
+    ).toContain('# Shared loop');
+  });
 });

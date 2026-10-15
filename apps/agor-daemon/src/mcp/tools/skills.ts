@@ -254,10 +254,20 @@ export function registerSkillTools(server: McpServer, ctx: McpContext): void {
           );
         }
         const wanted = name?.trim().toLowerCase();
-        const pin = receipt.skills.find((entry) =>
+        const matches = receipt.skills.filter((entry) =>
           documentId ? entry.document_id === documentId : entry.name.toLowerCase() === wanted
         );
         const label = `release r${receipt.release} (${receipt.namespace}/${receipt.skillset_path})`;
+        if (matches.length > 1) {
+          // Two pins can share a name (e.g. skills/_shared/loop.md and skills/fritz/loop.md).
+          const candidates = matches
+            .map((entry) => `documentId ${entry.document_id} (version ${entry.version_number})`)
+            .join('; ');
+          throw new Error(
+            `"${name}" is ambiguous in this session's ${label}: ${candidates}. Pass documentId to pick one.`
+          );
+        }
+        const pin = matches[0];
         if (!pin) {
           throw new Error(
             `${documentId ?? name} is not in this session's ${label}. Pass version: 'latest' to read the current version on purpose.`
