@@ -10,6 +10,7 @@ import {
   type BranchID,
   ROLES,
   type SessionID,
+  type SessionSkillsReceipt,
   shortId,
   type User,
   type UserID,
@@ -28,6 +29,7 @@ import {
 } from '../../../test/skills-fixture';
 import { teammateAddressingFixture } from '../../../test/teammate-addressing-fixture';
 import { createSkillReleasesRoute } from '../../services/skill-releases';
+import { resolveSkillsDelivery } from '../../skills/delivery';
 import { resolveSkillTeammate } from '../../skills/teammate';
 import type { McpContext } from '../server';
 import { registerSkillTools } from './skills';
@@ -48,8 +50,11 @@ function teammateBranch(displayName: string, branchId: BranchID = BRANCH_ID): Br
 function toolsFor(
   fixture: SkillsKnowledgeFixture,
   user: User,
-  options: { branch?: Branch | null; db?: unknown } = {}
+  options: { branch?: Branch | null; db?: unknown; sessionId?: SessionID } = {}
 ): Record<string, Handler> {
+  const sessionId = options.sessionId ?? SESSION_ID;
+  const sessions = sessionRegistry(fixture);
+  if (!sessions.has(sessionId)) sessions.set(sessionId, {});
   const branch = options.branch === undefined ? teammateBranch('Professor Frink') : options.branch;
   // One branch registry per fixture, so tool sets for different sessions don't leak into each other.
   const registry =
@@ -75,9 +80,9 @@ function toolsFor(
     app: fixture.app,
     db: options.db,
     userId: user.user_id,
-    sessionId: SESSION_ID,
+    sessionId,
     authenticatedSession: {
-      session_id: SESSION_ID,
+      session_id: sessionId,
       agentic_tool: 'claude-code',
       branch_id: callerBranch.branch_id,
     },
@@ -94,6 +99,38 @@ function toolsFor(
     ctx
   );
   return handlers;
+}
+
+/** Sessions by id, with the `custom_context` `sessions.get` returns. */
+function sessionRegistry(fixture: SkillsKnowledgeFixture): Map<string, Record<string, unknown>> {
+  const existing = fixture.services.get('sessions') as
+    | { byId?: Map<string, Record<string, unknown>> }
+    | undefined;
+  if (existing?.byId) return existing.byId;
+  const byId = new Map<string, Record<string, unknown>>();
+  fixture.services.set('sessions', {
+    byId,
+    get: async (id: string) => ({ session_id: id, custom_context: byId.get(id) ?? {} }),
+  });
+  return byId;
+}
+
+/** Give a session a skills receipt, as delivery at session start would. */
+async function deliverTo(
+  fixture: SkillsKnowledgeFixture,
+  user: User,
+  branch: Branch,
+  sessionId: SessionID = SESSION_ID
+): Promise<SessionSkillsReceipt> {
+  const result = await resolveSkillsDelivery({
+    app: fixture.app,
+    params: userParams(user) as never,
+    session: { custom_context: {}, agentic_tool: 'claude-code' },
+    branch,
+  });
+  if (!('receipt' in result)) throw new Error(`no delivery: ${result.skipped}`);
+  sessionRegistry(fixture).set(sessionId, { skills_receipt: result.receipt });
+  return result.receipt;
 }
 
 function payload(result: { content: Array<{ text: string }> }) {
@@ -219,7 +256,9 @@ describe('agor_skills_list / agor_skills_get', () => {
     );
     const tools = toolsFor(fixture, owner);
 
-    const byName = payload(await tools.agor_skills_get({ name: 'research-loop' }));
+    const byName = payload(
+      await tools.agor_skills_get({ name: 'research-loop', version: 'latest' })
+    );
     expect(byName.provenance).toMatchObject({
       provider: 'knowledge',
       namespace: ns.slug,
@@ -227,13 +266,13 @@ describe('agor_skills_list / agor_skills_get', () => {
       version_number: 2,
       version: '1.1.0',
       license: 'MIT',
-      selected_by: 'current version',
+      selected_by: 'requested version',
     });
     expect(byName.provenance.sha256).toMatch(/^[0-9a-f]{64}$/);
     expect(byName.content).toBe(
       [
         '> Skill "research-loop" v1.1.0 from Knowledge',
-        `> ${ns.slug}/skills/frink/research-loop.md · version 2 (current version)`,
+        `> ${ns.slug}/skills/frink/research-loop.md · version 2 (requested version)`,
         `> sha256 ${byName.provenance.sha256}`,
         '> license: MIT',
         '',
@@ -248,7 +287,13 @@ describe('agor_skills_list / agor_skills_get', () => {
     expect(old.provenance).toMatchObject({ version_number: 1, selected_by: 'requested version' });
     expect(old.content).toContain('Old.');
 
-    await expect(tools.agor_skills_get({ name: 'nope' })).rejects.toThrow(/No skill named "nope"/);
+    await expect(tools.agor_skills_get({ name: 'nope', version: 'latest' })).rejects.toThrow(
+      /No skill named "nope"/
+    );
+    // Without a version, only this session's pinned release is served; it has none.
+    await expect(tools.agor_skills_get({ name: 'research-loop' })).rejects.toThrow(
+      /This session was not given a team skills release.*version: 'latest'/
+    );
     await expect(tools.agor_skills_get({})).rejects.toThrow(/Provide name or documentId/);
   });
 
@@ -279,7 +324,10 @@ describe('agor_skills_list / agor_skills_get', () => {
       created_by: owner.user_id as UserID,
     });
     const got = payload(
-      await toolsFor(fixture, owner).agor_skills_get({ documentId: doc.document_id })
+      await toolsFor(fixture, owner).agor_skills_get({
+        documentId: doc.document_id,
+        version: 'latest',
+      })
     );
     const header = got.content.split('\n\nBody.')[0];
     const lines = header.split('\n');
@@ -299,12 +347,12 @@ describe('agor_skills_list / agor_skills_get', () => {
     await putSkillDoc(fixture, owner, ns, 'skills/maya/triage.md', skillMarkdown('triage'));
     await putSkillDoc(fixture, owner, ns, 'skills/susan/triage.md', skillMarkdown('triage'));
     const tools = toolsFor(fixture, owner, { branch: null });
-    await expect(tools.agor_skills_get({ name: 'triage' })).rejects.toThrow(
+    await expect(tools.agor_skills_get({ name: 'triage', version: 'latest' })).rejects.toThrow(
       /Several skills are named "triage"/
     );
     // From Maya's session, her own copy wins.
     const maya = toolsFor(fixture, owner, { branch: teammateBranch('Maya') });
-    expect(payload(await maya.agor_skills_get({ name: 'triage' })).path).toBe(
+    expect(payload(await maya.agor_skills_get({ name: 'triage', version: 'latest' })).path).toBe(
       'skills/maya/triage.md'
     );
   });
@@ -491,6 +539,7 @@ describe('agor_skillsets_release / agor_skillsets_get', () => {
       const { fixture, owner, ns } = await frinkNamespace(db);
       const frink = toolsFor(fixture, owner, { branch: teammateBranch('Professor Frink'), db });
       await frink.agor_skillsets_release({ teammate: 'frink' });
+      const receipt = await deliverTo(fixture, owner, teammateBranch('Professor Frink'));
       await putSkillDoc(
         fixture,
         owner,
@@ -539,12 +588,37 @@ describe('agor_skillsets_release / agor_skillsets_get', () => {
         'new-thing': [null, 1],
       });
 
-      // agor_skills_get serves the pinned version by default.
+      // The list describes what this session was given.
+      expect(list.equipped).toMatchObject({
+        release: 1,
+        namespace: ns.slug,
+        path: 'skillsets/frink.md',
+        manifest_version_id: receipt.manifest_version_id,
+        skills: 2,
+      });
+      expect(
+        Object.fromEntries(
+          list.skills.map((s: { name: string; equipped_version_number: number | null }) => [
+            s.name,
+            s.equipped_version_number,
+          ])
+        )
+      ).toEqual({ 'standing-facts': 1, 'research-loop': 1, 'new-thing': null });
+
+      // agor_skills_get serves this session's pin by default.
       const got = payload(await frink.agor_skills_get({ name: 'research-loop' }));
       expect(got.provenance).toMatchObject({
         version_number: 1,
-        selected_by: `release r1 (${ns.slug}/skillsets/frink.md)`,
+        selected_by: `session release r1 (${ns.slug}/skillsets/frink.md)`,
       });
+      // A newer release does not change what this session gets.
+      await frink.agor_skillsets_release({ teammate: 'frink' });
+      expect(
+        payload(await frink.agor_skills_get({ name: 'research-loop' })).provenance.version_number
+      ).toBe(1);
+      await expect(frink.agor_skills_get({ name: 'new-thing' })).rejects.toThrow(
+        /new-thing is not in this session's release r1/
+      );
       const latest = payload(
         await frink.agor_skills_get({ name: 'research-loop', version: 'latest' })
       );
@@ -559,6 +633,7 @@ describe('agor_skillsets_release / agor_skillsets_get', () => {
     const { fixture, owner, ns } = await frinkNamespace(db);
     const frink = toolsFor(fixture, owner, { branch: teammateBranch('Professor Frink'), db });
     await frink.agor_skillsets_release({ teammate: 'frink' });
+    await deliverTo(fixture, owner, teammateBranch('Professor Frink'));
     const pinned = payload(await frink.agor_skillsets_get({})).skillsets[0].skills.find(
       (s: { name: string }) => s.name === 'research-loop'
     );
@@ -567,7 +642,16 @@ describe('agor_skillsets_release / agor_skillsets_get', () => {
       .where(eq(kbDocumentVersions.version_id, pinned.version_id))
       .run();
     await expect(frink.agor_skills_get({ name: 'research-loop' })).rejects.toThrow(
-      /no longer matches its sha256; it was not returned/
+      /The content pinned by this session's release r1 .* no longer matches its sha256; it was not returned/
+    );
+    // Another session of the same teammate without a receipt gets nothing by default.
+    const other = toolsFor(fixture, owner, {
+      branch: teammateBranch('Professor Frink'),
+      db,
+      sessionId: '01a00000-0000-7000-8000-0000000000c2' as SessionID,
+    });
+    await expect(other.agor_skills_get({ name: 'research-loop' })).rejects.toThrow(
+      /not given a team skills release/
     );
     // Explicit 'latest' is still available on purpose.
     await putSkillDoc(
@@ -580,5 +664,39 @@ describe('agor_skillsets_release / agor_skillsets_get', () => {
     expect(
       payload(await frink.agor_skills_get({ name: 'research-loop', version: 'latest' })).provenance
     ).toMatchObject({ version: '9.0.0', selected_by: 'requested version' });
+  });
+  dbTest('a name two pinned skills share is ambiguous, never silently resolved', async ({ db }) => {
+    const { fixture, owner, ns } = await frinkNamespace(db);
+    const shared = await putSkillDoc(
+      fixture,
+      owner,
+      ns,
+      'skills/_shared/loop.md',
+      skillMarkdown('loop', { body: '# Shared loop' })
+    );
+    const own = await putSkillDoc(
+      fixture,
+      owner,
+      ns,
+      'skills/frink/loop.md',
+      skillMarkdown('loop', { body: '# Frink loop' })
+    );
+    const frink = toolsFor(fixture, owner, { branch: teammateBranch('Professor Frink'), db });
+    await frink.agor_skillsets_release({ teammate: 'frink' });
+    await deliverTo(fixture, owner, teammateBranch('Professor Frink'));
+
+    const ambiguous = frink.agor_skills_get({ name: 'loop' });
+    await expect(ambiguous).rejects.toThrow(/"loop" is ambiguous in this session's release r1/);
+    await expect(frink.agor_skills_get({ name: 'loop' })).rejects.toThrow(shared.document_id);
+    await expect(frink.agor_skills_get({ name: 'loop' })).rejects.toThrow(own.document_id);
+    await expect(frink.agor_skills_get({ name: 'loop' })).rejects.toThrow(/Pass documentId/);
+
+    // documentId picks exactly one, still at the session's pin.
+    expect(payload(await frink.agor_skills_get({ documentId: own.document_id })).content).toContain(
+      '# Frink loop'
+    );
+    expect(
+      payload(await frink.agor_skills_get({ documentId: shared.document_id })).content
+    ).toContain('# Shared loop');
   });
 });

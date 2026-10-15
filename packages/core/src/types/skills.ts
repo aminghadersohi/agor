@@ -200,3 +200,37 @@ export interface SkillSetEntryStatus extends SkillSetEntry {
   /** Frontmatter `metadata.version` of the current version. */
   latest_version?: string;
 }
+
+/** `session.custom_context` key of the skills receipt. Server-managed. */
+export const SESSION_SKILLS_RECEIPT_KEY = 'skills_receipt' as const;
+
+/**
+ * What a session on a teammate branch was given at start: one skill set
+ * release, by manifest version, with the exact pins. Written once by the
+ * daemon on the first task that delivers an index; later tasks in the same
+ * session keep this release even after a newer one is cut, and
+ * `agor_skills_get` serves exactly these pins by default.
+ */
+export interface SessionSkillsReceipt {
+  teammate: string;
+  release: number;
+  /** Provider namespace slug. */
+  namespace: string;
+  /** `skillsets/<key>.md`. */
+  skillset_path: string;
+  manifest_document_id: KnowledgeDocumentID;
+  manifest_version_id: KnowledgeDocumentVersionID;
+  skills: Array<{
+    name: string;
+    document_id: KnowledgeDocumentID;
+    version_id: KnowledgeDocumentVersionID;
+    version_number: number;
+    sha256: string;
+  }>;
+  /** ISO timestamp of the first delivery. */
+  delivered_at: string;
+  /** Agentic tool that received the index (`claude-code`, `codex`, `gemini`, …). */
+  harness: string;
+  /** Pinned skills left out of the index because they were missing or failed verification. */
+  omitted?: number;
+}
