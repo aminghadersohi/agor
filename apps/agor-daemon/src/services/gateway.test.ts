@@ -12,6 +12,7 @@ import {
   runMigrations,
   runWithTenantContext,
   runWithTenantDatabaseScope,
+  SessionRepository,
   shortId,
   UserMCPOAuthTokenRepository,
   UsersRepository,
@@ -28,6 +29,7 @@ import type {
   GatewayChannel,
   GatewayInboundEventID,
   GatewayOutboundMessage,
+  Session,
   SessionID,
   SessionPromptAuthority,
   SessionSdkHomeScope,
@@ -1443,7 +1445,7 @@ describe('GatewayService Slack thread catch-up', () => {
       expect.objectContaining({
         custom_context: expect.objectContaining({ gateway_source: expect.any(Object) }),
       }),
-      { _agenticConfigResolved: true }
+      { _agenticConfigResolved: true, _skipMcpDefaults: true }
     );
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2835,6 +2837,11 @@ describe('GatewayService MCP resolution', () => {
 
   it('attaches gateway MCP defaults through the real guarded SessionsService boundary', async () => {
     const { db, observations, touch } = makeGuardedPostgresDatabase();
+    // Channel/user defaults are inherited, not a caller selection: they must
+    // not suppress implicit global servers the way an explicit create does.
+    const markSelection = vi
+      .spyOn(SessionRepository.prototype, 'update')
+      .mockImplementation(async (id, updates) => ({ session_id: id, ...updates }) as Session);
     const emitted = vi.fn(() => {
       expect(getCurrentTenantId()).toBe('tenant-channel');
       expect(getCurrentTenantDatabaseScope()).toBeUndefined();
@@ -2893,6 +2900,7 @@ describe('GatewayService MCP resolution', () => {
 
     expect(setMCPServers).toHaveBeenCalledWith('sess-new', [userDefaultMcpId], 'gateway');
     expect(addServer).toHaveBeenCalledWith('sess-new', userDefaultMcpId);
+    expect(markSelection).not.toHaveBeenCalled();
     expect(observations).toContainEqual({
       label: 'session-mcp-add',
       kind: 'tenant',

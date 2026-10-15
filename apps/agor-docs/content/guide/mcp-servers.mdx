@@ -203,6 +203,18 @@ is not a routine reconnect and does not revoke tokens at the provider.
 
 ### Saved OAuth status
 
+A complete session MCP selection is authoritative, including an empty selection:
+`mcpServerIds: []` means no external MCP servers. Omitting the selection retains
+legacy global-server inheritance. The distinction is saved only when a caller
+supplies the selection while creating or initializing a session (or spawning a
+subsession). Forks, and subsessions spawned without a selection, inherit it from
+their parent. Inherited branch, user or gateway-channel defaults, and the server
+attached by an MCP Catalog "Start new session", keep global servers, and later
+link edits never change it. It is not inferred from an empty
+attachment table on older sessions. The built-in Agor MCP remains available.
+`attached_mcp_servers` reports explicit links, not implicit global servers, so an
+empty list alone does not establish that a historical task ran without external MCP.
+
 OAuth badges reflect the last saved-grant check, refreshed when the UI loads or
 reconnects and after explicit OAuth actions/events. Idle tabs do not scan all
 grants on a timer. The badge is not a live provider-health guarantee: credentials
