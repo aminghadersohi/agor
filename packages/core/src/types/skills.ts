@@ -136,3 +136,67 @@ export interface SkillProvider {
   pin(ref: SkillRef, selector?: SkillVersionSelector): Promise<PinnedSkill>;
   verify(pinned: PinnedSkill): Promise<SkillVerification>;
 }
+
+/**
+ * Skill sets: a frozen, numbered release of one teammate's skills.
+ *
+ * Each teammate has one `kind: bundle` manifest per provider namespace, at
+ * `skillsets/<teammate key>.md`. Its frontmatter pins every skill by document,
+ * version and sha256. A new release is a new Knowledge version of the same
+ * document with `release` + 1, written with `expected_version` so concurrent
+ * releases conflict instead of overwriting each other. Editing a skill changes
+ * nothing for sessions until the next release.
+ */
+export const SKILLSETS_ROOT = 'skillsets' as const;
+
+/** Bounds shared by manifest reading and writing; a release that exceeds them is refused. */
+export const MAX_SKILLSET_SKILLS = 150;
+export const MAX_SKILLSET_MANIFEST_BYTES = 48 * 1024;
+
+export interface SkillSetEntry {
+  /** Frontmatter `name` at release time. */
+  name: string;
+  /** Frontmatter `metadata.version` at release time. */
+  version?: string;
+  document_id: KnowledgeDocumentID;
+  path: string;
+  version_id: KnowledgeDocumentVersionID;
+  version_number: number;
+  sha256: string;
+}
+
+export interface SkillSetManifest {
+  /** Skill set name: the teammate key, e.g. `fritz`. */
+  name: string;
+  /** Teammate display name at release time. */
+  teammate: string;
+  /** Monotonic release number, starting at 1. */
+  release: number;
+  /** ISO timestamp of the release. */
+  created_at: string;
+  /** User who cut the release. */
+  created_by: string;
+  skills: SkillSetEntry[];
+}
+
+/**
+ * - `current`: the pinned version is the skill's current version and its hash matches.
+ * - `update_available`: a newer version of the skill exists.
+ * - `missing`: the document or pinned version is gone, archived, or unreadable.
+ * - `hash_mismatch`: the stored content of the pinned version no longer hashes to the pin.
+ */
+export const SKILL_PIN_STATUSES = [
+  'current',
+  'update_available',
+  'missing',
+  'hash_mismatch',
+] as const;
+export type SkillPinStatus = (typeof SKILL_PIN_STATUSES)[number];
+
+export interface SkillSetEntryStatus extends SkillSetEntry {
+  status: SkillPinStatus;
+  /** Current version number of the skill, when it is still readable. */
+  latest_version_number?: number;
+  /** Frontmatter `metadata.version` of the current version. */
+  latest_version?: string;
+}

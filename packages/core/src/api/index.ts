@@ -407,6 +407,33 @@ export interface BranchSkillsService {
   find(params?: Params & { query?: { include_drift?: boolean } }): Promise<TeammateSkillsReport>;
 }
 
+/** One teammate/namespace outcome of `skills/releases`. */
+export interface SkillReleaseResult {
+  namespace: string;
+  teammate: string;
+  path?: string;
+  status: 'released' | 'unchanged' | 'skipped' | 'denied' | 'conflict' | 'error';
+  release?: number;
+  previous_release?: number | null;
+  skills?: number;
+  authorized_as?: 'curator' | 'admin';
+  manifest_version_number?: number;
+  reason?: string;
+}
+
+/** `skills/releases` — admin-only skill set releases (`agor skills release`). */
+export interface SkillReleasesService {
+  create(
+    data: {
+      teammate?: string;
+      all?: boolean;
+      namespace?: string;
+      expectedVersion?: number | string;
+    },
+    params?: Params
+  ): Promise<{ counts: Record<string, number>; results: SkillReleaseResult[]; failed: boolean }>;
+}
+
 /**
  * Service interfaces for type safety
  */
@@ -1044,6 +1071,7 @@ export interface AgorClient
   service(path: `sessions/${string}/power-priority`): SessionPowerPriorityService;
   service(path: `branches/${string}/front-desk`): BranchFrontDeskService;
   service(path: `branches/${string}/skills`): BranchSkillsService;
+  service(path: 'skills/releases'): SkillReleasesService;
   service(path: 'zone-workflow-transitions'): ZoneWorkflowTransitionsService;
   service(path: 'zone-workflow-advances'): ZoneWorkflowAdvancesService;
   service(path: 'schedules'): SchedulesService;

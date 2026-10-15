@@ -46,6 +46,7 @@ import {
   extractKnowledgeLinks,
   KNOWLEDGE_ARCHIVE_FILTERS,
   normalizeKnowledgeDocumentIconEmoji,
+  normalizeKnowledgeNamespaceSlug,
   parseKnowledgeUri,
   titleFromKnowledgeContent,
 } from '@agor/core/types';
@@ -60,6 +61,12 @@ import {
   knowledgeChunkerOptionsFromSettings,
   knowledgeUnitsForMarkdown,
 } from '../knowledge/units.js';
+import {
+  configuredProviderSlugs,
+  hasSkillsetReleaseWrite,
+  isGovernedSkillSetLocation,
+  SKILLSET_GOVERNED_MESSAGE,
+} from '../skills/skillset-governance.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import {
   canReadKnowledgeDocument,
@@ -240,6 +247,42 @@ export class KnowledgeDocumentsService extends DrizzleService<
     return canWriteKnowledgeDocument(this.namespaces, document, user);
   }
 
+  /**
+   * Skill set governance (`skills/skillset-governance.ts`): any write whose
+   * current or resulting location is `skillsets/**` in a configured skills
+   * provider namespace must carry the release capability. Returns true when
+   * the write is such a release write, so the caller skips the per-document
+   * edit policy and namespace ACL: release authority comes from config.
+   */
+  private async assertSkillsetGovernance(
+    locations: Array<{ namespace_id?: string | null; slug?: string | null; path?: string | null }>,
+    params?: KnowledgeDocumentParams
+  ): Promise<boolean> {
+    const slugs = configuredProviderSlugs(this.app?.get?.('config'));
+    if (slugs.size === 0) return false;
+    let governed = false;
+    for (const location of locations) {
+      let slug = location.slug ?? null;
+      if (!slug && location.namespace_id) {
+        slug = (await this.namespaces.findById(location.namespace_id))?.slug ?? null;
+      }
+      if (isGovernedSkillSetLocation(slugs, slug, location.path)) governed = true;
+    }
+    if (!governed) return false;
+    if (!hasSkillsetReleaseWrite(params)) throw new Forbidden(SKILLSET_GOVERNED_MESSAGE);
+    return true;
+  }
+
+  /** Refuse to create a namespace whose slug is a configured provider, unless an admin does. */
+  private assertMayCreateNamespaceSlug(slug: string, user?: User): void {
+    const canonical = normalizeKnowledgeNamespaceSlug(slug);
+    if (configuredProviderSlugs(this.app?.get?.('config')).has(canonical) && !this.isAdmin(user)) {
+      throw new Forbidden(
+        `${slug} is a configured skills provider namespace; only an admin can create it.`
+      );
+    }
+  }
+
   private canManageDocument(document: KnowledgeDocument, user?: User): boolean {
     return this.isAdmin(user) || Boolean(user?.user_id && document.created_by === user.user_id);
   }
@@ -278,6 +321,35 @@ export class KnowledgeDocumentsService extends DrizzleService<
     const namespace = await this.namespaces.findById(document.namespace_id);
     if (!namespace || namespace.archived) {
       throw new NotFound('Knowledge document not found');
+    }
+  }
+
+  /**
+   * A document never changes namespace through put/patch/update: persistence
+   * keeps `existing.namespace_id`. A request naming a different namespace is
+   * refused rather than ignored, so nothing (in particular skill set
+   * governance) is ever decided against a namespace the write won't touch.
+   */
+  private async assertNamespaceUnchanged(
+    existing: KnowledgeDocument,
+    fields: { namespace_id?: unknown; namespace_slug?: unknown }
+  ): Promise<void> {
+    if (
+      fields.namespace_id !== undefined &&
+      fields.namespace_id !== null &&
+      String(fields.namespace_id) !== existing.namespace_id
+    ) {
+      throw new BadRequest(
+        'namespace_id does not match the document; documents cannot move between namespaces'
+      );
+    }
+    if (typeof fields.namespace_slug === 'string') {
+      const namespace = await this.namespaces.findById(existing.namespace_id);
+      if (normalizeKnowledgeNamespaceSlug(fields.namespace_slug) !== namespace?.slug) {
+        throw new BadRequest(
+          'namespace_slug does not match the document; documents cannot move between namespaces'
+        );
+      }
     }
   }
 
@@ -707,7 +779,13 @@ export class KnowledgeDocumentsService extends DrizzleService<
     const userId = this.attributionUserId(params, data.created_by);
 
     const parsed = parseKnowledgeUri(data.uri);
-    const namespaceSlug = data.namespace_slug ?? parsed?.namespace_slug;
+    const rawNamespaceSlug = data.namespace_slug ?? parsed?.namespace_slug;
+    // Canonical form first: lookups, the provider-slug reservation and creation
+    // must all see the slug persistence will store.
+    const namespaceSlug =
+      rawNamespaceSlug === undefined
+        ? undefined
+        : normalizeKnowledgeNamespaceSlug(rawNamespaceSlug);
     const path = data.path ?? parsed?.path;
     const existing = await this.resolveDocumentRef({
       document_id: data.document_id,
@@ -718,8 +796,19 @@ export class KnowledgeDocumentsService extends DrizzleService<
 
     if (existing) {
       await this.assertActiveDocument(existing);
+      await this.assertNamespaceUnchanged(existing, {
+        namespace_id: (data as { namespace_id?: unknown }).namespace_id,
+        namespace_slug: namespaceSlug,
+      });
+      const releaseWrite = await this.assertSkillsetGovernance(
+        [
+          { namespace_id: existing.namespace_id, path: existing.path },
+          { namespace_id: existing.namespace_id, path: path ?? existing.path },
+        ],
+        params
+      );
       this.assertCanChangeGovernance(existing, data, params?.user as User | undefined);
-      if (!(await this.canEdit(existing, params?.user as User | undefined))) {
+      if (!releaseWrite && !(await this.canEdit(existing, params?.user as User | undefined))) {
         if (existing.edit_policy === 'owner') {
           throw new KnowledgeDocumentOwnerOnlyEditError();
         }
@@ -740,7 +829,7 @@ export class KnowledgeDocumentsService extends DrizzleService<
           },
           existing
         ),
-        (current) => this.assertCurrentWrite(current, data, params)
+        (current) => this.assertCurrentWrite(current, data, params, releaseWrite)
       );
       await this.replaceSearchUnitsForContent(persisted, data.content_text);
       await this.syncGraphReferences(persisted, data.content_text, userId);
@@ -757,6 +846,7 @@ export class KnowledgeDocumentsService extends DrizzleService<
 
     let namespace = await this.namespaces.findBySlug(namespaceSlug);
     if (!namespace && data.create_namespace === true) {
+      this.assertMayCreateNamespaceSlug(namespaceSlug, params?.user as User | undefined);
       namespace = await this.namespaces.create({
         slug: namespaceSlug,
         display_name: data.namespace_display_name ?? namespaceSlug,
@@ -777,7 +867,13 @@ export class KnowledgeDocumentsService extends DrizzleService<
     }
     if (!namespace) throw new NotFound(`Knowledge namespace not found: ${namespaceSlug}`);
     if (namespace.archived) throw new NotFound(`Knowledge namespace not found: ${namespaceSlug}`);
-    await this.assertCanWriteNamespace(namespace.namespace_id, params?.user as User | undefined);
+    const releaseCreate = await this.assertSkillsetGovernance(
+      [{ slug: namespace.slug, path }],
+      params
+    );
+    if (!releaseCreate) {
+      await this.assertCanWriteNamespace(namespace.namespace_id, params?.user as User | undefined);
+    }
     await this.assertSkillFrontmatter(data, null, path);
 
     const persisted = await this.repo.create(
@@ -819,7 +915,13 @@ export class KnowledgeDocumentsService extends DrizzleService<
         ? await this.namespaces.findBySlug(prepared.namespace_slug)
         : null;
     if (!namespace || namespace.archived) throw new NotFound('Knowledge namespace not found');
-    await this.assertCanWriteNamespace(namespace.namespace_id, params?.user as User | undefined);
+    const releaseCreate = await this.assertSkillsetGovernance(
+      [{ slug: namespace.slug, path: prepared.path }],
+      params
+    );
+    if (!releaseCreate) {
+      await this.assertCanWriteNamespace(namespace.namespace_id, params?.user as User | undefined);
+    }
     await this.assertSkillFrontmatter(prepared, null, prepared.path);
     const persisted = await this.repo.create({
       ...prepared,
@@ -887,8 +989,17 @@ export class KnowledgeDocumentsService extends DrizzleService<
     const existing = await this.repo.findById(String(id));
     if (!existing) throw new NotFound(`Knowledge document not found: ${id}`);
     await this.assertActiveDocument(existing);
+    await this.assertNamespaceUnchanged(existing, data as KnowledgeDocumentWriteData);
+    // Governance is decided on the persisted namespace, the only one this write touches.
+    const releaseWrite = await this.assertSkillsetGovernance(
+      [
+        { namespace_id: existing.namespace_id, path: existing.path },
+        { namespace_id: existing.namespace_id, path: data.path ?? existing.path },
+      ],
+      params
+    );
     this.assertCanChangeGovernance(existing, data, params?.user as User | undefined);
-    if (!(await this.canEdit(existing, params?.user as User | undefined))) {
+    if (!releaseWrite && !(await this.canEdit(existing, params?.user as User | undefined))) {
       throw new Forbidden('You do not have permission to update this knowledge document');
     }
     await this.assertSkillFrontmatter(
@@ -904,7 +1015,7 @@ export class KnowledgeDocumentsService extends DrizzleService<
         updated_by: this.attributionUserId(params, data.updated_by),
         ...assistantAttribution(params),
       },
-      (current) => this.assertCurrentWrite(current, data, params)
+      (current) => this.assertCurrentWrite(current, data, params, releaseWrite)
     );
     await this.replaceSearchUnitsForContent(
       persisted,
@@ -941,8 +1052,17 @@ export class KnowledgeDocumentsService extends DrizzleService<
     const existing = await this.repo.findById(String(id));
     if (!existing) throw new NotFound(`Knowledge document not found: ${id}`);
     await this.assertActiveDocument(existing);
+    await this.assertNamespaceUnchanged(existing, data as KnowledgeDocumentWriteData);
+    // Governance is decided on the persisted namespace, the only one this write touches.
+    const releaseWrite = await this.assertSkillsetGovernance(
+      [
+        { namespace_id: existing.namespace_id, path: existing.path },
+        { namespace_id: existing.namespace_id, path: data.path ?? existing.path },
+      ],
+      params
+    );
     this.assertCanChangeGovernance(existing, data, params?.user as User | undefined);
-    if (!(await this.canEdit(existing, params?.user as User | undefined))) {
+    if (!releaseWrite && !(await this.canEdit(existing, params?.user as User | undefined))) {
       throw new Forbidden('You do not have permission to update this knowledge document');
     }
     await this.assertSkillFrontmatter(
@@ -958,7 +1078,7 @@ export class KnowledgeDocumentsService extends DrizzleService<
         updated_by: this.attributionUserId(params, data.updated_by),
         ...assistantAttribution(params),
       },
-      (current) => this.assertCurrentWrite(current, data, params)
+      (current) => this.assertCurrentWrite(current, data, params, releaseWrite)
     );
     await this.replaceSearchUnitsForContent(
       persisted,
@@ -1027,9 +1147,10 @@ export class KnowledgeDocumentsService extends DrizzleService<
   private async assertCurrentWrite(
     current: KnowledgeDocument,
     data: KnowledgeDocumentWriteData,
-    params?: KnowledgeDocumentParams
+    params?: KnowledgeDocumentParams,
+    releaseWrite = false
   ): Promise<boolean> {
-    if (!(await this.canEdit(current, params?.user as User | undefined)))
+    if (!releaseWrite && !(await this.canEdit(current, params?.user as User | undefined)))
       throw new Forbidden('You do not have permission to update this knowledge document');
     await this.assertActiveDocument(current);
     this.assertCanChangeGovernance(current, data, params?.user as User | undefined);
@@ -1065,6 +1186,11 @@ export class KnowledgeDocumentsService extends DrizzleService<
     }
     const existing = await this.repo.findById(String(id));
     if (!existing) throw new NotFound('Knowledge document not found');
+    // Archiving or restoring a manifest would reopen or replace a release.
+    await this.assertSkillsetGovernance(
+      [{ namespace_id: existing.namespace_id, path: existing.path }],
+      params
+    );
     const authorize = async (current: KnowledgeDocument) => {
       // Namespace write is the outer gate; being a public editor is not ownership.
       if (
