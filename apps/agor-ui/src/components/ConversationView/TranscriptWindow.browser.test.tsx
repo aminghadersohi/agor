@@ -178,8 +178,15 @@ const distanceFromBottom = (viewport: HTMLElement) =>
   viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
 /** A programmatic scroll is a native scroll event, as the stick-to-bottom hook sees a reader. */
 async function scrollTo(viewport: HTMLElement, top: number) {
-  viewport.scrollTop = top;
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await act(async () => {
+    // A reader's upward wheel cancels the pending stick-to-bottom spring;
+    // assigning scrollTop alone can race that animation on short viewports.
+    viewport.dispatchEvent(
+      new WheelEvent('wheel', { deltaY: top - viewport.scrollTop, bubbles: true })
+    );
+    viewport.scrollTop = top;
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 50)));
+  });
 }
 
 afterEach(cleanup);
@@ -462,6 +469,8 @@ it('forgets the reading state of trimmed turns and keeps it for turns still load
     act(() => loadOlder.click());
     await waitFor(() => expect(mountedTurns(viewport)[0]).toBeLessThan(before), { timeout: 5_000 });
   }
-  await waitFor(() => expect(toggle(5)).toHaveAttribute('aria-expanded', 'false'));
-  expect(toggle(9)).toHaveAttribute('aria-expanded', 'false');
+  await waitFor(() => {
+    expect(toggle(5)).toHaveAttribute('aria-expanded', 'false');
+    expect(toggle(9)).toHaveAttribute('aria-expanded', 'false');
+  });
 });

@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -53,7 +53,7 @@ export async function exerciseDeletionRecovery(raw: Database, dialect: 'sqlite' 
   const tenant = `recovery-${generateId()}` as TenantID;
   const scoped = <T>(work: (tx: Database) => Promise<T>) =>
     runWithTenantDatabaseScope(db, tenant, work);
-  const root = await mkdtemp(join(tmpdir(), 'agor-delete-recovery-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'agor-delete-recovery-')));
   const app = {
     get: () => ({ execution: {} }),
     service: () => ({ emit: () => {} }),

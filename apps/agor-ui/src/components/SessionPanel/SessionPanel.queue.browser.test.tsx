@@ -121,7 +121,9 @@ function fixture(status: Session['status'] = 'running') {
 }
 const order = () =>
   Array.from(
-    screen.getByRole('region', { name: 'Queued task list' }).querySelectorAll('.ant-typography')
+    screen
+      .getByRole('region', { name: 'Queued task list' })
+      .querySelectorAll('.ant-typography:not(.ant-typography-secondary)')
   ).map((label) => label.textContent);
 afterEach(() => {
   cleanup();
