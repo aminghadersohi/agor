@@ -153,3 +153,26 @@ describe('providerSkillAssignment', () => {
     expect(providerSkillIsFor('skills/fritz/README.md', keys)).toBe(false);
   });
 });
+
+describe('assignTeammateSkillDocs and _shared', () => {
+  const doc = (document_id: string, namespace_id: string, path: string): SkillDocRef => ({
+    document_id,
+    namespace_id,
+    path,
+  });
+
+  it('gives provider _shared skills to every teammate, but not _shared elsewhere', () => {
+    const docs = [
+      doc('a', 'provider', 'skills/_shared/standing-facts.md'),
+      doc('b', 'other', 'skills/_shared/ignored.md'),
+      doc('c', 'provider', 'skills/mila/brief.md'),
+    ];
+    expect(
+      assignTeammateSkillDocs(docs, {
+        ownKeys: ['sienna'],
+        otherKeys: ['mila'],
+        sharedNamespaceIds: ['provider'],
+      }).map((d) => d.document_id)
+    ).toEqual(['a']);
+  });
+});

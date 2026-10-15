@@ -293,6 +293,7 @@ async function handlePromptPayload(
     daemonUrl: resolvedDaemonUrl,
     messageSource: payload.params.messageSource,
     promptOrigin: payload.params.promptOrigin,
+    skillsIndex: payload.params.skillsIndex,
     agenticToolContext: payload.agenticToolContext,
     resolvedConfig: payload.resolvedConfig,
   });

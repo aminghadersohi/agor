@@ -973,8 +973,9 @@ export function getGatewaySource(session: Pick<Session, 'custom_context'>): Gate
 /**
  * Bulky, single-session `custom_context` keys that a lean session list omits.
  *
- * `scheduled_run` (the scheduler's run snapshot) and the SDK-reported
- * `slash_commands` / `skills` inventories are read only for one open session,
+ * `scheduled_run` (the scheduler's run snapshot), the SDK-reported
+ * `slash_commands` / `skills` inventories and the `skills_receipt` of the
+ * skill set release delivered at start are read only for one open session,
  * yet they make up most of every session row. `sessions.find({ lean: true })`
  * drops them from each row; `sessions.get` always returns them. Everything
  * else in `custom_context` (e.g. `gateway_source`, user template fields) stays.
@@ -983,6 +984,7 @@ export const LEAN_SESSION_LIST_OMITTED_CONTEXT_KEYS = [
   'scheduled_run',
   'slash_commands',
   'skills',
+  'skills_receipt',
 ] as const;
 
 export type LeanSessionListOmittedContextKey =

@@ -59,8 +59,10 @@ vi.mock('../base/permission-hooks.js', () => ({
 }));
 
 import { getMcpServersForSession } from '@agor/core/mcp';
+import { renderAgorSessionIdentity } from '@agor/core/templates/session-context';
 import { resolveMCPAuthHeaders } from '@agor/core/tools/mcp/jwt-auth';
 import * as Claude from '@anthropic-ai/claude-agent-sdk';
+import { setAgorSkillsIndex } from '../../agor-skills-index.js';
 import { CLAUDE_CODE_DISALLOWED_TOOLS, CLAUDE_CODE_TODO_TOOLS } from './constants.js';
 import { formatListForLog, type QuerySetupDeps, setupQuery } from './query-builder.js';
 
@@ -792,6 +794,35 @@ describe('setupQuery - Local Settings Support', () => {
       );
     }
   );
+
+  it('appends the team skills index between the Agor prompt and the session identity', async () => {
+    setAgorSkillsIndex(
+      '## Team skills (Fritz r2)\n- research-loop v1 — Loop. [ns/skills/fritz/research-loop.md]'
+    );
+    try {
+      const deps = createMockDeps();
+      await setupQuery('test-session' as SessionID, 'test prompt', deps);
+      const append = (
+        vi.mocked(Claude.query).mock.calls.at(-1)![0].options.systemPrompt as {
+          append: string;
+        }
+      ).append;
+      expect(append).toBe(
+        'prompt\n\n## Team skills (Fritz r2)\n- research-loop v1 — Loop. [ns/skills/fritz/research-loop.md]\n\n' +
+          renderAgorSessionIdentity('test-session')
+      );
+    } finally {
+      setAgorSkillsIndex(undefined);
+    }
+    const deps = createMockDeps();
+    await setupQuery('test-session' as SessionID, 'test prompt', deps);
+    const append = (
+      vi.mocked(Claude.query).mock.calls.at(-1)![0].options.systemPrompt as {
+        append: string;
+      }
+    ).append;
+    expect(append).toBe(`prompt\n\n${renderAgorSessionIdentity('test-session')}`);
+  });
 
   it('retains only UTF-8 byte metadata from provider stderr', async () => {
     const deps = createMockDeps();

@@ -70,6 +70,22 @@ describe('protectGatewaySourceMetadata', () => {
     const hook = context({ custom_context: { gateway_source: { channel_type: 'slack' } } }, null);
     expect(protectGatewaySourceMetadata(hook)).toBe(hook);
   });
+
+  it.each(['create', 'patch'] as const)(
+    'rejects external %s writes of the skills receipt',
+    (method) => {
+      expect(() =>
+        protectGatewaySourceMetadata(
+          context({ custom_context: { skills_receipt: { release: 99 } } }, 'socketio', method)
+        )
+      ).toThrow('session.custom_context.skills_receipt is server-managed');
+    }
+  );
+
+  it('allows the daemon to write the skills receipt', () => {
+    const hook = context({ custom_context: { skills_receipt: { release: 1 } } }, null);
+    expect(protectGatewaySourceMetadata(hook)).toBe(hook);
+  });
 });
 
 describe('stampCallbackPrincipal', () => {
