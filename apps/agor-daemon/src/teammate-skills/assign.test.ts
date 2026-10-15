@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   assignTeammateSkillDocs,
+  providerSkillAssignment,
+  providerSkillIsFor,
   type SkillDocRef,
   skillFolder,
   slugify,
@@ -119,5 +121,58 @@ describe('teammateGapPaths', () => {
       'skills/lund/_gaps.md',
       'skills/freda-lund/_gaps.md',
     ]);
+  });
+});
+
+describe('providerSkillAssignment', () => {
+  it('assigns _shared to everyone and other folders to that key', () => {
+    expect(providerSkillAssignment('skills/_shared/standing-facts.md')).toEqual({ kind: 'shared' });
+    expect(providerSkillAssignment('skills/Fritz/research.md')).toEqual({
+      kind: 'teammate',
+      key: 'fritz',
+    });
+    expect(providerSkillAssignment('skills/triage/x/SKILL.md')).toEqual({
+      kind: 'teammate',
+      key: 'triage',
+    });
+  });
+
+  it('ignores README files and paths outside a skills folder', () => {
+    expect(providerSkillAssignment('skills/README.md')).toBeUndefined();
+    expect(providerSkillAssignment('skills/fritz/README.md')).toBeUndefined();
+    expect(providerSkillAssignment('skills/loose.md')).toBeUndefined();
+    expect(providerSkillAssignment('docs/fritz/x.md')).toBeUndefined();
+  });
+
+  it('matches a teammate by any of its keys, plus shared skills', () => {
+    const keys = teammateSkillKeys('Professor Fritz');
+    expect(providerSkillIsFor('skills/fritz/x.md', keys)).toBe(true);
+    expect(providerSkillIsFor('skills/professor-fritz/x.md', keys)).toBe(true);
+    expect(providerSkillIsFor('skills/_shared/x.md', keys)).toBe(true);
+    expect(providerSkillIsFor('skills/mila/x.md', keys)).toBe(false);
+    expect(providerSkillIsFor('skills/fritz/README.md', keys)).toBe(false);
+  });
+});
+
+describe('assignTeammateSkillDocs and _shared', () => {
+  const doc = (document_id: string, namespace_id: string, path: string): SkillDocRef => ({
+    document_id,
+    namespace_id,
+    path,
+  });
+
+  it('gives provider _shared skills to every teammate, but not _shared elsewhere', () => {
+    const docs = [
+      doc('a', 'provider', 'skills/_shared/standing-facts.md'),
+      doc('b', 'other', 'skills/_shared/ignored.md'),
+      doc('c', 'provider', 'skills/mila/brief.md'),
+    ];
+    expect(
+      assignTeammateSkillDocs(docs, {
+        ownKeys: ['sienna'],
+        otherKeys: ['mila'],
+        sharedNamespaceIds: ['provider'],
+      }).map((d) => d.document_id)
+    ).toEqual(['a']);
   });
 });

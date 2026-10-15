@@ -1431,6 +1431,23 @@ export interface AgorTeammateSettings {
   framework_repo_url?: string;
 }
 
+/** One trusted skills provider: a Knowledge namespace and the teammate that curates it. */
+export interface AgorSkillsProviderSettings {
+  /** Knowledge namespace slug whose `skills/**` documents are team skills. */
+  namespace: string;
+  /** Teammate branch whose sessions may cut skill set releases for this namespace. */
+  curator_branch_id: string;
+}
+
+/**
+ * Team skills. Only namespaces listed here are skills providers; nothing in
+ * Knowledge (namespace metadata, document kinds) can make a namespace one.
+ * With no providers configured, no skills are listed or delivered.
+ */
+export interface AgorSkillsSettings {
+  providers?: AgorSkillsProviderSettings[];
+}
+
 /**
  * Knowledge Base semantic search settings. Secrets are stored separately in the
  * encrypted app_variables table; this config only carries non-secret defaults.
@@ -1630,6 +1647,9 @@ export interface AgorConfig {
 
   /** Operator-owned teammate bootstrap settings. */
   teammates?: AgorTeammateSettings;
+
+  /** Trusted team skills providers (Knowledge namespaces) and their curators. */
+  skills?: AgorSkillsSettings;
 
   /** Path configuration (data_home for repos/branches separation) */
   paths?: AgorPathSettings;

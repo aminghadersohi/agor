@@ -17,6 +17,7 @@ import { MCP_CLIENT_HINT_HEADER, MCP_CLIENT_HINTS } from '@agor/core/types';
 import { GEMINI_MANUAL_MESSAGE, isGeminiManualMode } from '@agor/core/utils/permission-mode-mapper';
 import type * as GeminiTypes from '@google/gemini-cli-core';
 import type { Part } from '@google/genai';
+import { withAgorSkillsIndex } from '../../agor-skills-index.js';
 import { getDaemonUrl } from '../../config.js';
 import type {
   BranchRepository,
@@ -621,7 +622,7 @@ export class GeminiPromptService {
       agents: { overrides: { browser: { enabled: false } } },
       policyEngineConfig: buildGeminiPolicy(Gemini, approvalMode, mcpServersConfig),
       mcpServers: mcpServersConfig,
-      userMemory: await renderAgorSystemPrompt(),
+      userMemory: withAgorSkillsIndex(await renderAgorSystemPrompt()),
       fileFiltering: { respectGitIgnore: true, respectGeminiIgnore: true },
     });
   }

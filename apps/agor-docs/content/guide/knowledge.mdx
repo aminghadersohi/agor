@@ -125,8 +125,48 @@ Common workflows:
 - **Round-trip through a worktree** with `agor_kb_materialize` and `agor_kb_publish_from_worktree`, where branch permissions allow local workspace access.
 - **Inspect history** with `agor_kb_history`.
 - **Connect the graph** with `agor_kb_link` and `agor_kb_graph_neighbors`.
+- **Find and read team skills** with `agor_skills_list` and `agor_skills_get` (see [Skill documents](#skill-documents)).
 
 This makes Knowledge a natural companion to [Teammates](/guide/teammates): teammates can still keep file-based identity and memory where that is useful, while using Agor Knowledge as shared, searchable operational memory for the whole workspace.
+
+### Skill documents
+
+A document of kind `skill` is an [Agent Skills](https://agentskills.io) procedure. It starts with YAML frontmatter:
+
+```markdown
+---
+name: release-checklist
+description: Steps to cut a release. Use when tagging a version or writing release notes.
+license: MIT
+metadata:
+  version: "1.2.0"
+---
+# Release checklist
+...
+```
+
+- `name` is required: lowercase letters, digits and single hyphens, at most 64 characters. It must equal the file name without `.md`, or the folder name for a `SKILL.md` file.
+- `description` is required, at most 1024 characters. Say what the skill does and when to use it.
+- `metadata.version` is optional: your own version label. It must be one short token of at most 32 letters, digits, dots, hyphens, plus signs or underscores, such as `1.2.0`. Knowledge still keeps every saved version with its sha256.
+
+`agor_kb_put` and `agor_kb_edit` reject a skill whose frontmatter breaks these rules and explain what to fix. A skill saved before these checks existed can still be edited without fixing it, as long as the edit leaves its frontmatter, path and kind alone. Agor logs a warning in that case.
+
+**Skills provider namespaces.** Team skills come only from namespaces that an operator lists under [`skills.providers` in config.yaml](/guide/config-yaml#team-skills-providers). Namespace metadata and document settings cannot make a namespace a provider. Within a configured namespace:
+
+- `skills/<teammate>/<skill>.md` goes to that teammate. `<teammate>` is the teammate's display name or one word of it, as in the [Skills view](/guide/teammates#seeing-a-teammates-skills).
+- `skills/_shared/<skill>.md` goes to every teammate.
+- `README.md` files, drafts and documents of other kinds are not skills.
+
+`agor_skills_list` shows the calling teammate's skills by default, or the skills of the teammate you pass as `teammate`. Each entry has the name, version, a short description and where the skill lives. `agor_skills_get` takes a `name` or `documentId` and returns the skill body. A short header above the body gives the namespace, path, version number, sha256 and license. Both tools only return skills you could also read with `agor_kb_get`. Values taken from frontmatter, such as the name, version and license, are reduced to one plain line before they are shown.
+
+**Skill set releases.** A release freezes a teammate's skills. It is a `bundle` document at `skillsets/<teammate>.md` in the provider namespace. Its frontmatter records the release number and pins each skill's document, version and sha256. Editing a skill does not change what teammates get until the next release. Use `agor_skills_list` and `agor_skills_get` to see the pinned versions. `agor_skills_get` serves a pinned skill only at its pin, and only if its content still matches the recorded sha256. Pass `version` (for example `'latest'`) to read another version on purpose.
+
+- `agor_skillsets_get` shows a teammate's latest release. It marks each pinned skill as `current`, `update_available` (a newer version exists), `missing` or `hash_mismatch` (the stored content no longer matches the pinned sha256). It also lists skills that no release includes yet.
+- `agor_skillsets_release({ teammate })` or `agor_skillsets_release({ all: true })` cuts release N+1. It pins the current version of every skill assigned to that teammate. If nothing changed since the last release, the teammate is reported as `unchanged` and no new release is written. Each release is a new version of the manifest document, so earlier releases stay in its history. If two releases are cut at the same time, one fails with a conflict and nothing is overwritten. To insist that nobody released since you looked, pass the manifest version you read as `expectedVersion`.
+- **Who can release.** Only two callers can cut a release:
+  - the **curator**: a session whose branch is the provider's `curator_branch_id` in [config.yaml](/guide/config-yaml#team-skills-providers), calling `agor_skillsets_release`. Owning the namespace, or being in another teammate's session, does not count;
+  - an **admin outside any Agor session**, with `agor skills release --teammate <name>` or `agor skills release --all`. This is how each teammate's first release is cut. The command uses your own CLI login or API key and refuses agent session credentials.
+- **Manifests are release-only.** In a configured provider namespace, everything under `skillsets/` is written only by releases. Ordinary Knowledge writes are refused there for every user, including admins. That covers `agor_kb_put`, `agor_kb_edit`, creating, renaming or moving a document into or out of `skillsets/`, archiving, restoring and importing. A release that would exceed 150 skills or 48 KB is refused, and the current release stays as it was. Creating a namespace whose slug is a configured provider needs an admin; leading or trailing spaces in a slug make no difference. A write that names a different namespace than the document already lives in is refused, because documents do not move between namespaces.
 
 ---
 

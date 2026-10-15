@@ -1030,6 +1030,12 @@ export interface TeammateConfig {
   localHome?: true;
   /** Knowledge Base namespace and grant config for teammate memory/context. */
   kb?: TeammateKnowledgeConfig;
+  /**
+   * Team skills delivery. On by default: each session on this teammate gets
+   * the index of its latest skill set release appended to the Agor system
+   * prompt. `enabled: false` opts this teammate branch out.
+   */
+  skills?: { enabled?: boolean };
 }
 
 /**

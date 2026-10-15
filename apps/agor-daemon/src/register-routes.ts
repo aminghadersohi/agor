@@ -243,6 +243,7 @@ import {
 } from './services/scheduler.js';
 import { runSessionInitializationStages } from './services/session-initialization.js';
 import { createSpawnPromptService } from './services/session-spawn-prompt';
+import { createSkillReleasesRoute } from './services/skill-releases.js';
 import {
   lockTenantAuthorizationFence,
   resolveCurrentTenantAuthorityActor,
@@ -1505,6 +1506,17 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     '/branches/:id/skills',
     createBranchSkillsRoute({ db, allowSuperadmin: () => superadminOpts.allowSuperadmin }),
     { find: { role: ROLES.VIEWER, action: "view a teammate's skills" } },
+    requireAuth
+  );
+
+  // `agor skills release` (fork): an admin outside any session cuts skill set
+  // releases. The route refuses executor/session tokens and service accounts
+  // itself; the manifest write carries the skill set governance capability.
+  registerPowerAuthenticatedRoute(
+    app,
+    '/skills/releases',
+    createSkillReleasesRoute({ db }),
+    { create: { role: ROLES.ADMIN, action: 'cut skill set releases' } },
     requireAuth
   );
 

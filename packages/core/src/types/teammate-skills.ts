@@ -1,5 +1,6 @@
 import type { BranchID, SessionID } from './id';
 import type { KnowledgeDocumentID, KnowledgeDocumentVersionID } from './knowledge';
+import type { SkillPinStatus } from './skills';
 
 /**
  * Read-only view of a teammate's skills (`branches/:id/skills`).
@@ -73,6 +74,47 @@ export interface TeammateSkill {
   updated_at?: string;
   origin?: TeammateSkillOrigin;
   drift?: TeammateSkillDrift;
+  /** How the teammate's latest skill set release pins this Knowledge skill. */
+  pin?: TeammateSkillPin;
+  /** True when the most recent session that recorded a skills receipt was given this version. */
+  delivered?: boolean;
+}
+
+export interface TeammateSkillPin {
+  release: number;
+  version_number: number;
+  status: SkillPinStatus;
+  /** Current version number, when the skill is still readable. */
+  latest_version_number?: number;
+}
+
+/**
+ * The teammate's latest skill set release and what its sessions were given.
+ * `none` = no release yet; `unavailable` = the release could not be read.
+ */
+export interface TeammateSkillRelease {
+  status: 'ok' | 'none' | 'unavailable';
+  /** False when the teammate opted out (`skills.enabled: false`). */
+  enabled: boolean;
+  reason?: string;
+  namespace_slug?: string;
+  /** `skillsets/<key>.md`. */
+  path?: string;
+  release?: number;
+  created_at?: string;
+  manifest_version_number?: number;
+  /** Pinned skills by status. */
+  counts?: Partial<Record<SkillPinStatus, number>>;
+  /** Skills assigned to the teammate that no release includes yet. */
+  unreleased?: number;
+  /** The most recent visible session with a skills receipt. */
+  delivered?: {
+    session_id: SessionID;
+    release: number;
+    delivered_at: string;
+    harness: string;
+    skills: number;
+  };
 }
 
 export const TEAMMATE_SKILL_GAP_PRIORITIES = ['P0', 'P1', 'P2'] as const;
@@ -117,6 +159,8 @@ export interface TeammateSkillsReport {
   branch_id: BranchID;
   skills: TeammateSkill[];
   gaps: TeammateSkillGapList;
+  /** Absent when the daemon predates skill set releases. */
+  release?: TeammateSkillRelease;
   sources: {
     knowledge: TeammateSkillSourceState & { namespace_slug?: string };
     in_repo: TeammateSkillSourceState;

@@ -7,7 +7,12 @@
  * database or filesystem.
  */
 
-import { frontmatterString, parseMarkdownFrontmatter } from '@agor/core/knowledge';
+import {
+  expectedSkillName,
+  frontmatterString,
+  parseMarkdownFrontmatter,
+  readSkillOrigin,
+} from '@agor/core/knowledge';
 import type {
   BranchID,
   BranchSkillFile,
@@ -77,6 +82,8 @@ export function skillKey(name: string): string {
   return colon >= 0 ? trimmed.slice(colon + 1) : trimmed;
 }
 
+export { readSkillOrigin };
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -88,34 +95,6 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-/**
- * `metadata.agor.origin`, also accepted as `metadata.origin`, from the skill's
- * frontmatter first and then the Knowledge document's metadata column.
- */
-export function readSkillOrigin(
-  ...sources: Array<Record<string, unknown> | null | undefined>
-): TeammateSkillOrigin | undefined {
-  for (const source of sources) {
-    const metadata = asRecord(source?.metadata) ?? undefined;
-    const candidates = [asRecord(asRecord(metadata?.agor)?.origin), asRecord(metadata?.origin)];
-    // The document metadata column may hold the `agor` block at its top level.
-    candidates.push(asRecord(asRecord(source?.agor)?.origin));
-    for (const raw of candidates) {
-      if (!raw) continue;
-      const origin: TeammateSkillOrigin = {
-        provider: nonEmptyString(raw.provider),
-        uri: nonEmptyString(raw.uri),
-        commit: nonEmptyString(raw.commit),
-        license: nonEmptyString(raw.license),
-        reviewed_by: nonEmptyString(raw.reviewed_by),
-        reviewed_at: nonEmptyString(raw.reviewed_at),
-      };
-      if (Object.values(origin).some(Boolean)) return origin;
-    }
-  }
-  return undefined;
-}
-
 /** `owner/repo@1a2b3c4` for a GitHub origin, otherwise the best short label available. */
 export function vendorPinLabel(origin: TeammateSkillOrigin): string {
   const shortCommit = origin.commit?.slice(0, 7);
@@ -125,16 +104,10 @@ export function vendorPinLabel(origin: TeammateSkillOrigin): string {
   return origin.provider ?? 'vendored';
 }
 
-function nameFromKnowledgePath(docPath: string): string {
-  const segments = docPath.split('/').filter(Boolean);
-  const last = segments.at(-1) ?? docPath;
-  if (last.toLowerCase() === 'skill.md' && segments.length > 1) return segments.at(-2) as string;
-  return last.replace(/\.md$/i, '');
-}
-
 function knowledgeSkill(doc: KnowledgeSkillInput): TeammateSkill {
   const frontmatter = parseMarkdownFrontmatter(doc.content);
-  const name = frontmatterString(frontmatter, 'name', 200) ?? nameFromKnowledgePath(doc.path);
+  const name =
+    frontmatterString(frontmatter, 'name', 200) ?? expectedSkillName(doc.path) ?? doc.path;
   const origin = readSkillOrigin(frontmatter, doc.metadata);
   const common = {
     name,

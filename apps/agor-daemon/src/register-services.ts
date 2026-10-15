@@ -110,6 +110,7 @@ import type { RefreshAndPersistDeps } from '@agor/core/tools/mcp/oauth-refresh';
 import type {
   AgenticToolName,
   AuthenticatedParams,
+  Branch,
   HookContext,
   MCPAuth,
   MCPAuthRecovery,
@@ -393,6 +394,7 @@ import {
   createZoneWorkflowAdvancesService,
   createZoneWorkflowTransitionsService,
 } from './services/zone-workflow.js';
+import { deliverSkillsSafely } from './skills/delivery.js';
 import { requestExecutorTermination } from './termination-coordinator.js';
 import { appendSystemMessage } from './utils/append-system-message.js';
 import { requireMinimumRole } from './utils/authorization.js';
@@ -1483,6 +1485,7 @@ export function createExecuteHandler(
     // Effective fs access of the prompt actor on the branch: write/read/none.
     // Drives whether the sandbox binds the branch rw / ro / not at all.
     const principalBranchAccess = launchAuthority.fs_access;
+    let sessionBranch: Branch | undefined;
     if (session.branch_id) {
       const branchMounts = await runWithTenantDatabaseScope(db, tenantId, async (tenantDb) => {
         const branchRepo = new BranchRepository(tenantDb);
@@ -1500,11 +1503,12 @@ export function createExecuteHandler(
           const repo = await new RepoRepository(tenantDb).findById(branch.repo_id);
           baseRepoPath = repo?.local_path ?? undefined;
         }
-        return { path: branch.path, baseRepoPath, sdkHome: branch.sdk_home ?? null };
+        return { path: branch.path, baseRepoPath, sdkHome: branch.sdk_home ?? null, branch };
       });
       if (!branchMounts)
         throw new Error(`Branch ${session.branch_id} not found for executor startup`);
       cwd = branchMounts.path;
+      sessionBranch = branchMounts.branch;
       sandboxBaseRepoPath = branchMounts.baseRepoPath;
       branchSdkHomeIntent = branchMounts.sdkHome;
       // Under the sandbox, 'none' means the branch would not be mounted at all,
@@ -1835,6 +1839,21 @@ export function createExecuteHandler(
       maxUses: -1,
     });
 
+    // Team skills index for teammate sessions, read with the prompt actor's
+    // Knowledge access. Never blocks the launch: any problem means no index.
+    const skillsIndex = await deliverSkillsSafely({
+      app,
+      params: async () => ({
+        user: (await runWithTenantDatabaseScope(db, tenantId, (tenantDb) =>
+          new UsersRepository(tenantDb).findById(userId)
+        )) as AuthenticatedParams['user'],
+        authenticated: true,
+        ...(params?.tenant ? { tenant: params.tenant } : {}),
+      }),
+      session,
+      branch: sessionBranch,
+    });
+
     // Build executor payload
     const executorPayload = {
       command: 'prompt' as const,
@@ -1860,6 +1879,7 @@ export function createExecuteHandler(
         cwd,
         messageSource: data.messageSource,
         promptOrigin: data.promptOrigin,
+        ...(skillsIndex ? { skillsIndex } : {}),
         // Authoritative sandbox mount inputs (consumed in spawn-executor →
         // buildSandboxWrap). Undefined when the sandbox / per_user home is off.
         sandboxBaseRepoPath,

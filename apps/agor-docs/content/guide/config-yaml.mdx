@@ -624,6 +624,23 @@ may retry after an existing request settles. For timeouts, a `by_command` value
 overrides that command's built-in call-specific default; otherwise the
 call-specific default wins over `timeout_ms.default`.
 
+## Team skills providers
+
+Team skills come only from Knowledge namespaces that the operator lists in `config.yaml`. Namespace metadata cannot make a namespace a skills provider. If no provider is listed, Agor does not list or deliver any skills.
+
+```yaml
+skills:
+  providers:
+    - namespace: team-skills # Knowledge namespace slug
+      curator_branch_id: 01a00000-0000-7000-8000-000000000000 # teammate branch that curates it
+```
+
+- `namespace` is the slug of an existing Knowledge namespace. Its `skills/<teammate>/…` and `skills/_shared/…` documents of kind `skill` are the team's skills. People still need ordinary Knowledge read access to see them.
+- `curator_branch_id` is the full id of the teammate branch whose sessions may cut skill set releases for that namespace. Admins can also cut releases with `agor skills release` from outside any session; that is how the first release is made.
+- Each namespace may appear only once. Restart the daemon after changing this section.
+
+See [Skill documents](/guide/knowledge#skill-documents) for the layout and tools.
+
 ## Inspecting and materializing effective configuration
 
 `agor config` shows the effective result after defaults and supported environment overrides are
