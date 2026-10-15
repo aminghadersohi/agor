@@ -55,8 +55,8 @@ export function skillsKnowledgeApp(db: Database): SkillsKnowledgeFixture {
       return service;
     },
   } as unknown as Application;
-  const documents = new KnowledgeDocumentsService(db);
-  const namespaces = new KnowledgeNamespacesService(db);
+  const documents = new KnowledgeDocumentsService(db, app);
+  const namespaces = new KnowledgeNamespacesService(db, app);
   const versions = new KnowledgeVersionsService(db);
   services.set('kb/documents', documents);
   services.set('kb/namespaces', namespaces);

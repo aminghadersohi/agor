@@ -461,6 +461,15 @@ const RESERVED_WINDOWS_NAMES_RE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/
 const hasInvalidKnowledgePathChar = (segment: string) =>
   [...segment].some((char) => INVALID_KNOWLEDGE_PATH_CHARS.has(char) || char.charCodeAt(0) < 32);
 
+/**
+ * Canonical form of a namespace slug: what persistence stores and lookups
+ * compare against. Every check on a slug (lookups, reserved slugs) must use
+ * this form, or a variant like " team " slips past a check on "team".
+ */
+export function normalizeKnowledgeNamespaceSlug(slug: string): string {
+  return slug.trim();
+}
+
 export function normalizeKnowledgePath(path: string): string {
   const normalized = path.trim().replace(/^\/+/, '').replace(/\/+/g, '/');
   if (!normalized) throw new Error('Knowledge document path is required');
