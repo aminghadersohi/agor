@@ -14,6 +14,7 @@ import {
   type Database,
   initializeDatabase,
   KnowledgeNamespaceRepository,
+  runWithTenantContext,
   SessionRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
@@ -271,6 +272,54 @@ describe('branches/:id/skills access', () => {
     });
     expect(report.sources.drift.status).toBe('unavailable');
     expect(requestExecutor).not.toHaveBeenCalled();
+  });
+});
+
+describe('branches/:id/skills tenant database scope', () => {
+  // The route is registered with `transaction: false`: its around hook sets
+  // tenant context but opens no database scope. Every repository read must
+  // open its own against the armed daemon database proxy.
+  it('serves the panel, drift included, from tenant context alone', async () => {
+    const { f, branch } = await setup();
+    const peer = await f.createTeammate({ name: 'freda', displayName: 'Freda' });
+    executorAnswers(
+      new Map([
+        [branch.branch_id, scanOf({ name: 'connect-saas', sha256: SHA_A })],
+        [peer.branch_id, scanOf({ name: 'connect-saas', sha256: SHA_B })],
+      ])
+    );
+    const route = createBranchSkillsRoute({ db: f.db, allowSuperadmin: () => false });
+    await route.setup(fakeApp({ current: memoryKnowledge() }));
+
+    const report = (await runWithTenantContext(f.tenantId, () =>
+      route.find({
+        provider: 'rest',
+        user: f.owner,
+        route: { id: branch.branch_id },
+        tenant: { tenant_id: f.tenantId, source: 'explicit' as const },
+        query: { include_drift: 'true' },
+      } as never)
+    )) as TeammateSkillsReport;
+
+    expect(report.sources.in_repo).toEqual({ status: 'ok' });
+    expect(report.sources.harness.status).toBeDefined();
+    expect(report.sources.drift).toMatchObject({ status: 'ok', branches_scanned: 1 });
+  });
+
+  it('still refuses a caller without branch.view under tenant context alone', async () => {
+    const { f, branch } = await setup();
+    const route = createBranchSkillsRoute({ db: f.db, allowSuperadmin: () => false });
+    await route.setup(fakeApp({ current: memoryKnowledge() }));
+    await expect(
+      runWithTenantContext(f.tenantId, () =>
+        route.find({
+          provider: 'rest',
+          user: f.outsider,
+          route: { id: branch.branch_id },
+          tenant: { tenant_id: f.tenantId, source: 'explicit' as const },
+        } as never)
+      )
+    ).rejects.toMatchObject({ code: 404 });
   });
 });
 

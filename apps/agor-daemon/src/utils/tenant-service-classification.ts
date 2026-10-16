@@ -237,7 +237,7 @@ export const TENANT_SERVICE_CLASSIFICATIONS: Record<string, TenantServiceClassif
   },
   'branches/:id/skills': {
     scopeClass: 'scoped',
-    why: 'Fork teammate Skills panel. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false, because one request may await several executor scans); read-only branch, session and Knowledge reads run in the armed request scope.',
+    why: 'Fork teammate Skills panel. Registered through createTenantScopedAuthenticatedRouteRegistrar (transaction: false, because one request may await several executor scans); the hook sets tenant context only, so each branch/session read opens its own short tenant database scope (executor scans stay outside it) and Knowledge reads go through the tenant-scoped kb/* services with the caller params.',
   },
   'sessions/:id/retarget-callback': {
     scopeClass: 'scoped',
