@@ -33,6 +33,7 @@ import {
   BranchRepository,
   CapabilityPolicyRepository,
   requireCurrentTenantId,
+  runWithTenantDatabaseScope,
   SessionRepository,
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
@@ -156,6 +157,21 @@ function paginatedData<T>(result: unknown): { data: T[]; total: number } {
   return { data, total: page?.total ?? data.length };
 }
 
+/**
+ * Run one short database unit in the caller's tenant scope.
+ *
+ * The route is registered with `transaction: false` (it awaits executor
+ * scans), so the request carries tenant context but no database scope; every
+ * direct repository read must open its own. Executor calls stay outside.
+ */
+function inTenantDb<T>(db: TenantScopeAwareDatabase, work: () => Promise<T>): Promise<T> {
+  return runWithTenantDatabaseScope(
+    db,
+    requireCurrentTenantId('Missing active tenant context for teammate skills'),
+    work
+  );
+}
+
 /** Executor-backed scan with the Files tab's access rule: member role, branch view, fs read. */
 async function scanBranchWithExecutor(
   app: Application,
@@ -167,23 +183,26 @@ async function scanBranchWithExecutor(
     throw new Error('Reading branch files requires the member role');
   }
   const config = app.get('config');
-  const fsAccess = await ensureBranchWorkspaceAccess(
-    new BranchRepository(db),
-    branch,
-    ctx.userId,
-    ctx.role,
-    'view',
-    'read',
-    ctx.allowSuperadmin
-  );
-  const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(db, ctx.userId, config);
-  // The private executor home belongs to the caller, never the branch owner.
-  const sandboxMounts = await resolveBranchExecutorSandboxMounts({
-    config,
-    tenantId: requireCurrentTenantId('Missing active tenant context for skill scan'),
-    executionUserId: ctx.userId,
-    branch,
-    db,
+  const { fsAccess, delegatedHomeKey, sandboxMounts } = await inTenantDb(db, async () => {
+    const fsAccess = await ensureBranchWorkspaceAccess(
+      new BranchRepository(db),
+      branch,
+      ctx.userId,
+      ctx.role,
+      'view',
+      'read',
+      ctx.allowSuperadmin
+    );
+    const delegatedHomeKey = await resolveDelegatedExecutionHomeKey(db, ctx.userId, config);
+    // The private executor home belongs to the caller, never the branch owner.
+    const sandboxMounts = await resolveBranchExecutorSandboxMounts({
+      config,
+      tenantId: requireCurrentTenantId('Missing active tenant context for skill scan'),
+      executionUserId: ctx.userId,
+      branch,
+      db,
+    });
+    return { fsAccess, delegatedHomeKey, sandboxMounts };
   });
   const sessionToken = await issueExecutorCommandToken(
     app,
@@ -303,24 +322,28 @@ export function createBranchSkillsRoute(options: {
 
   /** The teammate branch, or "not found" for a missing branch, a plain branch, or no `branch.view`. */
   async function loadViewableTeammate(branchId: BranchID, ctx: RequestContext): Promise<Branch> {
-    const branch = await new BranchRepository(db).findById(branchId);
-    if (!branch || !getTeammateConfig(branch)) throw new NotFound('Teammate not found');
-    if (!ctx.bypass) {
-      const access = await new CapabilityPolicyRepository(db).resolveBranchAccess(
-        branchId,
-        ctx.userId
-      );
-      if (!access.capabilities.includes('branch.view')) throw new NotFound('Teammate not found');
-    }
-    return branch;
+    return inTenantDb(db, async () => {
+      const branch = await new BranchRepository(db).findById(branchId);
+      if (!branch || !getTeammateConfig(branch)) throw new NotFound('Teammate not found');
+      if (!ctx.bypass) {
+        const access = await new CapabilityPolicyRepository(db).resolveBranchAccess(
+          branchId,
+          ctx.userId
+        );
+        if (!access.capabilities.includes('branch.view')) throw new NotFound('Teammate not found');
+      }
+      return branch;
+    });
   }
 
   /** Folder keys of every other teammate the caller can see, archived ones included. */
   async function otherTeammateKeys(branch: Branch, ctx: RequestContext): Promise<string[]> {
-    const teammates = await new BranchRepository(db).findTeammateBranches({
-      ...(ctx.bypass ? {} : { userId: ctx.userId, minimumPermission: 'view' as const }),
-      limit: TEAMMATE_KEY_LIMIT,
-    });
+    const teammates = await inTenantDb(db, () =>
+      new BranchRepository(db).findTeammateBranches({
+        ...(ctx.bypass ? {} : { userId: ctx.userId, minimumPermission: 'view' as const }),
+        limit: TEAMMATE_KEY_LIMIT,
+      })
+    );
     return teammates
       .filter((peer) => peer.branch_id !== branch.branch_id && getTeammateConfig(peer))
       .flatMap((peer) => teammateSkillKeys(getTeammateConfig(peer)?.displayName ?? peer.name));
@@ -518,13 +541,15 @@ export function createBranchSkillsRoute(options: {
     harness: HarnessSkillsInput | null;
     receipt: { session_id: SessionID; receipt: SessionSkillsReceipt } | null;
   }> {
-    const { data } = await new SessionRepository(db).findPage({
-      branchId: branch.branch_id,
-      sortUpdatedAt: -1,
-      limit: HARNESS_SESSION_LOOKBACK,
-      includeTotal: false,
-      ...(ctx.bypass ? {} : { visibleToUserId: ctx.userId }),
-    });
+    const { data } = await inTenantDb(db, () =>
+      new SessionRepository(db).findPage({
+        branchId: branch.branch_id,
+        sortUpdatedAt: -1,
+        limit: HARNESS_SESSION_LOOKBACK,
+        includeTotal: false,
+        ...(ctx.bypass ? {} : { visibleToUserId: ctx.userId }),
+      })
+    );
     const receiptSession = data.find((session) => sessionSkillsReceipt(session));
     const receipt = receiptSession
       ? {
@@ -633,12 +658,14 @@ export function createBranchSkillsRoute(options: {
     branch: Branch,
     ctx: RequestContext
   ): Promise<{ state: TeammateSkillsReport['sources']['drift']; peers: PeerSkillsInput[] | null }> {
-    const candidates = await new BranchRepository(db).findTeammateBranches({
-      archived: false,
-      ...(ctx.bypass ? {} : { userId: ctx.userId, minimumPermission: 'view' as const }),
-      // One extra row tells us whether the bound cut the list short.
-      limit: DRIFT_PEER_LIMIT + 2,
-    });
+    const candidates = await inTenantDb(db, () =>
+      new BranchRepository(db).findTeammateBranches({
+        archived: false,
+        ...(ctx.bypass ? {} : { userId: ctx.userId, minimumPermission: 'view' as const }),
+        // One extra row tells us whether the bound cut the list short.
+        limit: DRIFT_PEER_LIMIT + 2,
+      })
+    );
     const others = candidates.filter(
       (peer) => peer.branch_id !== branch.branch_id && getTeammateConfig(peer)
     );
