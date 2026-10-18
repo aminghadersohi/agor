@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { isDevSha, loadBuildInfo } from './build-info';
+import { isDevSha, loadBuildInfo, resolveForkVersion } from './build-info';
 
 /**
  * loadBuildInfo precedence:
@@ -137,5 +137,62 @@ describe('isDevSha', () => {
   it('returns false for any concrete SHA', () => {
     expect(isDevSha('abc1234')).toBe(false);
     expect(isDevSha('deadbeef')).toBe(false);
+  });
+});
+
+describe('resolveForkVersion', () => {
+  const NOW = new Date('2026-10-17T22:30:00Z');
+
+  it('defaults to the current UTC date and n=1 when AGOR_FORK_BUILD is unset', () => {
+    expect(resolveForkVersion('0.1.0', { env: {}, now: NOW })).toBe('0.1.0+fork.20261017.1');
+  });
+
+  it('defaults the date to the build date from builtAt', () => {
+    expect(
+      resolveForkVersion('0.1.0', { env: {}, builtAt: '2026-09-02T01:00:00Z', now: NOW })
+    ).toBe('0.1.0+fork.20260902.1');
+  });
+
+  it('uses AGOR_FORK_BUILD=<YYYYMMDD>.<n> verbatim', () => {
+    expect(resolveForkVersion('0.1.0', { env: { AGOR_FORK_BUILD: '20261001.3' }, now: NOW })).toBe(
+      '0.1.0+fork.20261001.3'
+    );
+  });
+
+  it('accepts a bare build number and keeps the default date', () => {
+    expect(resolveForkVersion('0.1.0', { env: { AGOR_FORK_BUILD: '4' }, now: NOW })).toBe(
+      '0.1.0+fork.20261017.4'
+    );
+  });
+
+  it('falls back to the default for malformed values', () => {
+    for (const bad of ['', '  ', 'abc', '2026-10-01.2', '20261001', '1.2.3']) {
+      expect(resolveForkVersion('0.1.0', { env: { AGOR_FORK_BUILD: bad }, now: NOW })).toBe(
+        '0.1.0+fork.20261017.1'
+      );
+    }
+  });
+
+  it('ignores an unparseable builtAt', () => {
+    expect(resolveForkVersion('0.1.0', { env: {}, builtAt: 'nope', now: NOW })).toBe(
+      '0.1.0+fork.20261017.1'
+    );
+  });
+
+  it('appends to existing build metadata with a dot', () => {
+    expect(resolveForkVersion('1.2.3+abc', { env: {}, now: NOW })).toBe(
+      '1.2.3+abc.fork.20261017.1'
+    );
+  });
+
+  it('reads process.env by default', () => {
+    const prev = process.env.AGOR_FORK_BUILD;
+    process.env.AGOR_FORK_BUILD = '20260101.9';
+    try {
+      expect(resolveForkVersion('0.1.0')).toBe('0.1.0+fork.20260101.9');
+    } finally {
+      if (prev === undefined) delete process.env.AGOR_FORK_BUILD;
+      else process.env.AGOR_FORK_BUILD = prev;
+    }
   });
 });

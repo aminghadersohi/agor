@@ -41,6 +41,8 @@ interface HealthInfo {
   buildSha?: string;
   /** ISO timestamp from /health, may be null when SHA came from env or git. */
   builtAt?: string | null;
+  /** `<version>+fork.<YYYYMMDD>.<n>` from /health; absent on non-fork daemons. */
+  forkVersion?: string;
   database?:
     | string
     | {
@@ -201,6 +203,11 @@ export const AboutTab: React.FC<AboutTabProps> = ({
               {healthInfo?.buildSha && (
                 <Descriptions.Item label="Daemon Build">
                   <code>{healthInfo.buildSha}</code>
+                  {healthInfo.forkVersion && (
+                    <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
+                      {healthInfo.forkVersion}
+                    </Typography.Text>
+                  )}
                   {healthInfo.builtAt && (
                     <Typography.Text type="secondary" style={{ marginLeft: 8 }}>
                       built {healthInfo.builtAt}

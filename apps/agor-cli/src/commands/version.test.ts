@@ -37,6 +37,8 @@ describe('version command deployment selection', () => {
       const result = await runCli(home, args);
       expect(result.code).toBe(0);
       expect(result.output).toContain('Daemon: local-version');
+      expect(result.output).toContain('build: abc1234');
+      expect(result.output).toContain('fork: local-version+fork.20261017.1');
       expect(result.output).toContain(`deployment: ${localDeploymentId}`);
       expect(result.output).not.toContain('remote-version');
     }
@@ -131,7 +133,15 @@ async function startDaemon(
 ): Promise<{ port: number; url: string }> {
   const server = createServer((_request, response) => {
     response.setHeader('content-type', 'application/json');
-    response.end(JSON.stringify({ service: 'agor-daemon', deploymentId, version }));
+    response.end(
+      JSON.stringify({
+        service: 'agor-daemon',
+        deploymentId,
+        version,
+        buildSha: 'abc1234',
+        forkVersion: `${version}+fork.20261017.1`,
+      })
+    );
   });
   servers.push(server);
   await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));

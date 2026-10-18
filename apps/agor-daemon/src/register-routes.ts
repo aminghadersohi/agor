@@ -254,6 +254,7 @@ import {
   markAuthenticationUserLookup,
   markLocalAuthenticationLookup,
 } from './services/users.js';
+import { resolveForkVersion } from './setup/build-info.js';
 import { resolveWebTerminalCapability } from './terminal-capability.js';
 import { beginExecutorTermination, forceFailUnverifiedTask } from './termination-coordinator.js';
 import { createFeathersTracingHook } from './tracing/feathers.js';
@@ -7771,6 +7772,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         // a later handshake reports a different value. 'dev' disables the check.
         buildSha: DAEMON_BUILD_INFO.sha,
         builtAt: DAEMON_BUILD_INFO.builtAt,
+        // `<version>+fork.<YYYYMMDD>.<n>` — see resolveForkVersion().
+        forkVersion: resolveForkVersion(DAEMON_VERSION, { builtAt: DAEMON_BUILD_INFO.builtAt }),
         auth: {
           requireAuth: true,
           externalLaunch: publicLaunchAuth,

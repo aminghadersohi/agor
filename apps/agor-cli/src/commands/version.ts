@@ -10,6 +10,7 @@ import {
 interface HealthBuildInfo {
   buildSha?: string;
   builtAt?: string | null;
+  forkVersion?: string;
   deploymentId?: string;
   version?: string;
 }
@@ -57,6 +58,7 @@ export default class Version extends Command {
 
     this.log(`${chalk.bold('Daemon:')} ${chalk.cyan(info.version ?? 'unknown version')}`);
     if (info.buildSha) this.log(`  build: ${chalk.dim(info.buildSha)}`);
+    if (info.forkVersion) this.log(`  fork: ${chalk.dim(info.forkVersion)}`);
     if (info.builtAt) this.log(`  built: ${chalk.dim(info.builtAt)}`);
     this.log(`  deployment: ${chalk.dim(target.deploymentId)}`);
     this.log(`  source: ${chalk.dim(`/health @ ${target.url}`)}`);
