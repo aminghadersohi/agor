@@ -60,7 +60,8 @@ export type SessionReminderFailureCode =
   | 'branch_unavailable'
   | 'authorization_revoked'
   | 'session_missing'
-  | 'dispatch_failed';
+  | 'dispatch_failed'
+  | 'retries_exhausted';
 
 export interface SessionReminder {
   reminder_id: SessionReminderID;
