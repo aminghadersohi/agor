@@ -26,4 +26,14 @@ describe('/health execution block', () => {
       resumeAfterCrash: false,
     });
   });
+
+  it('reports the fork version next to buildSha in the public payload', () => {
+    const publicStart = source.indexOf('const publicResponse = {');
+    const authStart = source.indexOf('if (isAuthenticated) {', publicStart);
+    const publicPayload = source.slice(publicStart, authStart);
+    expect(publicPayload).toContain('buildSha: DAEMON_BUILD_INFO.sha');
+    expect(publicPayload).toContain(
+      'forkVersion: resolveForkVersion(DAEMON_VERSION, { builtAt: DAEMON_BUILD_INFO.builtAt })'
+    );
+  });
 });

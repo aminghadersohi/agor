@@ -42,7 +42,7 @@
     "@agor/daemon#build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**", "build/**"],
-      "env": ["AGOR_BUILD_SHA", "AGOR_BUILT_AT"]
+      "env": ["AGOR_BUILD_SHA", "AGOR_BUILT_AT", "AGOR_FORK_BUILD"]
     },
     "dev": {
       "cache": false,
