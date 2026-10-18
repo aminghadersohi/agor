@@ -569,16 +569,23 @@ describe('SessionCanvas zoom shortcuts', () => {
       const fixed = zone('zone-fixed', 1800, 500, 300, 200, { selected: false });
       const peer = zone('peer', 805, 80, 200, 200, { selected: false });
       let liveNodes = [...selected, child, locked, fixed, peer];
-      renderDragCanvas(durableBoard, client, () => liveNodes);
 
-      // React Flow has applied the 20px grid delta. Its third callback argument
-      // excludes both the selected child (owned by zone-a) and locked zone.
-      const rawMoved = selected.map((node) => movedBy(node, 480, 80));
-      liveNodes = [...rawMoved, child, locked, fixed, peer];
-      setNodesUnsafeSpy.mockClear();
-
+      // Fake timers must be installed before the canvas mounts: the auto-zone
+      // observer defers its first arrange on a timer (zone-a is an Auto Zone).
+      // On a real timer it lands mid-gesture on a slow machine and is counted
+      // as a drag write. Let it fire on the fake clock first, then drop it.
       vi.useFakeTimers();
       try {
+        renderDragCanvas(durableBoard, client, () => liveNodes);
+        await act(async () => vi.advanceTimersByTimeAsync(1_000));
+        patch.mockClear();
+
+        // React Flow has applied the 20px grid delta. Its third callback argument
+        // excludes both the selected child (owned by zone-a) and locked zone.
+        const rawMoved = selected.map((node) => movedBy(node, 480, 80));
+        liveNodes = [...rawMoved, child, locked, fixed, peer];
+        setNodesUnsafeSpy.mockClear();
+
         act(() => {
           (reactFlowProps?.onNodeDragStart as NodeDragHandler)?.({}, selected[0], selected);
           (reactFlowProps?.onNodeDrag as NodeDragHandler)?.({}, rawMoved[0], rawMoved);
