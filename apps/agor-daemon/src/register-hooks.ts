@@ -113,7 +113,6 @@ import {
   BRANCH_DELETION_REPORT_SERVICE,
   ENVIRONMENT_COMMAND_REPORT_SERVICE,
   GATEWAY_CHANNEL_WRITE_FIELDS,
-  GATEWAY_REDACTED_SENTINEL,
   hasMinimumRole,
   ROLES,
   SCHEDULE_CREATE_WRITE_FIELDS,
@@ -136,6 +135,7 @@ import {
   classifyMissingCredentialFailure,
   protectExternalProviderFailureMetadata,
 } from './hooks/classify-missing-credential.js';
+import { resolveGatewayAgenticConfigPatch } from './hooks/gateway-channel-agentic-patch.js';
 import { gatewayRouteHook } from './hooks/gateway-route.js';
 import { validateMessageCreate } from './hooks/validate-message-create.js';
 import { coordinateMCPServerMutationAfterWrite } from './mcp-egress/coordination.js';
@@ -3034,93 +3034,32 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         enforcePublicWriteFields('Gateway channel', GATEWAY_CHANNEL_WRITE_FIELDS),
         // Resolve redacted env var sentinel values ('••••••••') back to real
         // values from the database. Uses the repository directly to bypass
-        // the after-hook redaction that the service layer applies.
-        //
-        // Semantics:
-        // - envVars omitted (undefined) → preserve all existing env vars
-        // - envVars = [] (empty array) → explicitly delete all env vars
-        // - envVars = [...] with sentinels → substitute real values per key
+        // the after-hook redaction that the service layer applies. A patch
+        // that omits agentic_config is left alone so unrelated updates never
+        // rewrite it. See hooks/gateway-channel-agentic-patch.ts.
         async (context: HookContext) => {
           const data = context.data as Record<string, unknown> | undefined;
           if (!data || !context.id) return context;
-
-          // Explicit null means clear all agentic config. Do not resurrect envVars
-          // from the existing row while resolving redacted sentinels.
-          if (data.agentic_config === null) return context;
-
-          let ac = data.agentic_config as Record<string, unknown> | undefined;
-          const hadAgenticConfigInPatch = ac !== undefined;
-          const ensureAc = (): Record<string, unknown> => {
-            if (!ac) {
-              ac = {};
-              data.agentic_config = ac;
-            }
-            return ac;
-          };
-
-          const SENTINEL = GATEWAY_REDACTED_SENTINEL;
-          const incomingVars = ac?.envVars as
-            | { key: string; value: string; forceOverride: boolean }[]
-            | undefined;
-
-          // undefined → preserve existing env vars
-          if (incomingVars === undefined) {
-            try {
+          const patchedAgenticConfig = data.agentic_config as { envVars?: unknown[] } | undefined;
+          // Omitting envVars preserves stored values and is best-effort; an
+          // unresolvable sentinel is a client error.
+          const bestEffort = !Array.isArray(patchedAgenticConfig?.envVars);
+          try {
+            await resolveGatewayAgenticConfigPatch(data, async () => {
               const { GatewayChannelRepository } = await import('@agor/core/db');
               const existing = await runWithTenantDatabaseScope(
                 db,
                 requireCurrentTenantId('Missing active tenant context for gateway channel read'),
                 async (scoped) => new GatewayChannelRepository(scoped).findById(String(context.id))
               );
-              // For patches that omit agentic_config entirely (e.g. enabled toggle),
-              // copy existing agentic_config so migration still occurs on save.
-              if (!hadAgenticConfigInPatch && existing?.agentic_config) {
-                ac = { ...(existing.agentic_config as unknown as Record<string, unknown>) };
-                data.agentic_config = ac;
-              }
-              if (existing?.agentic_config?.envVars) {
-                ensureAc().envVars = existing.agentic_config.envVars;
-              }
-            } catch {
-              // Non-fatal
-            }
-            return context;
-          }
-
-          // [] → explicit delete all (no substitution needed)
-          if (incomingVars.length === 0) return context;
-
-          // Has entries with potential sentinels — substitute from DB
-          const hasSentinels = incomingVars.some((v) => v.value === SENTINEL);
-          if (!hasSentinels) {
-            ensureAc().envVars = incomingVars;
-            return context;
-          }
-
-          try {
-            const { GatewayChannelRepository } = await import('@agor/core/db');
-            const existing = await runWithTenantDatabaseScope(
-              db,
-              requireCurrentTenantId('Missing active tenant context for gateway channel read'),
-              async (scoped) => new GatewayChannelRepository(scoped).findById(String(context.id))
-            );
-            const existingVars = existing?.agentic_config?.envVars ?? [];
-            const existingByKey = new Map(existingVars.map((v) => [v.key, v.value]));
-
-            // Substitute sentinels with existing values. Encryption-at-rest is
-            // handled in GatewayChannelRepository.
-            ensureAc().envVars = incomingVars.map((v) => {
-              if (v.value === SENTINEL && existingByKey.has(v.key)) {
-                return { ...v, value: existingByKey.get(v.key)! };
-              }
-              return v;
+              return existing?.agentic_config;
             });
           } catch (error) {
+            if (bestEffort) return context;
             throw new BadRequest(
               `Failed to resolve redacted gateway env vars: ${error instanceof Error ? error.message : String(error)}`
             );
           }
-
           return context;
         },
         markWriteDataPrepared(),
