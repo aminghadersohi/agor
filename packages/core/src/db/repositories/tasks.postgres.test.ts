@@ -8,6 +8,7 @@ import { executeRaw, isPostgresDatabase, rawRows } from '../database-wrapper';
 import { initializeDatabase } from '../migrate';
 import { BranchRepository } from './branches';
 import { RepoRepository } from './repos';
+import { SessionReminderRepository } from './session-memory';
 import { SessionRepository } from './sessions';
 import { TaskRepository } from './tasks';
 import { UsersRepository } from './users';
@@ -363,5 +364,64 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('TaskRepository PostgreSQL'
         AND indexname = 'tasks_mcp_slack_recovery_due_idx'
     `);
     expect(indexes).toEqual([{ indexname: 'tasks_mcp_slack_recovery_due_idx' }]);
+  });
+
+  it('cancels a queued task referenced by a queued reminder without a foreign-key error', async () => {
+    const owner = await new UsersRepository(db).create({
+      email: `postgres-cancel-reminder-${generateId()}@example.invalid`,
+      role: 'member',
+    });
+    const repo = await new RepoRepository(db).create({
+      repo_id: generateId(),
+      slug: `postgres-cancel-reminder-${generateId()}`,
+      name: 'Postgres cancel queued reminder',
+      repo_type: 'remote',
+      remote_url: 'https://example.invalid/postgres-cancel-reminder.git',
+      local_path: `/tmp/${generateId()}`,
+      default_branch: 'main',
+    });
+    const branch = await new BranchRepository(db).create({
+      branch_id: generateId(),
+      repo_id: repo.repo_id,
+      name: `postgres-cancel-reminder-${generateId()}`,
+      ref: 'main',
+      branch_unique_id: (Date.now() + 37) % 1_000_000,
+      path: `/tmp/${generateId()}`,
+      created_by: owner.user_id,
+    });
+    const session = await new SessionRepository(db).create({
+      session_id: generateId(),
+      branch_id: branch.branch_id,
+      agentic_tool: 'claude-code',
+      created_by: owner.user_id,
+    });
+    const tasks = new TaskRepository(db);
+    const reminders = new SessionReminderRepository(db);
+    const task = await tasks.createPending({
+      session_id: session.session_id,
+      full_prompt: 'queued reminder prompt',
+      created_by: owner.user_id,
+      status: TaskStatus.QUEUED,
+    });
+    const reminder = await reminders.create({
+      session_id: session.session_id,
+      text: 'Review the fictional decision.',
+      due_at: new Date(Date.now() - 1_000).toISOString(),
+      display_timezone: 'UTC',
+      created_by: owner.user_id,
+    });
+    await reminders.claimDue(reminder.reminder_id, new Date(), 'claim-pg', 60_000);
+    await reminders.markQueued(reminder.reminder_id, 'claim-pg', task.task_id, new Date());
+
+    await expect(
+      tasks.mutateQueued(session.session_id, { cancel: [task.task_id] })
+    ).resolves.toMatchObject({ outcome: 'changed', removed: [{ task_id: task.task_id }] });
+    expect(await tasks.findById(task.task_id)).toBeNull();
+    const page = await reminders.findPage({ session_id: session.session_id, limit: 10, skip: 0 });
+    expect(page.data[0]).toMatchObject({
+      reminder_id: reminder.reminder_id,
+      status: 'cancelled',
+      task_id: undefined,
+    });
   });
 });

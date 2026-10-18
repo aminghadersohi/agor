@@ -127,10 +127,7 @@ describe('SessionReminderRepository', () => {
         new Date()
       );
       expect(queued).toMatchObject({ status: 'queued', task_id: task.task_id, attempt_count: 1 });
-      await expect(new TaskRepository(db).delete(task.task_id)).rejects.toThrow();
-      await expect(
-        reminders.findPage({ session_id: ctx.first.session_id, limit: 10, skip: 0 })
-      ).resolves.toMatchObject({ data: [expect.objectContaining({ task_id: task.task_id })] });
+      // Once queued, the reminder itself is immutable through the reminder API.
       await expect(
         reminders.updateScheduledInSession(
           ctx.first.session_id,
@@ -141,6 +138,26 @@ describe('SessionReminderRepository', () => {
           }
         )
       ).rejects.toMatchObject({ code: 'session_reminder_revision_conflict' });
+      await expect(
+        reminders.findPage({ session_id: ctx.first.session_id, limit: 10, skip: 0 })
+      ).resolves.toMatchObject({ data: [expect.objectContaining({ task_id: task.task_id })] });
+
+      // Withdrawing the queued Task (the restrictive FK's only other writer)
+      // settles the reminder as cancelled in the same transaction, keeping its
+      // authorship, text and queued_at, instead of failing with a raw FK error.
+      await new TaskRepository(db).delete(task.task_id);
+      await expect(
+        reminders.findPage({ session_id: ctx.first.session_id, limit: 10, skip: 0 })
+      ).resolves.toMatchObject({
+        data: [
+          expect.objectContaining({
+            status: 'cancelled',
+            task_id: undefined,
+            queued_at: queued!.queued_at,
+            created_by: ctx.user.user_id,
+          }),
+        ],
+      });
     }
   );
 
