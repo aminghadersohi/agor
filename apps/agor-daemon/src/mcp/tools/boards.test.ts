@@ -235,6 +235,7 @@ describe('agor_boards_get', () => {
           if (name === 'boards/:id/permissions') return { find: permissionsFind };
           if (name === 'board-objects') return { find: boardObjectsFind };
           if (name === 'branches') return { find: branchesFind };
+          if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
           throw new Error(`Unexpected service call: ${name}`);
         },
       },
@@ -464,6 +465,7 @@ describe('agor_boards_auto_arrange_zone', () => {
           return { find: vi.fn(async () => ({ data: entities })), patch: patches };
         if (name === 'cards')
           return { find: cardsFind, get: vi.fn(async () => ({ title: 'Card' })) };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -529,6 +531,7 @@ describe('agor_boards_auto_arrange_zone', () => {
             })),
             get: vi.fn(async () => ({ name: 'Branch' })),
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -644,6 +647,7 @@ describe('agor_boards_auto_arrange_zone', () => {
             })),
             get: vi.fn(async () => ({ title: 'Card' })),
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -705,6 +709,7 @@ describe('agor_boards_auto_arrange_zone', () => {
             return {
               find: vi.fn(async () => ({ data: entities.map(({ card_id }) => ({ card_id })) })),
             };
+          if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
           throw new Error(`Unexpected service call: ${name}`);
         },
       },
@@ -800,6 +805,7 @@ describe('agor_boards_auto_arrange_zone', () => {
           return { find: vi.fn(async () => ({ data: [{ branch_id: 'branch-1' }] })) };
         if (name === 'cards')
           return { find: vi.fn(async () => ({ data: [{ card_id: 'card-1' }] })) };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -922,6 +928,7 @@ describe('agor_boards_auto_arrange_zone', () => {
             })),
             get: cardsGet,
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -981,6 +988,7 @@ describe('agor_boards_auto_arrange_zone', () => {
               data: entities.map((entity) => ({ card_id: entity.card_id })),
             })),
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1037,6 +1045,7 @@ describe('agor_boards_auto_arrange_zone', () => {
           };
         if (name === 'branches')
           return { find: vi.fn(async () => ({ data: [{ branch_id: 'branch-1' }] })) };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1112,6 +1121,7 @@ describe('agor_boards_auto_arrange_zone', () => {
             get: vi.fn(async (id: keyof typeof cards) => cards[id]),
           };
         }
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1422,6 +1432,7 @@ describe('agor_boards_auto_arrange', () => {
         // Read unconditionally so the grid can be placed clear of any zone.
         if (name === 'boards')
           return { get: vi.fn(async () => ({ board_id: 'board-1', objects: {} })), patch: vi.fn() };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1505,6 +1516,7 @@ describe('agor_boards_auto_arrange', () => {
               return data;
             }),
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1562,6 +1574,7 @@ describe('agor_boards_auto_arrange', () => {
               return data;
             }),
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1600,6 +1613,7 @@ describe('agor_boards_auto_arrange', () => {
               return data;
             }),
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1653,6 +1667,7 @@ describe('agor_boards_auto_arrange', () => {
               return data;
             }),
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -1751,6 +1766,7 @@ describe('board layout tools with branch entities present', () => {
     entityPatches?: Array<{ objectId: string; data: Record<string, unknown> }>;
     boardPatches?: Array<Record<string, unknown>>;
     captureAtomicPlacements?: boolean;
+    transitions?: Array<{ source_zone_id: string; target_zone_id: string }>;
   }) {
     const boardObjects = { ...(options.objects ?? {}) };
     let boardLayoutContext: unknown;
@@ -1831,6 +1847,8 @@ describe('board layout tools with branch entities present', () => {
               find: branchesFind,
               get: vi.fn(async (id: string) => ({ branch_id: id, name: 'feature-branch' })),
             };
+          if (name === 'zone-workflow-transitions')
+            return { find: vi.fn(async () => options.transitions ?? []) };
           throw new Error(`Unexpected service call: ${name}`);
         },
       },
@@ -2775,6 +2793,45 @@ describe('board layout tools with branch entities present', () => {
     }
   });
 
+  describe('workflow transitions', () => {
+    const zones = {
+      'zone-a': { type: 'zone', x: 0, y: 0, width: 600, height: 400, label: 'A' },
+      'zone-b': { type: 'zone', x: 700, y: 0, width: 600, height: 400, label: 'B' },
+    };
+    const arrange = async (
+      transitions: Array<{ source_zone_id: string; target_zone_id: string }>,
+      args: Record<string, unknown> = {}
+    ) => {
+      const { app } = makeApp({ entities: [], objects: zones, transitions });
+      const arrangeZones = registerAndCaptureHandler('agor_boards_arrange_zones', {
+        app,
+        userId: 'user-1',
+        baseServiceParams,
+      });
+      const parsed = JSON.parse(
+        (await arrangeZones({ boardId: 'board-1', dryRun: true, ...args })).content[0].text
+      );
+      const xOf = (id: string) =>
+        (parsed.updates as Array<{ objectId: string; position: { x: number } }>).find(
+          (update) => update.objectId === id
+        )!.position.x;
+      return { xOf, parsed };
+    };
+
+    it('lays zones out along their transitions', async () => {
+      const { xOf } = await arrange([{ source_zone_id: 'zone-b', target_zone_id: 'zone-a' }]);
+      expect(xOf('zone-b')).toBeLessThan(xOf('zone-a'));
+    });
+
+    it('keeps the ordinary layout without transitions or with an explicit column count', async () => {
+      expect((await arrange([])).xOf('zone-a')).toBeLessThan((await arrange([])).xOf('zone-b'));
+      const explicit = await arrange([{ source_zone_id: 'zone-b', target_zone_id: 'zone-a' }], {
+        columns: 2,
+      });
+      expect(explicit.xOf('zone-a')).toBeLessThan(explicit.xOf('zone-b'));
+    });
+  });
+
   it('never offers a compact_list zone a multi-column shape', async () => {
     // compact_list is one column by definition; a landscape shape would promise
     // a layout the zone arrange will never produce.
@@ -2922,6 +2979,7 @@ describe('agor_boards_auto_arrange zone avoidance', () => {
               find: vi.fn(async () => ({ data: entities.map(({ card_id }) => ({ card_id })) })),
               get: vi.fn(async () => ({ title: 'Card' })),
             };
+          if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
           throw new Error(`Unexpected service call: ${name}`);
         },
       },
@@ -3040,6 +3098,7 @@ describe('agor_boards_set_compact', () => {
             })),
             patch,
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -3096,6 +3155,7 @@ describe('agor_boards_set_compact', () => {
               note: 'Needs a reviewer',
             })),
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -3141,6 +3201,7 @@ describe('agor_boards_set_compact', () => {
               ...(withBody ? { description: 'Now has body content' } : {}),
             })),
           };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -3193,6 +3254,7 @@ describe('agor_boards_update realtime events', () => {
     const app = {
       service(name: string) {
         if (name === 'boards/:id/permissions') return { patch };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -3222,6 +3284,7 @@ describe('agor_boards_update realtime events', () => {
     const app = {
       service(name: string) {
         if (name === 'boards') return { batchUpsertBoardObjects, get, emit };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -3272,6 +3335,7 @@ describe('board icon shortcode handling at MCP boundary', () => {
     const app = {
       service(name: string) {
         if (name === 'boards') return { create: boardsCreate };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };
@@ -3311,6 +3375,7 @@ describe('board icon shortcode handling at MCP boundary', () => {
     const app = {
       service(name: string) {
         if (name === 'boards') return { patch: boardsPatch, get: boardsGet, emit: vi.fn() };
+        if (name === 'zone-workflow-transitions') return { find: vi.fn(async () => []) };
         throw new Error(`Unexpected service call: ${name}`);
       },
     };

@@ -1047,4 +1047,98 @@ describe('planBoardZoneArrangement', () => {
     expect(right.x - (left.x + left.width)).toBe(27);
     expect(plan.layout.gap).toBe(27);
   });
+  describe('workflow flow layout', () => {
+    const flowZones = () => [
+      zone('done', 0, 0, [branchItem('d1', 360, 200)]),
+      zone('backlog', 700, 0, [branchItem('b1', 360, 200)]),
+      zone('review', 1400, 0, [branchItem('r1', 360, 200)]),
+      zone('doing', 0, 700, [branchItem('w1', 360, 200)]),
+      zone('scratch', 700, 700, [branchItem('s1', 360, 200)]),
+    ];
+    const edges = [
+      { source: 'backlog', target: 'doing' },
+      { source: 'doing', target: 'review' },
+      { source: 'review', target: 'done' },
+    ];
+    const frame = (plan: ReturnType<typeof planBoardZoneArrangement>, id: string) =>
+      plan.zones.find((entry) => entry.id === id)!;
+
+    it('orders zones along their transitions and puts unlinked zones after the flow', () => {
+      const plan = planBoardZoneArrangement(flowZones(), { flowEdges: edges });
+      const backlog = frame(plan, 'backlog');
+      const doing = frame(plan, 'doing');
+      const review = frame(plan, 'review');
+      const done = frame(plan, 'done');
+      const scratch = frame(plan, 'scratch');
+
+      expect(backlog.position.x).toBeLessThan(doing.position.x);
+      expect(doing.position.x).toBeLessThan(review.position.x);
+      expect(review.position.x).toBeLessThan(done.position.x);
+      expect(backlog.position.x + backlog.width).toBeLessThan(doing.position.x);
+      expect(scratch.position.y).toBeGreaterThanOrEqual(
+        Math.max(...[backlog, doing, review, done].map((z) => z.position.y + z.height))
+      );
+    });
+
+    it('keeps zone contents packed inside the zone frames', () => {
+      const plan = planBoardZoneArrangement(flowZones(), { flowEdges: edges });
+      for (const arranged of plan.zones) {
+        for (const child of arranged.items) {
+          expect(child.x + child.width).toBeLessThanOrEqual(arranged.width);
+          expect(child.y + child.height).toBeLessThanOrEqual(arranged.height);
+        }
+      }
+    });
+
+    it('is idempotent when replanned from its own output', () => {
+      const first = planBoardZoneArrangement(flowZones(), { flowEdges: edges });
+      const replanned = planBoardZoneArrangement(
+        first.zones.map((arranged) => {
+          const source = flowZones().find(({ id }) => id === arranged.id)!;
+          return {
+            ...source,
+            x: arranged.position.x,
+            y: arranged.position.y,
+            width: arranged.width,
+            height: arranged.height,
+            items: source.items,
+          };
+        }),
+        { flowEdges: edges }
+      );
+      expect(replanned.zones.map(({ id, position }) => [id, position])).toEqual(
+        first.zones.map(({ id, position }) => [id, position])
+      );
+    });
+
+    it('flows in compact mode too and keeps loose items clear of the zones', () => {
+      const plan = planBoardZoneArrangement(flowZones(), {
+        mode: 'compact',
+        flowEdges: edges,
+        looseItems: [{ id: 'note', x: 0, y: 2000, width: 300, height: 200 }],
+      });
+      expect(frame(plan, 'backlog').position.x).toBeLessThan(frame(plan, 'done').position.x);
+      const note = plan.looseItems[0]!;
+      const overlapsZone = plan.zones.some(
+        (z) =>
+          note.x < z.position.x + z.width &&
+          z.position.x < note.x + note.width &&
+          note.y < z.position.y + z.height &&
+          z.position.y < note.y + note.height
+      );
+      expect(overlapsZone).toBe(false);
+    });
+
+    it('leaves the layout untouched when no transition joins the arranged zones', () => {
+      const baseline = planBoardZoneArrangement(flowZones());
+      for (const flowEdges of [
+        undefined,
+        [],
+        [{ source: 'backlog', target: 'backlog' }],
+        [{ source: 'backlog', target: 'not-arranged' }],
+      ]) {
+        expect(planBoardZoneArrangement(flowZones(), { flowEdges })).toEqual(baseline);
+      }
+    });
+  });
 });
