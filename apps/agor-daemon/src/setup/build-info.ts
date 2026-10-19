@@ -102,3 +102,40 @@ export function loadBuildInfo(importMetaUrl: string): BuildInfo {
 export function isDevSha(sha: string | null | undefined): boolean {
   return !sha || sha === FALLBACK_SHA;
 }
+
+/**
+ * Fork version string: `<upstream-version>+fork.<YYYYMMDD>.<n>`.
+ *
+ * `AGOR_FORK_BUILD` carries the fork build suffix, either `<YYYYMMDD>.<n>`
+ * or a bare `<n>` (the date then defaults to the build date). When it is
+ * unset or malformed the suffix defaults to the build date (from `builtAt`,
+ * else the current UTC date) and n=1. Reported next to buildSha on /health.
+ */
+const FORK_BUILD_FULL = /^(\d{8})\.(\d+)$/;
+const FORK_BUILD_N = /^\d{1,6}$/;
+
+function utcDateStamp(date: Date): string {
+  return date.toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+export function resolveForkVersion(
+  upstreamVersion: string,
+  options: { builtAt?: string | null; now?: Date; env?: NodeJS.ProcessEnv } = {}
+): string {
+  const env = options.env ?? process.env;
+  const raw = env.AGOR_FORK_BUILD?.trim() ?? '';
+  const full = FORK_BUILD_FULL.exec(raw);
+  let suffix: string;
+  if (full) {
+    suffix = `${full[1]}.${Number(full[2])}`;
+  } else {
+    const builtAtMs = options.builtAt ? Date.parse(options.builtAt) : Number.NaN;
+    const date = utcDateStamp(
+      Number.isNaN(builtAtMs) ? (options.now ?? new Date()) : new Date(builtAtMs)
+    );
+    suffix = `${date}.${FORK_BUILD_N.test(raw) ? Number(raw) : 1}`;
+  }
+  // SemVer allows a single '+'; append to existing build metadata with '.'.
+  const joiner = upstreamVersion.includes('+') ? '.' : '+';
+  return `${upstreamVersion}${joiner}fork.${suffix}`;
+}
