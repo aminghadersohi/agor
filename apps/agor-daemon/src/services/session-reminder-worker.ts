@@ -28,7 +28,19 @@ import { emitServiceEvent } from '../utils/emit-service-event.js';
 const DEFAULT_BATCH = 25;
 const DEFAULT_INTERVAL_MS = 30_000;
 const CLAIM_LEASE_MS = 2 * 60_000;
-const RETRY_MS = 30_000;
+const RETRY_BASE_MS = 30_000;
+const RETRY_MAX_MS = 15 * 60_000;
+/**
+ * Total delivery attempts (claims) before a reminder is parked in the terminal
+ * `blocked`/`retries_exhausted` state. Every claim, including one recovered
+ * after a daemon crash mid-dispatch, increments `attempt_count`.
+ */
+export const SESSION_REMINDER_MAX_ATTEMPTS = 6;
+
+/** Exponential backoff after the Nth failed attempt, capped at RETRY_MAX_MS. */
+export function sessionReminderRetryDelayMs(attempt: number): number {
+  return Math.min(RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1), RETRY_MAX_MS);
+}
 
 export interface SessionReminderWorkerOptions {
   tenantId?: TenantID | string;
@@ -155,6 +167,12 @@ export class SessionReminderWorker {
     this.publish(claimed, tenantId);
 
     try {
+      // Covers reminders whose earlier attempts crashed the daemon (the claim
+      // lease expired without a catch below ever running).
+      if (claimed.attempt_count > SESSION_REMINDER_MAX_ATTEMPTS) {
+        await this.block(claimed, token, tenantId, 'retries_exhausted', now);
+        return;
+      }
       const preparation = await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
         const sessions = new SessionRepository(tenantDb);
         const session = await sessions.findById(claimed.session_id);
@@ -252,16 +270,25 @@ export class SessionReminderWorker {
       if (queued) this.publish(queued, tenantId);
     } catch (error) {
       // Mutable lifecycle races are rechecked after the lease. Other failures
-      // retain the durable claim with a short retry deadline; content is never logged.
-      await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
-        await new SessionReminderRepository(tenantDb).deferClaim(
-          claimed.reminder_id,
-          token,
-          new Date((this.options.now?.() ?? new Date()).getTime() + RETRY_MS)
-        );
-      });
+      // retain the durable claim with a bounded, backed-off retry deadline and
+      // end in a terminal state once attempts are exhausted; content is never logged.
+      const attempt = claimed.attempt_count;
+      const exhausted = attempt >= SESSION_REMINDER_MAX_ATTEMPTS;
+      if (exhausted) {
+        await this.block(claimed, token, tenantId, 'retries_exhausted', now);
+      } else {
+        await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
+          await new SessionReminderRepository(tenantDb).deferClaim(
+            claimed.reminder_id,
+            token,
+            new Date(
+              (this.options.now?.() ?? new Date()).getTime() + sessionReminderRetryDelayMs(attempt)
+            )
+          );
+        });
+      }
       console.warn(
-        `[session-reminders] dispatch_deferred tenant_id=${JSON.stringify(tenantId)} reminder_id=${JSON.stringify(claimed.reminder_id)} error_type=${JSON.stringify(error instanceof Error ? error.name : 'unknown')}`
+        `[session-reminders] ${exhausted ? 'dispatch_exhausted' : 'dispatch_deferred'} tenant_id=${JSON.stringify(tenantId)} reminder_id=${JSON.stringify(claimed.reminder_id)} attempt=${attempt} error_type=${JSON.stringify(error instanceof Error ? error.name : 'unknown')}`
       );
     }
   }
