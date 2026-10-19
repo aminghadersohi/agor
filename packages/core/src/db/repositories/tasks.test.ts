@@ -26,6 +26,7 @@ import { MCPServerRepository } from './mcp-servers';
 import { MessagesRepository } from './messages';
 import { RepoRepository } from './repos';
 import { SessionMCPServerRepository } from './session-mcp-servers';
+import { SessionReminderRepository } from './session-memory';
 import { SessionRepository } from './sessions';
 import { MISSING_TASK_ACTOR_ERROR, TaskRepository } from './tasks';
 import { UsersRepository } from './users';
@@ -3613,6 +3614,63 @@ describe('TaskRepository.createPending', () => {
       ]);
       expect(await repo.findById(active.task_id)).toEqual(active);
       expect(await new SessionRepository(db).findById(sessionId)).toEqual(session);
+    }
+  );
+
+  dbTest(
+    'cancelling a queued task referenced by a queued reminder cancels the reminder instead of violating its FK',
+    async ({ db }) => {
+      const repo = new TaskRepository(db);
+      const sessionId = await createSessionWithDeps(db);
+      const author = await new UsersRepository(db).create({
+        user_id: generateId() as UUID,
+        email: `reminder-cancel-${generateId()}@example.test`,
+        name: 'River Example',
+        role: 'member',
+      });
+      const reminders = new SessionReminderRepository(db);
+      const first = await repo.createPending(
+        createPendingInput({ session_id: sessionId, status: TaskStatus.QUEUED })
+      );
+      const second = await repo.createPending(
+        createPendingInput({ session_id: sessionId, status: TaskStatus.QUEUED })
+      );
+      const unrelated = await reminders.create({
+        session_id: sessionId,
+        text: 'Not queued yet.',
+        due_at: new Date(Date.now() + 3_600_000).toISOString(),
+        display_timezone: 'UTC',
+        created_by: author.user_id,
+      });
+      const reminder = await reminders.create({
+        session_id: sessionId,
+        text: 'Review the fictional decision.',
+        due_at: new Date(Date.now() - 1_000).toISOString(),
+        display_timezone: 'UTC',
+        created_by: author.user_id,
+      });
+      const claimed = await reminders.claimDue(reminder.reminder_id, new Date(), 'claim-1', 60_000);
+      expect(claimed).not.toBeNull();
+      await reminders.markQueued(reminder.reminder_id, 'claim-1', first.task_id, new Date());
+
+      // Previously: FOREIGN KEY constraint failed, and the whole batch was lost.
+      expect(await repo.mutateQueued(sessionId, { cancel: [first.task_id] })).toMatchObject({
+        outcome: 'changed',
+        removed: [{ task_id: first.task_id }],
+      });
+
+      expect(await repo.findById(first.task_id)).toBeNull();
+      expect((await repo.findQueued(sessionId)).map((task) => task.task_id)).toEqual([
+        second.task_id,
+      ]);
+      const page = await reminders.findPage({ session_id: sessionId, limit: 10, skip: 0 });
+      const byId = new Map(page.data.map((r) => [r.reminder_id, r]));
+      expect(byId.get(reminder.reminder_id)).toMatchObject({
+        status: 'cancelled',
+        task_id: undefined,
+      });
+      // Reminders that did not reference the cancelled Task are untouched.
+      expect(byId.get(unrelated.reminder_id)).toMatchObject({ status: 'scheduled' });
     }
   );
 
