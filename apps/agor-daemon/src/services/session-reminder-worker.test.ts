@@ -1,9 +1,11 @@
 import {
   BranchRepository,
+  executeRaw,
   generateId,
   RepoRepository,
   SessionReminderRepository,
   SessionRepository,
+  sql,
   TaskRepository,
   UsersRepository,
 } from '@agor/core/db';
@@ -14,7 +16,11 @@ import { describe, expect, vi } from 'vitest';
 import type { Database } from '../../../../packages/core/src/db/client';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { sessionReminderTaskId } from '../utils/durable-task-id';
-import { SessionReminderWorker } from './session-reminder-worker';
+import {
+  SESSION_REMINDER_MAX_ATTEMPTS,
+  SessionReminderWorker,
+  sessionReminderRetryDelayMs,
+} from './session-reminder-worker';
 
 async function seed(db: Database, archived = false) {
   const user = await new UsersRepository(db).create({
@@ -226,5 +232,98 @@ describe('SessionReminderWorker', () => {
       skip: 0,
     });
     expect(page.data[0]).toMatchObject({ status: 'blocked', failure_code: 'dispatch_failed' });
+  });
+
+  dbTest(
+    'gives up on a reminder whose delivery always fails instead of retrying forever',
+    async ({ db }) => {
+      const { reminder } = await seed(db);
+      const create = vi.fn(async () => {
+        throw new Error('prompt admission is down');
+      });
+      const app = {
+        service(path: string) {
+          if (path === '/sessions/:id/prompt') return { create };
+          if (path === 'session-reminders') return { emit: vi.fn() };
+          throw new Error(`Unexpected service ${path}`);
+        },
+      } as unknown as Application;
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const tenantId = 'default' as TenantID;
+      const repo = new SessionReminderRepository(db);
+      const page = () =>
+        repo
+          .findPage({ session_id: reminder.session_id, limit: 10, skip: 0 })
+          .then((p) => p.data[0]);
+
+      // Virtual clock: each pass runs just after the previous retry deadline.
+      let clock = Date.now();
+      const worker = new SessionReminderWorker(db, app, {
+        tenantId,
+        now: () => new Date(clock),
+        discover: async (now) => {
+          const current = await page();
+          const due =
+            (current.status === 'scheduled' && new Date(current.due_at) <= now) ||
+            (current.status === 'claimed' &&
+              current.claim_expires_at !== undefined &&
+              new Date(current.claim_expires_at) <= now);
+          return due ? [{ reminder_id: reminder.reminder_id, tenant_id: tenantId }] : [];
+        },
+      });
+
+      // Before the fix this loop retried on every pass, forever.
+      const deferralGaps: number[] = [];
+      for (let pass = 0; pass < SESSION_REMINDER_MAX_ATTEMPTS * 4; pass++) {
+        await worker.checkOnce();
+        const current = await page();
+        if (current.status === 'claimed' && current.claim_expires_at) {
+          const next = new Date(current.claim_expires_at).getTime();
+          deferralGaps.push(next - clock);
+          clock = next + 1;
+        } else {
+          clock += 24 * 60 * 60 * 1_000;
+        }
+      }
+
+      expect(create).toHaveBeenCalledTimes(SESSION_REMINDER_MAX_ATTEMPTS);
+      expect(await page()).toMatchObject({
+        status: 'blocked',
+        failure_code: 'retries_exhausted',
+        attempt_count: SESSION_REMINDER_MAX_ATTEMPTS,
+      });
+      // Exponential backoff between the attempts that were retried.
+      expect(deferralGaps).toEqual(
+        Array.from({ length: SESSION_REMINDER_MAX_ATTEMPTS - 1 }, (_, i) =>
+          sessionReminderRetryDelayMs(i + 1)
+        )
+      );
+      expect(deferralGaps[1]).toBeGreaterThan(deferralGaps[0]);
+      expect(warn.mock.calls.flat().join(' ')).toContain('dispatch_exhausted');
+      warn.mockRestore();
+    }
+  );
+
+  dbTest('blocks a reminder already past the attempt cap without dispatching', async ({ db }) => {
+    const { reminder } = await seed(db);
+    // A reminder stuck retrying on an older build (27k attempts, claim lease expired).
+    await executeRaw(
+      db,
+      sql`UPDATE session_reminders SET status = 'claimed', attempt_count = 27310, claim_token = 'stale', claim_expires_at = ${new Date(Date.now() - 1_000).getTime()} WHERE reminder_id = ${reminder.reminder_id}`
+    );
+    const fixture = appFixture(db);
+    const tenantId = 'default' as TenantID;
+    await new SessionReminderWorker(db, fixture.app, {
+      tenantId,
+      discover: async () => [{ reminder_id: reminder.reminder_id, tenant_id: tenantId }],
+    }).checkOnce();
+
+    expect(fixture.create).not.toHaveBeenCalled();
+    const page = await new SessionReminderRepository(db).findPage({
+      session_id: reminder.session_id,
+      limit: 10,
+      skip: 0,
+    });
+    expect(page.data[0]).toMatchObject({ status: 'blocked', failure_code: 'retries_exhausted' });
   });
 });

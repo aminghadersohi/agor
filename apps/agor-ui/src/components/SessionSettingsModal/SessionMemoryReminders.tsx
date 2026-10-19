@@ -53,6 +53,8 @@ const REMINDER_FAILURE_LABELS: Record<SessionReminderFailureCode, string> = {
   authorization_revoked: 'The reminder author no longer has prompt authority on this Session.',
   session_missing: 'The Session no longer exists.',
   dispatch_failed: 'The reminder could not be queued as a task.',
+  retries_exhausted:
+    'Delivery kept failing, so the reminder was given up on after several attempts.',
 };
 
 function TagsSelect(props: { value: string[]; onChange: (tags: string[]) => void }) {
