@@ -80,6 +80,7 @@ import {
 import {
   type SessionRow,
   sessionMcpServers,
+  sessionReminders,
   sessions,
   type TaskInsert,
   type TaskRow,
@@ -3249,6 +3250,27 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
             'cancel' in command ? queue.filter((task) => unique.has(task.task_id)) : [];
           let resulting: Task[];
           if ('cancel' in command) {
+            // A Session reminder keeps its dispatched Task as provenance via a
+            // restrictive FK. Cancelling that Task is the user withdrawing the
+            // reminder's delivery, so settle the reminder in the same
+            // transaction instead of failing the whole batch.
+            const now = new Date();
+            await update(txDb, sessionReminders)
+              .set({
+                status: 'cancelled',
+                task_id: null,
+                claim_token: null,
+                claim_expires_at: null,
+                updated_at: now,
+                revision: sql`${sessionReminders.revision} + 1`,
+              })
+              .where(
+                and(
+                  eq(sessionReminders.session_id, sessionId),
+                  inArray(sessionReminders.task_id, requested)
+                )
+              )
+              .run();
             await deleteFrom(txDb, tasks)
               .where(and(predicate, inArray(tasks.task_id, requested)))
               .run();
