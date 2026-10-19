@@ -52,6 +52,7 @@ import type {
   Card,
   LayoutDensityPolicy,
   ZoneLayoutPolicy,
+  ZoneWorkflowTransition,
 } from '@agor/core/types';
 import {
   BOARD_OBJECT_TYPES,
@@ -602,7 +603,21 @@ async function arrangeBoardZones(
     ),
   ];
 
+  // Workflow transitions turn the outer layout into a left-to-right flow chart,
+  // unless the caller asked for an explicit row/column track count.
+  const followsWorkflow = options.fixedItemsPerRow === undefined && options.maxPerRow === undefined;
+  const transitions = followsWorkflow
+    ? ((await ctx.app.service('zone-workflow-transitions').find({
+        ...ctx.baseServiceParams,
+        query: { board_id: boardId },
+      })) as ZoneWorkflowTransition[] | { data: ZoneWorkflowTransition[] })
+    : undefined;
+  const flowEdges = (Array.isArray(transitions) ? transitions : (transitions?.data ?? [])).map(
+    (transition) => ({ source: transition.source_zone_id, target: transition.target_zone_id })
+  );
+
   const plan = planBoardZoneArrangement(zones, {
+    flowEdges,
     mode: options.mode,
     density: options.density,
     targetWidth: options.targetWidth,
@@ -2512,7 +2527,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_arrange_zones',
     {
       description:
-        "Arrange a board's zones, free worktrees/cards, and canvas objects through the authoritative board planner. Grid (default) builds justified photo-style rows; Compact minimizes cluster diameter. Each eligible zone is packed inside-out before its final frame joins visible free items. Disable packZoneContents to preserve zone frames and child-relative geometry. The complete plan is committed atomically.",
+        "Arrange a board's zones, free worktrees/cards, and canvas objects through the authoritative board planner. Grid (default) builds justified photo-style rows; Compact minimizes cluster diameter. Each eligible zone is packed inside-out before its final frame joins visible free items. Disable packZoneContents to preserve zone frames and child-relative geometry. When zones are joined by workflow transitions (and no explicit columns/maxPerRow is given), they are laid out left to right in transition order instead, with unlinked zones placed after the flow. The complete plan is committed atomically.",
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
         mode: z

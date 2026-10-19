@@ -19,6 +19,7 @@ import {
   placeLayoutAroundFixedObstacles,
   type RectanglePlacement,
 } from './rectangle-packing.js';
+import { layoutZoneFlow, type ZoneFlowEdge } from './zone-flow-layout.js';
 import {
   compactZoneItemSize,
   getZoneLayoutFrame,
@@ -43,6 +44,9 @@ export const DEFAULT_BOARD_ZONE_ARRANGEMENT = Object.freeze({
 });
 
 /** Empty explicit packs return to the ordinary seeded/creation width. */
+/** Minimum space between flow ranks so transition arrows and labels stay readable. */
+export const MIN_FLOW_RANK_GAP = 120;
+
 export const EMPTY_PACKED_ZONE_SIZE = Object.freeze({ width: 600, height: 240 });
 
 export interface BoardZoneArrangementItem extends ZoneLayoutSortItem {
@@ -137,6 +141,14 @@ export interface BoardZoneArrangementOptions {
   resizeZoneFrames?: boolean;
   /** Alignment for a short, non-justified final row. */
   lastRowAlignment?: 'start' | 'center' | 'end';
+  /**
+   * Workflow transitions between arranged zones (source flows into target).
+   * When any connect two of the zones being arranged, the outer layout becomes
+   * a left-to-right flow chart in place of Grid/Compact rows, so transitions
+   * point forward instead of running under or back across other zones. Zones
+   * with no transition follow the chart. Edges touching other ids are ignored.
+   */
+  flowEdges?: readonly ZoneFlowEdge[];
   /** Free top-level board nodes packed beside the content-sized zone frames. */
   looseItems?: readonly BoardZoneArrangementLooseItem[];
   /** Unselected visible peers that selection-scoped layout may not move or overlap. */
@@ -467,8 +479,13 @@ export function planBoardZoneArrangement(
     options.targetHeight ??
     (targetAspect ? ceilBoardGridValue(targetWidth / targetAspect) : undefined);
 
+  const flowEdges = (options.flowEdges ?? []).filter(
+    (edge) => edge.source !== edge.target && zoneIds.has(edge.source) && zoneIds.has(edge.target)
+  );
+  const flowActive = flowEdges.length > 0;
+
   const gridLayout =
-    mode === 'grid'
+    mode === 'grid' && !flowActive
       ? layoutJustifiedZones(
           sourceRoots.map((root) => {
             const entry = preparedById.get(root.id);
@@ -573,8 +590,49 @@ export function planBoardZoneArrangement(
     const frame = finalFrameById.get(root.id);
     return { ...root, ...(frame ?? { width: root.width, height: root.height }) };
   });
+  const flowPlan = flowActive
+    ? layoutZoneFlow(rootFrames, flowEdges, {
+        rankGap: Math.max(outerGapX, MIN_FLOW_RANK_GAP),
+        gapX: outerGapX,
+        gapY: outerGapY,
+        gridSize: BOARD_GRID_SIZE,
+      })
+    : undefined;
+  const flowLayout: CompactRectangleLayoutResult | undefined = flowPlan
+    ? {
+        mode: 'cluster',
+        placements: flowPlan.placements.map((placement, index) => {
+          const root = rootFrames.find((candidate) => candidate.id === placement.id);
+          return {
+            id: placement.id,
+            width: root?.width ?? 0,
+            height: root?.height ?? 0,
+            x: placement.x,
+            y: placement.y,
+            row: placement.row,
+            column: placement.column,
+            stackIndex: index,
+            deckDepth: 0,
+          };
+        }),
+        columns: Math.max(1, flowPlan.ranks),
+        rows: Math.max(1, ...flowPlan.placements.map((placement) => placement.row + 1)),
+        width: flowPlan.width,
+        height: flowPlan.height,
+        gapX: outerGapX,
+        gapY: outerGapY,
+        padding: 0,
+        fitsWithoutOverlap: true,
+        stackCount: flowPlan.placements.length,
+        maxDeckDepth: 0,
+        deckOffsetX: 0,
+        deckOffsetY: 0,
+        overflowingItemIds: [],
+      }
+    : undefined;
   const compactLayout =
-    mode === 'compact'
+    flowLayout ??
+    (mode === 'compact'
       ? layoutCompactRectangles(
           rootFrames.map((root) => ({
             id: root.id,
@@ -585,9 +643,10 @@ export function planBoardZoneArrangement(
           })),
           { gapX: outerGapX, gapY: outerGapY, gridSize: BOARD_GRID_SIZE }
         )
-      : undefined;
+      : undefined);
 
-  const unpositioned = mode === 'compact' ? compactLayout?.placements : gridLayout?.placements;
+  const unpositioned =
+    flowActive || mode === 'compact' ? compactLayout?.placements : gridLayout?.placements;
   if (!unpositioned) throw new Error('Missing outer board layout.');
   const rootFrameById = new Map(rootFrames.map((root) => [root.id, root]));
   const collisionFootprint: RectanglePlacement[] = unpositioned.map((placement, index) => {

@@ -483,7 +483,7 @@ describe('stale layout recovery production path', () => {
     const service = vi.fn((path: string) =>
       path === 'boards'
         ? { patch: boardsPatch, get: boardsGet }
-        : { patch: vi.fn(), findAll: placementsFindAll }
+        : { patch: vi.fn(), findAll: placementsFindAll, find: vi.fn().mockResolvedValue([]) }
     );
     const setNodes = vi.fn();
     const view = renderHook(
@@ -610,13 +610,23 @@ function makeClient() {
   return { client: client as never, patch, service };
 }
 
-function makeRoutedClient() {
+function makeRoutedClient(
+  transitions: Array<{ source_zone_id: string; target_zone_id: string }> = []
+) {
   const boardsPatch = vi.fn().mockImplementation(mockBoardPatchResult);
   const boardObjectsPatch = vi.fn().mockResolvedValue({});
+  const transitionsFind = vi.fn().mockResolvedValue(transitions);
   const service = vi.fn((path: string) => ({
     patch: path === 'boards' ? boardsPatch : boardObjectsPatch,
+    find: transitionsFind,
   }));
-  return { client: { service } as never, service, boardsPatch, boardObjectsPatch };
+  return {
+    client: { service } as never,
+    service,
+    boardsPatch,
+    boardObjectsPatch,
+    transitionsFind,
+  };
 }
 
 function mockBoardPatchResult(boardId: string, data: Record<string, unknown>) {
@@ -4908,12 +4918,83 @@ describe('arrangeBoardZones production path', () => {
       second = result.current.arrangeWholeBoard();
     });
     expect(result.current.isBoardArrangementActive).toBe(true);
-    expect(boardsPatch).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(boardsPatch).toHaveBeenCalledTimes(1));
 
     releaseWrite?.();
     await act(async () => Promise.all([first, second]));
     expect(boardsPatch).toHaveBeenCalledTimes(1);
     expect(result.current.isBoardArrangementActive).toBe(false);
+  });
+
+  describe('workflow transitions', () => {
+    const zoneNode = (id: string, x: number): Node => ({
+      id,
+      type: 'zone',
+      position: { x, y: 0 },
+      width: 620,
+      height: 500,
+      data: {},
+    });
+    const setup = (routed: ReturnType<typeof makeRoutedClient>) => {
+      const board = makeBoard({
+        first: { type: 'zone', x: 0, y: 0, width: 620, height: 500, label: 'First' },
+        second: { type: 'zone', x: 700, y: 0, width: 620, height: 500, label: 'Second' },
+      });
+      return renderHook(
+        () =>
+          useBoardObjects({
+            board,
+            client: routed.client,
+            boardObjectsForBoard: [],
+            nodes: [zoneNode('first', 0), zoneNode('second', 700)],
+            setNodes: vi.fn(),
+            deletedObjectsRef: { current: new Set<string>() },
+            guard: useBoardMutationGuard('board-1', true),
+          }),
+        { wrapper }
+      );
+    };
+    const writtenX = (routed: ReturnType<typeof makeRoutedClient>, id: string) =>
+      (layoutWrites(routed.boardsPatch)[0]?.objects as Record<string, { x: number }> | undefined)?.[
+        id
+      ]?.x as number;
+
+    it('orders Arrange board along workflow transitions', async () => {
+      const routed = makeRoutedClient([{ source_zone_id: 'second', target_zone_id: 'first' }]);
+      const { result } = setup(routed);
+      await act(async () => result.current.arrangeWholeBoard());
+
+      expect(routed.transitionsFind).toHaveBeenCalledWith({ query: { board_id: 'board-1' } });
+      expect(writtenX(routed, 'second')).toBeLessThan(writtenX(routed, 'first'));
+    });
+
+    it('keeps the ordinary layout when the board has no transitions', async () => {
+      const routed = makeRoutedClient([]);
+      const { result } = setup(routed);
+      await act(async () => result.current.arrangeWholeBoard());
+
+      expect(writtenX(routed, 'first')).toBeLessThan(writtenX(routed, 'second'));
+    });
+
+    it('still arranges when transitions cannot be loaded', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const routed = makeRoutedClient();
+      routed.transitionsFind.mockRejectedValue(new Error('offline'));
+      const { result } = setup(routed);
+      await act(async () => result.current.arrangeWholeBoard());
+
+      expect(layoutWrites(routed.boardsPatch)).toHaveLength(1);
+      warn.mockRestore();
+    });
+
+    it('does not apply workflow order to an explicit track count', async () => {
+      const routed = makeRoutedClient([{ source_zone_id: 'second', target_zone_id: 'first' }]);
+      const { result } = setup(routed);
+      await act(async () => result.current.arrangeWholeBoard({ fixedItemsPerRow: 2 }));
+
+      expect(routed.transitionsFind).not.toHaveBeenCalled();
+      expect(writtenX(routed, 'first')).toBeLessThan(writtenX(routed, 'second'));
+    });
   });
 
   it('writes one zone batch, re-packs measured children, and cancels pending Auto Zone passes', async () => {
@@ -5157,7 +5238,7 @@ describe('whole-board stale layout recovery', () => {
     const service = vi.fn((path: string) =>
       path === 'boards'
         ? { patch: boardsPatch, get: boardsGet }
-        : { patch: vi.fn(), findAll: placementsFindAll }
+        : { patch: vi.fn(), findAll: placementsFindAll, find: vi.fn().mockResolvedValue([]) }
     );
     const setNodes = vi.fn();
     const view = renderHook(
@@ -5204,6 +5285,7 @@ describe('whole-board stale layout recovery', () => {
     act(() => {
       arrange = view.result.current.arrangeWholeBoard();
     });
+    await vi.waitFor(() => expect(view.boardsPatch).toHaveBeenCalledTimes(1));
     act(() => view.result.current.cancelPendingLayoutRecovery());
     rejectFirst?.(new Error('Board layout source snapshot is stale'));
     await act(async () => arrange);

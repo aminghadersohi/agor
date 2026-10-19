@@ -27,7 +27,14 @@ import type {
   BoardLayoutContext,
   BoardLayoutSettings,
 } from '@agor/core/types';
-import type { AgorClient, Board, BoardEntityObject, BoardObject, Card } from '@agor-live/client';
+import type {
+  AgorClient,
+  Board,
+  BoardEntityObject,
+  BoardObject,
+  Card,
+  ZoneWorkflowTransition,
+} from '@agor-live/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Node } from 'reactflow';
 import {
@@ -470,6 +477,30 @@ interface LayoutRecoveryState {
   ticket: BoardWriteTicket;
   source: AuthoritativeLayoutSource;
   viewportIntentToken?: number;
+}
+
+/**
+ * Workflow transitions as flow-layout edges. Ordering zones along transitions
+ * improves Arrange but must never block it, so a failed read falls back to the
+ * ordinary Grid/Compact layout.
+ */
+async function fetchWorkflowFlowEdges(
+  client: AgorClient,
+  boardId: Board['board_id']
+): Promise<Array<{ source: string; target: string }>> {
+  try {
+    const result = await client
+      .service('zone-workflow-transitions')
+      .find({ query: { board_id: boardId } });
+    const transitions: ZoneWorkflowTransition[] = Array.isArray(result) ? result : result.data;
+    return transitions.map((transition) => ({
+      source: transition.source_zone_id,
+      target: transition.target_zone_id,
+    }));
+  } catch (error) {
+    console.warn('Could not load workflow transitions for Arrange:', error);
+    return [];
+  }
 }
 
 type ArrangeBoardZonesOptions = Omit<BoardZoneArrangementOptions, 'looseItems'> & {
@@ -2190,6 +2221,15 @@ export const useBoardObjects = ({
                 // constrain a whole-board plan just as unselected peers do.
                 fixedObstacles,
               };
+        // A whole-board arrange follows workflow transitions (left-to-right flow
+        // chart) unless an explicit track count was chosen.
+        const followsWorkflow =
+          layoutScope === 'board' &&
+          arrangementOptions.fixedItemsPerRow === undefined &&
+          arrangementOptions.maxPerRow === undefined;
+        const flowEdges = followsWorkflow
+          ? await fetchWorkflowFlowEdges(client, currentBoard.board_id)
+          : [];
         const plan = planBoardZoneArrangement(
           selectedZones.map(([zoneId, object]) => {
             const persistedZone = currentBoard.objects?.[zoneId];
@@ -2263,6 +2303,7 @@ export const useBoardObjects = ({
           }),
           {
             ...scopedArrangementOptions,
+            flowEdges,
             looseItems: (layoutScope === 'board' || selectedRootIds ? looseNodes : []).map(
               (node) => {
                 const placement = placementByNodeId.get(node.id);
