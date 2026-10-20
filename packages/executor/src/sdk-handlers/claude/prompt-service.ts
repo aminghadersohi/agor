@@ -361,7 +361,7 @@ If you continue to see authentication errors, please contact your Agor administr
     const replayDeferredPreambleResult = async (): Promise<ProcessedEvent[]> => {
       const held = deferredPreambleResult;
       deferredPreambleResult = undefined;
-      if (!held) return [];
+      if (!held || !processor) return [];
       const events = await processor.process(held);
       return events.filter((event) => event.type !== 'end');
     };

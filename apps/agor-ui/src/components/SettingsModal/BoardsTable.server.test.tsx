@@ -3,11 +3,15 @@
  * board list projection (fork: BoardListCounts), so the counts are right with
  * the store's branch and session maps empty and need no per-board reads.
  */
-import type { Board } from '@agor-live/client';
+import type { Board, User } from '@agor-live/client';
 import { screen, within } from '@testing-library/react';
 import { expect, it } from 'vitest';
 import { fakeFeathersClient, mount, withTestAuthority } from '../../test/harness';
 import { BoardsTable } from './BoardsTable';
+
+// A member sees the board actions enabled; role queries trip jsdom's
+// border-shorthand parser on the disabled antd buttons a viewer would get.
+const member = { user_id: 'me', email: 'me@example.test', role: 'member' } as User;
 
 const board = (n: number, active = 0) =>
   ({
@@ -29,6 +33,7 @@ it('counts every board’s active sessions from the board list projection', asyn
       client={fake.client}
       boardById={new Map(boards.map((b) => [b.board_id, b]))}
       branchById={new Map()}
+      currentUser={member}
     />
   );
   const row = (await screen.findByText('Board 1')).closest('tr') as HTMLElement;
