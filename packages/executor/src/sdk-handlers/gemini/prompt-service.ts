@@ -13,8 +13,12 @@ import {
   renderAgorSessionIdentity,
   renderAgorSystemPrompt,
 } from '@agor/core/templates/session-context';
-import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
+import {
+  hasPrescribedMCPAuthHeader,
+  mergeMCPRemoteHeaders,
+} from '@agor/core/tools/mcp/http-headers';
 import { MCP_CLIENT_HINT_HEADER, MCP_CLIENT_HINTS } from '@agor/core/types';
+import { writeLogLine } from '@agor/core/utils/logger';
 import { GEMINI_MANUAL_MESSAGE, isGeminiManualMode } from '@agor/core/utils/permission-mode-mapper';
 import type * as GeminiTypes from '@google/gemini-cli-core';
 import type { Part } from '@google/genai';
@@ -49,6 +53,7 @@ import {
   GEMINI_KEY_MESSAGE,
   GeminiIntegrationError,
   geminiError,
+  geminiFailureLine,
   geminiSessionId,
 } from './runtime.js';
 import { Gemini } from './sdk.js';
@@ -413,16 +418,10 @@ export class GeminiPromptService {
         yield { type: 'stopped' };
         return;
       }
-      // Console is suppressed while the SDK is active. Only fixed local stage
-      // and category labels leave this path; provider text never reaches logs.
-      if (
-        !(error instanceof GeminiIntegrationError) ||
-        error.message === 'Gemini integration error.'
-      ) {
-        process.stderr.write(
-          `Gemini task failure stage=${stage} category=${error instanceof GeminiIntegrationError ? 'integration' : 'local'}\n`
-        );
-      }
+      // Console is suppressed while the SDK is active. Only fixed local stage,
+      // closed category, status and class leave this path; provider text never
+      // reaches logs.
+      writeLogLine('error', geminiFailureLine(stage, error));
       // Local repository, policy, and tool failures can also carry HTTP 401/403.
       // Only the explicit provider boundaries above may classify a credential.
       throw error instanceof GeminiIntegrationError
@@ -518,9 +517,7 @@ export class GeminiPromptService {
             headers = mergeMCPRemoteHeaders({ custom: server.headers, auth: authHeaders });
             if (
               server.transport !== 'stdio' &&
-              server.auth &&
-              server.auth.type !== 'none' &&
-              !authHeaders?.Authorization
+              !hasPrescribedMCPAuthHeader(server.auth, authHeaders)
             ) {
               authDiagnostics.recordUnavailable();
               // Withheld, so Gemini never runs its own OAuth discovery / Dynamic

@@ -1,4 +1,5 @@
 import { generateId, SAFE_ZERO_TURN_PROVIDER_RESULT_MESSAGE } from '@agor/core';
+import type { SDKSystemMessage } from '@agor/core/sdk';
 import type { Message, MessageID, SessionID } from '@agor/core/types';
 import { describe, expect, it, vi } from 'vitest';
 import type { MessagesService } from '../base/index.js';
@@ -121,6 +122,57 @@ describe('SDKMessageProcessor result logging', () => {
     expect(JSON.stringify(message)).not.toContain('Credit balance is too low');
     expect(message.metadata?.is_zero_turn_result).toBe(true);
   });
+});
+
+describe('SDKMessageProcessor command discovery', () => {
+  it('removes runtime-tagged terminal commands from both command and skill inventories', async () => {
+    const processor = createProcessor();
+    const events = await processor.process(
+      systemMsg({
+        subtype: 'init',
+        slash_commands: ['compact', 'doctor', 'exit', 'future-terminal', 'plugin:doctor'],
+        terminal_slash_commands: ['doctor', 'exit', 'future-terminal'],
+        skills: ['doctor', 'plugin:doctor'],
+      } satisfies Pick<
+        SDKSystemMessage,
+        'subtype' | 'slash_commands' | 'terminal_slash_commands' | 'skills'
+      >)
+    );
+    expect(events).toEqual([
+      {
+        type: 'slash_commands_discovered',
+        slashCommands: ['compact', 'plugin:doctor'],
+        skills: ['plugin:doctor'],
+        agentSessionId: undefined,
+      },
+    ]);
+  });
+
+  it.each([undefined, []])(
+    'preserves SDK-supported commands when terminal metadata is %j',
+    async (terminalCommands) => {
+      const processor = createProcessor();
+      const events = await processor.process(
+        systemMsg({
+          subtype: 'init',
+          slash_commands: ['compact', 'clear', 'context', 'usage', 'config', 'custom-command'],
+          terminal_slash_commands: terminalCommands,
+          skills: ['custom-command'],
+        } satisfies Pick<
+          SDKSystemMessage,
+          'subtype' | 'slash_commands' | 'terminal_slash_commands' | 'skills'
+        >)
+      );
+      expect(events).toEqual([
+        {
+          type: 'slash_commands_discovered',
+          slashCommands: ['compact', 'clear', 'context', 'usage', 'config', 'custom-command'],
+          skills: ['custom-command'],
+          agentSessionId: undefined,
+        },
+      ]);
+    }
+  );
 });
 
 describe('SDKMessageProcessor system event suppression', () => {
@@ -525,5 +577,59 @@ describe('SDKMessageProcessor tool lifecycle', () => {
     expect(complete?.content).toEqual([
       { type: 'tool_result', tool_use_id: 'read-1', content: 'bounded text' },
     ]);
+  });
+});
+
+describe('SDKMessageProcessor provider error', () => {
+  const assistant = (error?: string) =>
+    ({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'API Error' }] },
+      parent_tool_use_id: null,
+      ...(error ? { error } : {}),
+    }) as never;
+  const failedResult = {
+    type: 'result',
+    subtype: 'success',
+    is_error: true,
+    result: 'opaque provider text',
+  } as never;
+  const resultFailure = (events: ProcessedEvent[]) =>
+    (events.find((event) => event.type === 'result') as { failure?: unknown } | undefined)?.failure;
+
+  it('carries the assistant error class into the result failure', async () => {
+    const processor = createProcessor();
+    await processor.process(assistant('authentication_failed'));
+    const failure = resultFailure(await processor.process(failedResult));
+    expect(failure).toMatchObject({
+      category: 'authentication',
+      providerError: 'authentication_failed',
+    });
+  });
+
+  it('ignores an unknown assistant error string', async () => {
+    const processor = createProcessor();
+    await processor.process(assistant('not_an_sdk_class'));
+    const failure = resultFailure(await processor.process(failedResult));
+    expect(failure).toMatchObject({ category: 'unknown' });
+    expect(failure).not.toHaveProperty('providerError', 'not_an_sdk_class');
+  });
+
+  it('does not carry the error class into the next turn', async () => {
+    const processor = createProcessor();
+    await processor.process(assistant('rate_limit'));
+    await processor.process(failedResult);
+    await processor.process(assistant());
+    const failure = resultFailure(await processor.process(failedResult));
+    expect((failure as { providerError?: unknown }).providerError).toBeUndefined();
+  });
+
+  it('clears an earlier error class when a later assistant message is clean', async () => {
+    const processor = createProcessor();
+    await processor.process(assistant('rate_limit'));
+    await processor.process(assistant());
+    const failure = resultFailure(await processor.process(failedResult));
+    expect(failure).toMatchObject({ category: 'unknown' });
+    expect((failure as { providerError?: unknown }).providerError).toBeUndefined();
   });
 });

@@ -32,7 +32,8 @@ vi.mock('@agor/core/templates/session-context', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@agor/core/templates/session-context')>()),
   renderAgorSystemPrompt: vi.fn().mockResolvedValue('prompt'),
 }));
-vi.mock('@agor/core/tools/mcp/http-headers', () => ({
+vi.mock('@agor/core/tools/mcp/http-headers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@agor/core/tools/mcp/http-headers')>()),
   mergeMCPRemoteHeaders: vi.fn(({ custom, auth }) => ({ ...(custom || {}), ...(auth || {}) })),
 }));
 vi.mock('@agor/core/tools/mcp/jwt-auth', () => mcpAuthMocks);
@@ -60,6 +61,7 @@ vi.mock('../base/permission-hooks.js', () => ({
 
 import { getMcpServersForSession, resolveScopedMCPAuthHeaders } from '@agor/core/mcp';
 import { renderAgorSessionIdentity } from '@agor/core/templates/session-context';
+import { renderMCPTokenHeader } from '@agor/core/tools/mcp/http-headers';
 import { resolveMCPAuthHeaders } from '@agor/core/tools/mcp/jwt-auth';
 import * as Claude from '@anthropic-ai/claude-agent-sdk';
 import {
@@ -68,8 +70,31 @@ import {
   userEnvBearerInstall,
 } from '../../../test/helpers/real-mcp-scoping.js';
 import { setAgorSkillsIndex } from '../../agor-skills-index.js';
+import { AgorSetupError } from './claude-error.js';
 import { CLAUDE_CODE_DISALLOWED_TOOLS, CLAUDE_CODE_TODO_TOOLS } from './constants.js';
 import { formatListForLog, type QuerySetupDeps, setupQuery } from './query-builder.js';
+
+/** Minimal deps stub shared by the sync-failure and setup-error describe blocks. */
+function createMinimalQueryDeps(): QuerySetupDeps {
+  return {
+    sessionsRepo: {
+      findById: vi.fn().mockResolvedValue({
+        session_id: 'test-session' as SessionID,
+        branch_id: 'test-branch' as BranchID,
+        mcp_token: 'token',
+      }),
+    } as any,
+    branchesRepo: { findById: vi.fn().mockResolvedValue({ path: '/test/project/path' }) } as any,
+    messagesRepo: {} as any,
+    sessionMCPRepo: {} as any,
+    mcpServerRepo: {} as any,
+    permissionService: {} as any,
+    tasksService: {} as any,
+    messagesService: {} as any,
+    sessionsService: {} as any,
+    permissionLocks: new Map(),
+  };
+}
 
 describe('MCP logging helpers', () => {
   it('formats long server lists without dumping every entry', () => {
@@ -1295,6 +1320,58 @@ describe('setupQuery - Local Settings Support', () => {
     expect(mcpServers.jwtRemote.alwaysLoad).toBeUndefined();
   });
 
+  it('treats vendor token header recipes as resolved auth', async () => {
+    const deps = createMockDeps();
+    vi.mocked(deps.sessionsRepo.findById).mockResolvedValue({
+      session_id: 'test-session' as SessionID,
+      branch_id: 'test-branch' as BranchID,
+      mcp_token: 'test-token',
+      custom_context: { gateway_source: { channel_id: 'channel-1' } },
+    } as any);
+    deps.sessionMCPRepo = {} as any;
+    deps.mcpServerRepo = {} as any;
+    vi.mocked(resolveMCPAuthHeaders).mockImplementation(async (auth) =>
+      renderMCPTokenHeader(auth as { token: string })
+    );
+    vi.mocked(getMcpServersForSession).mockResolvedValue([
+      {
+        server: {
+          name: 'pagerduty',
+          transport: 'http',
+          url: 'https://pd.example.com/mcp',
+          auth: { type: 'bearer', token: 'pd-key', token_prefix: 'Token token=' },
+        },
+      } as any,
+      {
+        server: {
+          name: 'similarweb',
+          transport: 'http',
+          url: 'https://sw.example.com/mcp',
+          auth: { type: 'bearer', token: 'sw-key', token_header: 'api-key' },
+        },
+      } as any,
+    ]);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await setupQuery('test-session' as SessionID, 'test prompt', deps);
+      const mcpServers = claudeQuery.mock.calls[0][0].options.mcpServers as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(mcpServers.pagerduty).toMatchObject({
+        headers: { Authorization: 'Token token=pd-key' },
+        alwaysLoad: true,
+      });
+      expect(mcpServers.similarweb).toMatchObject({
+        headers: { 'api-key': 'sw-key' },
+        alwaysLoad: true,
+      });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('credential_unavailable');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it.each(['claude-opus-5-5', 'claude-opus-5-5[1m]', 'claude-sonnet-5-5'])(
     'passes %s unchanged to the bundled SDK runtime',
     async (model) => {
@@ -1637,5 +1714,92 @@ describe('setupQuery - tool names the CLI has to rewrite', () => {
     expect(disallowed).toContain('mcp__My.Server__repo.create');
     // An "allow" tool is not swept in by the rewrite.
     expect(disallowed).not.toContain('mcp__My_Server__repo_read');
+  });
+});
+
+describe('setupQuery - synchronous Claude.query failures', () => {
+  it('sanitizes synchronous Claude.query failures without generic MCP error masking', async () => {
+    claudeQuery.mockImplementationOnce(() => {
+      throw new Error(
+        'Claude Code returned an error result: Invalid API key · Fix external API key'
+      );
+    });
+
+    const pending = setupQuery(
+      'test-session' as SessionID,
+      'test prompt',
+      createMinimalQueryDeps()
+    );
+    await expect(pending).rejects.toMatchObject({ category: 'authentication' });
+    const error = await pending.catch((err: unknown) => err as Error);
+    expect(error.message).not.toContain('The MCP operation failed');
+  });
+});
+
+describe('setupQuery - setup error handling', () => {
+  it('throws AgorSetupError when session is not found', async () => {
+    const d = createMinimalQueryDeps();
+    (d.sessionsRepo.findById as any).mockResolvedValue(null);
+
+    await expect(setupQuery('missing-session' as SessionID, 'prompt', d)).rejects.toSatisfy(
+      (err: unknown) => {
+        expect(err).toBeInstanceOf(AgorSetupError);
+        expect((err as Error).message).toBe('Session not found: missing-session');
+        return true;
+      }
+    );
+  });
+
+  it('throws AgorSetupError when working directory validation fails', async () => {
+    const d = createMinimalQueryDeps();
+    const { validateDirectory } = await import('@agor/core/lib/validation');
+    vi.mocked(validateDirectory).mockRejectedValueOnce(
+      new Error('Working directory does not exist: /missing/path')
+    );
+
+    await expect(setupQuery('test-session' as SessionID, 'prompt', d)).rejects.toSatisfy(
+      (err: unknown) => {
+        expect(err).toBeInstanceOf(AgorSetupError);
+        expect((err as Error).message).toBe(
+          'Working directory for this session is unavailable. Session references branch test-branch which may not be initialized.'
+        );
+        expect((err as Error).message).not.toContain('/');
+        return true;
+      }
+    );
+
+    // Also verify fallback when session has no branch_id
+    (d.sessionsRepo.findById as any).mockResolvedValueOnce({
+      session_id: 'test-session' as SessionID,
+      branch_id: undefined,
+      mcp_token: 'token',
+    });
+    vi.mocked(validateDirectory).mockRejectedValueOnce(
+      new Error('Working directory does not exist: /missing/path')
+    );
+    await expect(setupQuery('test-session' as SessionID, 'prompt', d)).rejects.toSatisfy(
+      (err: unknown) => {
+        expect(err).toBeInstanceOf(AgorSetupError);
+        expect((err as Error).message).toBe(
+          'Working directory for this session is unavailable. The branch may not be initialized.'
+        );
+        expect((err as Error).message).not.toContain('/');
+        return true;
+      }
+    );
+  });
+
+  it('keeps SDK module-loading failures separate from provider authentication', async () => {
+    const { loadManagedAgenticToolSdk } = await import('@agor/core/agentic-integrations');
+    vi.mocked(loadManagedAgenticToolSdk).mockRejectedValueOnce(
+      new Error('Invalid API key in package path SECRET')
+    );
+    await expect(
+      setupQuery('test-session' as SessionID, 'test prompt', createMinimalQueryDeps())
+    ).rejects.toMatchObject({
+      name: 'AgorSetupError',
+      message:
+        'Claude Code runtime could not be loaded. Ask your administrator to check the managed runtime installation.',
+    });
   });
 });

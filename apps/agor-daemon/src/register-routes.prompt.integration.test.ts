@@ -4,6 +4,8 @@ import {
   BranchRepository,
   createDatabaseAsync,
   createTenantScopedDatabaseProxy,
+  GatewayChannelRepository,
+  GatewayInboundEventRepository,
   generateId,
   getCurrentTenantDatabaseScope,
   MessagesRepository,
@@ -25,13 +27,20 @@ import type {
   TaskID,
 } from '@agor/core/types';
 import { SessionStatus, TaskStatus } from '@agor/core/types';
+import { getLogContext, runWithLogContext } from '@agor/core/utils/log-context';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { type RegisterRoutesContext, registerRoutes } from './register-routes.js';
+import {
+  type GatewayAdmissionFenceParams,
+  teamsInboundAdmissionFence,
+  withVerifiedHttpGatewayAuthority,
+} from './services/gateway-authority.js';
 import { TasksService } from './services/tasks.js';
 
 const cleanup: Array<() => void> = [];
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const close of cleanup.splice(0)) close();
 });
 
@@ -152,7 +161,7 @@ async function fixture() {
       idempotencyTaskId?: TaskID;
       metadata?: Record<string, unknown>;
     },
-    extraParams: Record<string, unknown> = {}
+    extraParams: GatewayAdmissionFenceParams | Record<string, unknown> = {}
   ) =>
     app.service('sessions/:id/prompt').create(data, {
       route: { id: session.session_id },
@@ -161,6 +170,7 @@ async function fixture() {
       ...extraParams,
     } as AuthenticatedParams) as Promise<Task>;
   return {
+    db,
     scoped,
     session,
     actor,
@@ -234,6 +244,159 @@ describe('registered prompt route launch handoff', () => {
       task_id: first.task_id,
       session_id: f.session.session_id,
     });
+  });
+  it('runs a params-carried gateway fence inside the Task admission transaction', async () => {
+    const f = await fixture();
+    const idempotencyTaskId = generateId() as TaskID;
+    const original = GatewayInboundEventRepository.prototype.assertTeamsTaskAdmission;
+    const fence = vi
+      .spyOn(GatewayInboundEventRepository.prototype, 'assertTeamsTaskAdmission')
+      .mockImplementation(async function (this: GatewayInboundEventRepository, authority) {
+        expect(getCurrentTenantDatabaseScope()).toMatchObject({
+          kind: 'tenant',
+          transactionActive: true,
+        });
+        return original.call(this, authority);
+      });
+    const fenceParams = {
+      gatewayAdmissionFence: teamsInboundAdmissionFence({
+        id: generateId(),
+        gateway_channel_id: generateId(),
+        processing_token: 'stale-worker',
+        provider_config_generation: 1,
+        verified_app_id: 'teams-app',
+        verified_tenant_id: 'teams-tenant',
+        thread_id: 'teams-thread',
+      }),
+    };
+    await expect(
+      f.prompt({ prompt: 'stale Teams authority', idempotencyTaskId }, fenceParams)
+    ).rejects.toThrow('admission authority');
+    expect(fence).toHaveBeenCalledOnce();
+    expect(await f.scoped(() => f.taskRepo.findById(idempotencyTaskId))).toBeNull();
+    expect(f.executeTask).not.toHaveBeenCalled();
+  });
+  it.each(['disable', 'unchanged'] as const)(
+    'checks real prompt admission after asynchronous %s preparation',
+    async (mutation) => {
+      vi.stubEnv('AGOR_MASTER_SECRET', 'disposable-teams-admission-secret');
+      const f = await fixture();
+      const { channel, claim } = await f.scoped(async () => {
+        const channels = new GatewayChannelRepository(f.db);
+        const channel = await channels.create({
+          name: 'Teams admission fixture',
+          created_by: f.actor.user_id,
+          target_branch_id: f.session.branch_id,
+          agor_user_id: f.actor.user_id,
+          channel_type: 'teams',
+          enabled: true,
+          provider_installation_id: 'teams-app',
+          config: {
+            app_id: 'teams-app',
+            app_password: 'disposable-secret',
+            microsoft_tenant_id: 'teams-tenant',
+            catch_up: { mode: 'off' },
+          },
+        });
+        const inbound = new GatewayInboundEventRepository(f.db);
+        const input = {
+          channelId: channel.id,
+          providerEventId: 'activity-1',
+          threadId: 'thread-1',
+          payload: { text: 'hello' },
+          providerConfigGeneration: channel.provider_config_generation,
+          verifiedAppId: 'teams-app',
+          verifiedTenantId: 'teams-tenant',
+          address: {
+            conversationId: 'conversation-1',
+            rootMessageId: null,
+            address: { serviceUrl: 'https://smba.trafficmanager.net/teams/' },
+          },
+        };
+        const admitted = await inbound.admitVerifiedHttp(input);
+        const claim = await inbound.claimQueued(admitted.event.id, 'worker-a', 30_000);
+        if (!claim) throw new Error('missing fixture claim');
+        return { channel, claim };
+      });
+      let reached!: () => void;
+      let resume!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const pause = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const original = f.sessionsRepository.findById.bind(f.sessionsRepository);
+      vi.spyOn(f.sessionsRepository, 'findById').mockImplementationOnce(async (...args) => {
+        const session = await original(...args);
+        reached();
+        await pause;
+        return session;
+      });
+      const idempotencyTaskId = generateId() as TaskID;
+      const work = f.prompt(
+        { prompt: 'Teams mention', idempotencyTaskId },
+        { gatewayAdmissionFence: teamsInboundAdmissionFence(claim) }
+      );
+      try {
+        await Promise.race([ready, work]);
+        await f.scoped(async () => {
+          if (mutation === 'disable') {
+            await new GatewayChannelRepository(f.db).update(channel.id, { enabled: false });
+          }
+        });
+      } finally {
+        resume();
+      }
+      if (mutation === 'unchanged') {
+        await expect(work).resolves.toMatchObject({ task_id: idempotencyTaskId });
+        await vi.waitFor(() => expect(f.executeTask).toHaveBeenCalledOnce());
+        return;
+      }
+      await expect(work).rejects.toThrow('admission authority');
+      expect(await f.scoped(() => f.taskRepo.findById(idempotencyTaskId))).toBeNull();
+      expect(f.executeTask).not.toHaveBeenCalled();
+      expect(await f.scoped(() => f.sessionsRepository.countMessages(f.session.session_id))).toBe(
+        0
+      );
+    }
+  );
+  it('refuses a gateway-sourced Teams Task whose fence was dropped, even with data authority', async () => {
+    const f = await fixture();
+    const idempotencyTaskId = generateId() as TaskID;
+    const teamsSource = {
+      gateway_task_source: {
+        gateway_channel_id: generateId(),
+        channel_type: 'teams',
+        thread_id: 'teams-thread',
+        provider_user_id: 'teams-user',
+      },
+    };
+    // A hidden data-level authority alone no longer admits anything.
+    const data = withVerifiedHttpGatewayAuthority(
+      { prompt: 'unfenced Teams Task', idempotencyTaskId, metadata: teamsSource },
+      {
+        id: generateId(),
+        gateway_channel_id: generateId(),
+        processing_token: 'worker',
+        provider_config_generation: 1,
+        verified_app_id: 'teams-app',
+        verified_tenant_id: 'teams-tenant',
+        thread_id: 'teams-thread',
+      }
+    );
+    await expect(f.prompt(data)).rejects.toThrow('provider event fence');
+    expect(await f.scoped(() => f.taskRepo.findById(idempotencyTaskId))).toBeNull();
+    expect(f.executeTask).not.toHaveBeenCalled();
+
+    // Providers without a queue fence keep the ordinary internal path.
+    const slack = await f.prompt({
+      prompt: 'Slack Task',
+      metadata: {
+        gateway_task_source: { ...teamsSource.gateway_task_source, channel_type: 'slack' },
+      },
+    });
+    expect(slack.task_id).toBeTruthy();
   });
 });
 
@@ -405,5 +568,61 @@ describe('prompt route provenance envelope', () => {
     const f = await fixture();
     const task = await f.prompt({ prompt: 'rebase onto main and rerun the suite' }, stamp());
     expect(deriveTitleFromPrompt(task.full_prompt)).toBe('rebase onto main and rerun the suite');
+  });
+});
+
+describe('dispatch log context', () => {
+  function recordLogContext(method: 'log' | 'error') {
+    const lines: Array<{ text: string; context: Record<string, string> }> = [];
+    vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+      lines.push({ text: String(args[0]), context: getLogContext() });
+    });
+    return lines;
+  }
+
+  it('logs the Task prompter, not the draining caller, on routing and spawn lines', async () => {
+    const f = await fixture();
+    const logs = recordLogContext('log');
+    const launched: Array<Record<string, string>> = [];
+    f.executeTask.mockImplementationOnce(async () => {
+      launched.push(getLogContext());
+    });
+    // The Task is created by f.actor but drained inside another caller's scope.
+    const task = await runWithLogContext({ user_id: 'user-draining-caller' }, () =>
+      f.prompt({ prompt: 'disposable fixture' })
+    );
+    await vi.waitFor(() =>
+      expect(logs.some((line) => line.text.includes('Executor spawned'))).toBe(true)
+    );
+    const expected = {
+      user_id: f.actor.user_id,
+      session_id: f.session.session_id,
+      task_id: task.task_id,
+    };
+    expect(launched).toEqual([expect.objectContaining(expected)]);
+    for (const marker of ['Routing', 'Executor spawned']) {
+      const line = logs.find((entry) => entry.text.includes(marker));
+      expect(line?.context).toMatchObject(expected);
+    }
+  });
+
+  it('logs a pre-token spawn failure with the Task and Session IDs', async () => {
+    const f = await fixture();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errors = recordLogContext('error');
+    f.executeTask.mockImplementationOnce(async () => {
+      throw new Error('launch prerequisites failed');
+    });
+    const task = await f.prompt({ prompt: 'disposable fixture' });
+    await vi.waitFor(() =>
+      expect(errors.some((line) => line.text.includes('Executor spawn failed'))).toBe(true)
+    );
+    const line = errors.find((entry) => entry.text.includes('Executor spawn failed'));
+    expect(line?.context).toMatchObject({
+      user_id: f.actor.user_id,
+      session_id: f.session.session_id,
+      task_id: task.task_id,
+    });
   });
 });

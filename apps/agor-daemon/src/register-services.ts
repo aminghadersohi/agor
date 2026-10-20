@@ -70,6 +70,7 @@ import {
   sessions,
   shortId,
   TaskRepository,
+  TeamsMessageDeliveryRepository,
   type TenantScopeAwareDatabase,
   type TenantScopedDatabase,
   ThreadSessionMapRepository,
@@ -97,6 +98,7 @@ import {
   normalizeDiscoveredMCPCapabilities,
   sanitizeMCPExternalError,
 } from '@agor/core/mcp';
+import { catalogRelayIssuer } from '@agor/core/mcp-catalog';
 import type {
   MCPOAuthDynamicClientRegistrationRequest,
   OAuthFlowContext,
@@ -105,6 +107,7 @@ import type {
 import {
   OAuthCodeExchangeError,
   OAuthConfigurationError,
+  oauthIssuerIdentifiersMatch,
 } from '@agor/core/tools/mcp/oauth-mcp-transport';
 import type { RefreshAndPersistDeps } from '@agor/core/tools/mcp/oauth-refresh';
 import type {
@@ -160,6 +163,7 @@ import {
   TaskStatus,
 } from '@agor/core/types';
 import type { UnixUserMode } from '@agor/core/unix';
+import { runWithLogContext } from '@agor/core/utils/log-context';
 import { type OutboundDnsLookup, safeOutboundFetch } from '@agor/core/utils/safe-outbound-fetch';
 import type express from 'express';
 import { getAgenticToolDaemonContribution } from './agentic-tool-daemon-contributions.js';
@@ -302,7 +306,9 @@ import {
 } from './services/mcp-marketplace-actions.js';
 import { MCPOAuthClientRegistrationAuthority } from './services/mcp-oauth-client-registration-authority.js';
 import {
-  configuredCatalogIssuer,
+  catalogInstallDeclaresOAuth,
+  catalogInstallRelayIssuer,
+  catalogTokenEndpointAuthMethod,
   logMCPOAuthCompatibilityPolicy,
   presentMCPOAuthEffectivePolicy,
   resolveMCPOAuthCompatibilityPolicy,
@@ -431,6 +437,7 @@ import {
   isMcpGrantOwnerEntitled,
   isSessionMcpServerLinkVisibleToCaller,
   loadMcpServerForCaller,
+  mayCallerManageSharedMcpServers,
   registerMcpCapabilityRoleFloor,
   resolveMcpCaller,
 } from './utils/mcp-server-authorization.js';
@@ -663,9 +670,11 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     },
   });
   const deliveryRepository = new DiscordMessageDeliveryRepository(db);
-  const messagesService = createMessagesService(db, (tx, message) =>
-    deliveryRepository.enqueueForMessageInTransaction(tx, message).then(() => undefined)
-  ) as unknown as MessagesServiceImpl;
+  const teamsDeliveryRepository = new TeamsMessageDeliveryRepository(db);
+  const messagesService = createMessagesService(db, async (tx, message) => {
+    await deliveryRepository.enqueueForMessageInTransaction(tx, message);
+    await teamsDeliveryRepository.enqueueForMessageInTransaction(tx, message);
+  }) as unknown as MessagesServiceImpl;
   const messageOpenApiProperties = {
     message_id: { type: 'string', format: 'uuid' },
     session_id: { type: 'string', format: 'uuid' },
@@ -2085,41 +2094,45 @@ export function createExecuteHandler(
       },
     });
 
-    if (executorLaunch?.requiresLocalContainment) {
-      const ready = createDeferredSignal();
-      const finished = createDeferredSignal();
-      let spawned = false;
-      const runNativeSlot = () =>
-        inOpenCodeNativeStateMutationSlot(executorLaunch.namespaceKey, async (fence) => {
-          try {
-            spawnExecutor(
-              executorPayload,
-              executorOptions({ fence, ready, finished, markSpawned: () => (spawned = true) })
-            );
-            await ready.promise;
-            await finished.promise;
-          } catch (error) {
-            if (!spawned) await fence.releaseWithoutWriter();
-            throw error;
-          }
+    // Spawn, spawn/exit callbacks and the lines they log run in this scope:
+    // the locked launch principal and Branch, with full IDs.
+    await runWithLogContext({ user_id: userId, branch_id: launchAuthority.branch_id }, async () => {
+      if (executorLaunch?.requiresLocalContainment) {
+        const ready = createDeferredSignal();
+        const finished = createDeferredSignal();
+        let spawned = false;
+        const runNativeSlot = () =>
+          inOpenCodeNativeStateMutationSlot(executorLaunch.namespaceKey, async (fence) => {
+            try {
+              spawnExecutor(
+                executorPayload,
+                executorOptions({ fence, ready, finished, markSpawned: () => (spawned = true) })
+              );
+              await ready.promise;
+              await finished.promise;
+            } catch (error) {
+              if (!spawned) await fence.releaseWithoutWriter();
+              throw error;
+            }
+          });
+        const slot = ollamaLaunch
+          ? inOpenCodeOllamaExecutionSlot(ollamaLaunch.endpoint, runNativeSlot)
+          : runNativeSlot();
+        void slot.catch((error) => {
+          ready.reject(error);
+          console.error(`${logPrefix} Native-state writer failed:`, error);
         });
-      const slot = ollamaLaunch
-        ? inOpenCodeOllamaExecutionSlot(ollamaLaunch.endpoint, runNativeSlot)
-        : runNativeSlot();
-      void slot.catch((error) => {
-        ready.reject(error);
-        console.error(`${logPrefix} Native-state writer failed:`, error);
-      });
-      await ready.promise;
-    } else {
-      try {
-        spawnExecutor(executorPayload, executorOptions());
-      } finally {
-        // The child inherits its own descriptor during synchronous spawn.
-        // Close only the daemon's copy once spawn returns or throws.
-        await branchCodexAuthBind?.handle?.close().catch(() => undefined);
+        await ready.promise;
+      } else {
+        try {
+          spawnExecutor(executorPayload, executorOptions());
+        } finally {
+          // The child inherits its own descriptor during synchronous spawn.
+          // Close only the daemon's copy once spawn returns or throws.
+          await branchCodexAuthBind?.handle?.close().catch(() => undefined);
+        }
       }
-    }
+    });
 
     return {
       success: true,
@@ -2651,7 +2664,7 @@ export async function registerMCPServices(
     }
 
     let savedServerAuthority: MCPServer | undefined;
-    let configuredIssuer: string | undefined;
+    let relayIssuer: string | undefined;
     let effectiveMcpUrl = opts.mcpUrl;
     let effectiveClientId = opts.clientId;
     let effectiveClientSecret = opts.clientSecret;
@@ -2728,7 +2741,7 @@ export async function registerMCPServices(
       // Clone the row so later repository/service mutations cannot change the
       // in-memory authority captured by a standalone pending flow.
       savedServerAuthority = structuredClone(server);
-      configuredIssuer = await configuredCatalogIssuer(server);
+      relayIssuer = await catalogInstallRelayIssuer(server, Boolean(oauthRelay));
       if (durableOAuthFlows) {
         durableBinding = {
           tenantId: opts.tenantId!,
@@ -2760,9 +2773,10 @@ export async function registerMCPServices(
       effectiveScope = clientAuth.oauth_scope;
     }
 
-    // Only customer-owned (configured_client) catalog apps use the hosted
-    // relay. Every other flow keeps the cell's direct callback, unchanged.
-    const relayFlow = Boolean(oauthRelay && configuredIssuer);
+    // Only customer-owned (configured_client) catalog apps and allowlisted DCR
+    // providers (stable_callback) use the hosted relay; DCR then registers the
+    // relay callback. Every other flow keeps the daemon's direct callback.
+    const relayFlow = Boolean(oauthRelay && relayIssuer);
 
     // Local reservations are attempt-aware, so establish identity before
     // allocating a generation. PostgreSQL obtains its durable attempt ID from
@@ -2817,8 +2831,25 @@ export async function registerMCPServices(
     const context = await runWithinOAuthAuthority(assertFlowAuthority, () =>
       startMCPOAuthFlow(opts.wwwAuthenticate, effectiveClientId, redirectUri, {
         resolveRedirectUri: (issuer: string) => {
-          if (configuredIssuer && issuer !== configuredIssuer)
-            throw new Forbidden('Configured app issuer no longer matches its reviewed recipe');
+          // `issuer` is the AS metadata spelling, which is also what the flow
+          // context records and the relay `prepare` binds. A relay callback is
+          // derived from the issuer and shown in the Catalog form from the
+          // recipe, so relay recipes must state that exact string: one value
+          // then serves the shown redirect, the hash, and `prepare`. Direct
+          // flows keep the one-trailing-slash tolerance (resource vs AS
+          // spelling, e.g. Box/Google), since nothing is derived from it.
+          // A configuration error, not an authority one: it classifies as
+          // `issuer_mismatch` before DCR, relay `prepare`, or any attempt row.
+          if (relayIssuer && relayFlow && issuer !== relayIssuer)
+            throw new OAuthConfigurationError(
+              'issuer_mismatch',
+              'Catalog OAuth issuer must exactly match the authorization server issuer for the hosted callback relay; update the reviewed recipe'
+            );
+          if (relayIssuer && !oauthIssuerIdentifiersMatch(issuer, relayIssuer))
+            throw new OAuthConfigurationError(
+              'issuer_mismatch',
+              'Catalog OAuth issuer no longer matches its reviewed recipe'
+            );
           return oauthRelay && relayFlow ? oauthRelay.redirectUri(issuer) : redirectUri;
         },
         authorizationUrlOverride: effectiveAuthorizationUrlOverride,
@@ -3714,6 +3745,29 @@ export async function registerMCPServices(
     });
   };
 
+  /**
+   * The flow context for the code exchange, with the token endpoint client
+   * authentication the saved server's catalog recipe declares. Never stored in
+   * the pending flow: refresh resolves the same value the same way.
+   */
+  const pendingFlowExchangeContext = async (pendingFlow: PendingOAuthFlow) => {
+    const serverId = pendingFlow.mcpServerId;
+    if (!serverId) return pendingFlow.context;
+    // A local flow carries the saved row it was started from, which
+    // `assertPendingFlowStillAuthorized` has just checked against the current
+    // configuration; a durable flow re-reads it.
+    const tenantId = pendingFlow.durableRecord?.tenantId ?? pendingFlow.tenantId;
+    const server =
+      pendingFlow.savedServerAuthority ??
+      (await runInOAuthTenantScope(db, tenantId, () =>
+        new MCPServerRepository(db).findById(serverId as MCPServerID)
+      ));
+    const method = await catalogTokenEndpointAuthMethod(server);
+    return method
+      ? { ...pendingFlow.context, tokenEndpointAuthMethod: method }
+      : pendingFlow.context;
+  };
+
   const assertPendingFlowStillAuthorized = async (
     pendingFlow: PendingOAuthFlow,
     afterProviderExchange = false
@@ -4295,10 +4349,12 @@ export async function registerMCPServices(
       try {
         await assertPendingFlowStillAuthorized(pendingFlow);
         const { completeMCPOAuthFlow } = await import('@agor/core/tools/mcp/oauth-mcp-transport');
-        const tokenResponse = await completeMCPOAuthFlow(pendingFlow.context, code, state, {
-          cacheToken: false,
-          issuer,
-        });
+        const tokenResponse = await completeMCPOAuthFlow(
+          await pendingFlowExchangeContext(pendingFlow),
+          code,
+          state,
+          { cacheToken: false, issuer }
+        );
 
         await persistOAuthTokenForPendingFlow(tokenResponse, pendingFlow, 'OAuth Callback');
         if (!pendingFlow.durableRecord) markLocalOAuthAttempt(pendingFlow, 'succeeded');
@@ -4626,10 +4682,15 @@ export async function registerMCPServices(
   app.use(
     '/mcp-catalog/readiness',
     new MCPCatalogReadinessService(app, {
-      redirectUri: (entry) =>
-        entry.oauth?.configured_client && oauthRelay
-          ? oauthRelay.redirectUri(entry.oauth.configured_client.issuer)
-          : ctx.mcpOAuthCallbackUrl,
+      redirectUri: (entry) => {
+        const issuer = catalogRelayIssuer(entry);
+        if (issuer && oauthRelay) return oauthRelay.redirectUri(issuer);
+        // The direct callback: a customer app's without the relay, or the one a
+        // provider admin allowlists (the flow itself is unchanged).
+        return entry.oauth?.configured_client || entry.oauth?.redirect_allowlist
+          ? ctx.mcpOAuthCallbackUrl
+          : undefined;
+      },
       listCandidates: (userId) => new MCPCatalogCandidateRepository(db).listForUser(userId),
       // Readiness is advisory and may not open credential material merely to
       // draw a button. Normal configuration writes revoke bound grants; this
@@ -4644,7 +4705,7 @@ export async function registerMCPServices(
   app.use(
     '/mcp-marketplace',
     new MCPMarketplaceService(
-      new MCPMarketplaceRepository(db, async (userId, serverIds) => {
+      new MCPMarketplaceRepository(db, async (userId, serverIds, options) => {
         // Marketplace receives only this closed boolean map. The daemon reuses the same
         // mode/binding authority as execution and refresh; no token, client,
         // issuer, resource, or binding material crosses the service boundary.
@@ -4654,8 +4715,10 @@ export async function registerMCPServices(
           serverIds,
           serverRepository: marketplaceServerRepository,
           tokenRepository: marketplaceTokenRepository,
+          includeShared: options?.includeShared,
         });
-      })
+      }),
+      (params) => mayCallerManageSharedMcpServers(db, params)
     ),
     { methods: ['find'] }
   );
@@ -4993,7 +5056,6 @@ export async function registerMCPServices(
         let prefetchedAuthServerMetadata:
           | import('@agor/core/tools/mcp/oauth-mcp-transport').AuthorizationServerMetadata
           | null = null;
-        let discoverySource: string | null = null;
         if (probeResponse.status === 401) {
           assertInitialRequestAuthority?.();
           const { resolveMCPOAuthDiscovery } = await import(
@@ -5006,11 +5068,9 @@ export async function registerMCPServices(
           });
           if (discovery?.kind === 'resource-metadata') {
             metadataUrl = discovery.metadataUrl;
-            discoverySource = `RFC 9728 ${discovery.source}`;
             console.log(`[OAuth Test] Resolved resource metadata source=${discovery.source}`);
           } else if (discovery?.kind === 'authorization-server') {
             prefetchedAuthServerMetadata = discovery.authServerMetadata;
-            discoverySource = `AS-direct (${discovery.discoveredAt})`;
             console.log('[OAuth Test] Resolved authorization-server metadata directly');
           }
         }
@@ -5125,17 +5185,11 @@ export async function registerMCPServices(
                 success: true,
                 oauthType: 'oauth2.1',
                 message: prefetchedAuthServerMetadata.registration_endpoint
-                  ? `OAuth 2.1 auto-discovery successful via ${discoverySource} (DCR supported). Click "Start OAuth Flow" to authenticate.`
-                  : `OAuth 2.1 auto-discovery successful via ${discoverySource}. Click "Start OAuth Flow" to authenticate.`,
-                authServerMetadata: {
-                  authorizationEndpoint: prefetchedAuthServerMetadata.authorization_endpoint,
-                  tokenEndpoint: prefetchedAuthServerMetadata.token_endpoint,
-                  registrationEndpoint: prefetchedAuthServerMetadata.registration_endpoint,
-                },
+                  ? 'OAuth 2.1 auto-discovery successful via authorization-server metadata (DCR supported). Click "Start OAuth Flow" to authenticate.'
+                  : 'OAuth 2.1 auto-discovery successful via authorization-server metadata. Click "Start OAuth Flow" to authenticate.',
                 supportsDynamicClientRegistration:
                   !!prefetchedAuthServerMetadata.registration_endpoint,
                 requiresBrowserFlow: true,
-                discoverySource,
               };
             }
 
@@ -5152,7 +5206,6 @@ export async function registerMCPServices(
                 success: false,
                 error: `OAuth resource metadata endpoint returned ${metadataResponse.status}`,
                 oauthType: 'oauth2.1',
-                metadataUrl: rfc9728Url,
                 requiresBrowserFlow: true,
               };
             }
@@ -5166,8 +5219,6 @@ export async function registerMCPServices(
                 success: false,
                 error: 'OAuth resource metadata missing authorization_servers',
                 oauthType: 'oauth2.1',
-                metadataUrl: rfc9728Url,
-                metadata,
               };
             }
 
@@ -5202,16 +5253,6 @@ export async function registerMCPServices(
               message: authServerMetadata?.registration_endpoint
                 ? 'OAuth 2.1 auto-discovery successful (DCR supported). Click "Start OAuth Flow" to authenticate.'
                 : 'OAuth 2.1 auto-discovery successful. Click "Start OAuth Flow" to authenticate.',
-              metadataUrl: rfc9728Url,
-              authorizationServers: metadata.authorization_servers,
-              scopesSupported: metadata.scopes_supported,
-              authServerMetadata: authServerMetadata
-                ? {
-                    authorizationEndpoint: authServerMetadata.authorization_endpoint,
-                    tokenEndpoint: authServerMetadata.token_endpoint,
-                    registrationEndpoint: authServerMetadata.registration_endpoint,
-                  }
-                : null,
               supportsDynamicClientRegistration: !!authServerMetadata?.registration_endpoint,
               requiresBrowserFlow: true,
             };
@@ -6243,7 +6284,33 @@ export async function registerMCPServices(
           }
         }
 
-        if (probeResponse.status !== 401) {
+        // A current install of a catalog entry that declares OAuth up front
+        // starts sign-in without a challenge (e.g. Google Workspace answers
+        // initialize with 200); discovery below then reads the server's own
+        // protected-resource metadata. Everything else still needs a 401.
+        // Only a healthy 200: a 5xx or other failure is an outage to report,
+        // not evidence that sign-in should start.
+        const declaredOAuth =
+          probeResponse.status === 200 && savedServer
+            ? await runWithinOAuthAuthority(assertRequestAuthority, () =>
+                catalogInstallDeclaresOAuth(savedServer)
+              )
+            : false;
+        if (probeResponse.status >= 500) {
+          const recovery = {
+            category: 'provider_unavailable' as const,
+            action: 'retry' as const,
+            message: `This MCP server is unavailable (HTTP ${probeResponse.status}). Try again later.`,
+            ...(savedServerId ? { mcp_server_id: savedServerId as MCPServerID } : {}),
+          };
+          await markSlackRecoveryStartFailed();
+          return {
+            success: false,
+            error: recovery.message,
+            recovery,
+          } satisfies MCPOAuthStartFailure;
+        }
+        if (probeResponse.status !== 401 && !declaredOAuth) {
           const recovery = {
             category: 'configuration_changed' as const,
             action: 'save_and_retry' as const,
@@ -6259,7 +6326,8 @@ export async function registerMCPServices(
           } satisfies MCPOAuthStartFailure;
         }
 
-        const wwwAuthenticate = probeResponse.headers.get('www-authenticate') || '';
+        const wwwAuthenticate =
+          probeResponse.status === 401 ? probeResponse.headers.get('www-authenticate') || '' : '';
         const { resolveMCPOAuthDiscovery } = await runWithinOAuthAuthority(
           assertRequestAuthority,
           () => import('@agor/core/tools/mcp/oauth-mcp-transport')
@@ -6650,10 +6718,12 @@ export async function registerMCPServices(
         }
 
         await assertPendingFlowStillAuthorized(pendingFlow);
-        const tokenResponse = await completeMCPOAuthFlow(pendingFlow.context, code, state, {
-          cacheToken: false,
-          issuer,
-        });
+        const tokenResponse = await completeMCPOAuthFlow(
+          await pendingFlowExchangeContext(pendingFlow),
+          code,
+          state,
+          { cacheToken: false, issuer }
+        );
         await persistOAuthTokenForPendingFlow(tokenResponse, pendingFlow, 'OAuth Complete');
         const completedFlow = pendingFlow;
         const completedServerId = completedFlow.mcpServerId;
@@ -7086,14 +7156,16 @@ export async function registerMCPServices(
                 executorSessionId as SessionID,
                 true
               ),
-              globalServers: await new MCPServerRepository(db).findAll({
-                scope: 'global',
-                enabled: true,
-                // The task token is issued to the actual prompter. Connector
-                // credentials and private server visibility stay with that
-                // caller rather than silently borrowing the Session owner.
-                usableByUserId: userId,
-              }),
+              globalServers: executorSession.mcp_selection_explicit
+                ? []
+                : await new MCPServerRepository(db).findAll({
+                    scope: 'global',
+                    enabled: true,
+                    // The task token is issued to the actual prompter. Connector
+                    // credentials and private server visibility stay with that
+                    // caller rather than silently borrowing the Session owner.
+                    usableByUserId: userId,
+                  }),
             };
           }
         );
@@ -7144,6 +7216,7 @@ export async function registerMCPServices(
                 userId: tokenUserId,
                 mcpServerId: serverId as MCPServerID,
                 validateGrant: refreshGrantValidator(tenantId, serverId as MCPServerID),
+                resolveTokenEndpointAuthMethod: catalogTokenEndpointAuthMethod,
                 assertCurrent: mcpEgressAssertCurrent,
                 forceRefresh,
                 resolveDns: ctx.mcpOutboundDnsLookup,
@@ -7287,6 +7360,7 @@ export async function registerMCPServices(
           mcpServerId: serverId as MCPServerID,
           observedRefreshVersion,
           validateGrant: refreshGrantValidator(tenantId, serverId as MCPServerID),
+          resolveTokenEndpointAuthMethod: catalogTokenEndpointAuthMethod,
         });
 
         const fresh = await runInOAuthTenantScope(db, tenantId, () =>
@@ -7797,6 +7871,7 @@ export async function registerMCPServices(
                 userId: lookupUserId,
                 mcpServerId: serverId as MCPServerID,
                 validateGrant: refreshGrantValidator(tenantId, serverId as MCPServerID),
+                resolveTokenEndpointAuthMethod: catalogTokenEndpointAuthMethod,
                 assertCurrent: assertRequestAuthority,
                 resolveDns: ctx.mcpOutboundDnsLookup,
               })

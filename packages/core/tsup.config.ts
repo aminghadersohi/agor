@@ -58,6 +58,7 @@ export default defineConfig({
     'utils/host-ip': 'src/utils/host-ip.ts', // Host IP detection for {{host.ip_address}} template var
     'utils/path': 'src/utils/path.ts', // Path expansion utilities (tilde to home directory)
     'utils/logger': 'src/utils/logger.ts', // Console monkey-patch for log level filtering
+    'utils/log-context': 'src/utils/log-context.ts', // Run context attached to JSON log lines
     'utils/jwt': 'src/utils/jwt.ts', // Browser-safe JWT decode (no signature verification)
     'seed/index': 'src/seed/index.ts', // Development database seeding
     'callbacks/child-completion-template': 'src/callbacks/child-completion-template.ts', // Parent session callback templates
@@ -86,6 +87,7 @@ export default defineConfig({
     'gateway/index': 'src/gateway/index.ts', // Gateway platform connectors (Slack, etc.)
     'gateway/connectors/slack-manifest': 'src/gateway/connectors/slack-manifest.ts', // Browser-safe Slack manifest/scope derivation (no connector deps)
     'gateway/discord-setup': 'src/gateway/connectors/discord-setup.ts', // Browser-safe Discord setup artifact
+    'gateway/connectors/teams-manifest': 'src/gateway/connectors/teams-manifest.ts', // Browser-safe Teams setup artifact
     'yaml/index': 'src/yaml/index.ts', // Browser-safe js-yaml re-export
     'knowledge/index': 'src/knowledge/index.ts', // Knowledge editing helpers
     'mcp-catalog/index': 'src/mcp-catalog/index.ts', // MCP marketplace catalog: the checked-in file, and the connect probe

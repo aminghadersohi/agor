@@ -12,7 +12,111 @@ export const GEMINI_KEY_MESSAGE =
   'Gemini needs an API key. Add one in Settings → Gemini (Google-account sign-in is not supported).';
 export const GEMINI_HISTORY_NOTICE =
   'Earlier Gemini conversation could not be restored; continuing without it.';
-export class GeminiIntegrationError extends Error {}
+/** Closed provider failure classes from geminiError; never provider text. */
+type GeminiFailureCategory =
+  | 'authentication'
+  | 'model_unavailable'
+  | 'quota'
+  | 'busy'
+  | 'provider_error'
+  | 'network'
+  | 'unknown';
+
+interface GeminiFailureDiagnostic {
+  category?: GeminiFailureCategory;
+  httpStatus?: number;
+  errorClass?: string;
+}
+
+const GEMINI_ERROR_CLASSES: ReadonlySet<string> = new Set([
+  'ApiError',
+  'TerminalQuotaError',
+  'RetryableQuotaError',
+  'UnauthorizedError',
+  'ForbiddenError',
+  'AccountSuspendedError',
+  'FatalAuthenticationError',
+  'ModelNotFoundError',
+  'ValidationRequiredError',
+]);
+
+const GEMINI_AUTH_CLASSES: ReadonlySet<string> = new Set([
+  'UnauthorizedError',
+  'ForbiddenError',
+  'AccountSuspendedError',
+  'FatalAuthenticationError',
+  'ValidationRequiredError',
+]);
+
+const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENETDOWN',
+  'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+/**
+ * Logged category from structured signals only (status, allowlisted class,
+ * string `code`), so two failures with the same shape always log the same line
+ * whatever the provider prose says. Specific classes win over generic statuses.
+ */
+function geminiFailureCategory(
+  httpStatus: number | undefined,
+  errorClass: string | undefined,
+  codes: unknown[]
+): GeminiFailureCategory {
+  if (errorClass && GEMINI_AUTH_CLASSES.has(errorClass)) return 'authentication';
+  if (errorClass === 'ModelNotFoundError') return 'model_unavailable';
+  if (errorClass === 'TerminalQuotaError') return 'quota';
+  if (errorClass === 'RetryableQuotaError') return 'busy';
+  if (httpStatus === 401 || httpStatus === 403) return 'authentication';
+  if (httpStatus === 404) return 'model_unavailable';
+  if (httpStatus === 429 || httpStatus === 503) return 'busy';
+  if (httpStatus !== undefined && httpStatus >= 500) return 'provider_error';
+  if (codes.some((code) => typeof code === 'string' && NETWORK_ERROR_CODES.has(code))) {
+    return 'network';
+  }
+  return 'unknown';
+}
+
+export class GeminiIntegrationError extends Error {
+  readonly category?: GeminiFailureCategory;
+  readonly httpStatus?: number;
+  readonly errorClass?: string;
+
+  constructor(message: string, diagnostic: GeminiFailureDiagnostic = {}) {
+    super(message);
+    this.category = diagnostic.category;
+    this.httpStatus = diagnostic.httpStatus;
+    this.errorClass = diagnostic.errorClass;
+  }
+}
+
+/**
+ * One `[gemini.failure]` key=value line for a failed task. Provider-classified
+ * failures carry their closed category; other fixed integration errors say
+ * `integration`, and non-Gemini errors say `local`.
+ */
+export function geminiFailureLine(stage: string, error: unknown): string {
+  const fields =
+    error instanceof GeminiIntegrationError
+      ? [
+          `category=${error.category ?? 'integration'}`,
+          ...(error.httpStatus !== undefined ? [`http_status=${error.httpStatus}`] : []),
+          ...(error.errorClass ? [`error_class=${error.errorClass}`] : []),
+        ]
+      : ['category=local'];
+  return `[gemini.failure] stage=${stage} ${fields.join(' ')}`;
+}
 export const GEMINI_RESET_HISTORY_FOR = 'AGOR_GEMINI_RESET_HISTORY_FOR';
 
 /** Only fixed messages leave this boundary; never propagate provider bodies. */
@@ -26,6 +130,12 @@ export function geminiError(error: unknown, model: string): GeminiIntegrationErr
   const message = String(nested.message ?? '');
   const status = Number(nested.status ?? nested.code);
   const name = String(nested.name ?? '');
+  const httpStatus =
+    Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
+  const errorClass = [nested.name, value.name].find(
+    (candidate): candidate is string =>
+      typeof candidate === 'string' && GEMINI_ERROR_CLASSES.has(candidate)
+  );
   let safe = 'Gemini integration error.';
   if (
     (status === 400 && /API_KEY_INVALID|API key not valid/i.test(message)) ||
@@ -50,7 +160,14 @@ export function geminiError(error: unknown, model: string): GeminiIntegrationErr
   } else if (/fetch failed|ECONN|ENOTFOUND|ETIMEDOUT|network/i.test(message)) {
     safe = 'Could not reach the Gemini API.';
   }
-  return new GeminiIntegrationError(safe);
+  const cause =
+    value.cause && typeof value.cause === 'object' ? (value.cause as Record<string, unknown>) : {};
+  const category = geminiFailureCategory(httpStatus, errorClass, [
+    nested.code,
+    value.code,
+    cause.code,
+  ]);
+  return new GeminiIntegrationError(safe, { category, httpStatus, errorClass });
 }
 
 // UUIDv7's first bytes are a timestamp; the SDK truncates IDs in filenames.

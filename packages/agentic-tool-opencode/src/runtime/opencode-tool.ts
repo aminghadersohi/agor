@@ -19,7 +19,10 @@ import {
   renderAgorSessionIdentity,
   renderAgorSystemPrompt,
 } from '@agor/core/templates/session-context';
-import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
+import {
+  hasPrescribedMCPAuthHeader,
+  mergeMCPRemoteHeaders,
+} from '@agor/core/tools/mcp/http-headers';
 import {
   type ContentBlock,
   type EffortLevel,
@@ -268,16 +271,7 @@ export type OpenCodeToolDependencies = {
   spawn?: (executable: string, args: readonly string[], options: SpawnOptions) => ManagedChild;
   createClient?: typeof createOpencodeClient;
   resolveInvocationConfig?: (input: RunOpenCodeTurnInput) => Promise<OpenCodeInvocationConfig>;
-  resolveMcpServers?: (
-    sessionId: SessionID
-  ) => Promise<
-    Array<
-      { server: MCPServer; source: 'session-assigned' | 'global' } & Pick<
-        MCPServerWithSource,
-        'oauthAuthResolution' | 'configuredOAuthGrantType' | 'missingUserEnvKeys'
-      >
-    >
-  >;
+  resolveMcpServers?: (sessionId: SessionID) => Promise<MCPServerWithSource[]>;
   getDaemonUrl?: () => Promise<string>;
   createPermissionCallback?: (
     sessionId: SessionID,
@@ -1179,17 +1173,10 @@ export class OpenCodeTool {
           if (signIn.recordResolutionFailure(scoped)) continue;
           throw new Error(`Attached MCP server ${server.name} authentication failed`);
         }
-        const authorization = Object.entries(authHeaders ?? {}).find(
-          ([name]) => name.toLowerCase() === 'authorization'
-        )?.[1];
-        if (
-          server.auth &&
-          server.auth.type !== 'none' &&
-          !/^Bearer\s+\S+$/i.test(authorization?.trim() ?? '')
-        ) {
-          if (!authorization?.trim() && signIn.recordMissingGrant(scoped)) continue;
+        if (!hasPrescribedMCPAuthHeader(server.auth, authHeaders)) {
+          if (signIn.recordMissingGrant(scoped)) continue;
           throw new Error(
-            `Attached MCP server ${server.name} did not resolve a usable Authorization header`
+            `Attached MCP server ${server.name} did not resolve its authentication header`
           );
         }
         const headers = mergeMCPRemoteHeaders({ custom: server.headers, auth: authHeaders });
