@@ -247,8 +247,8 @@ describe('formatUndeliveredAttachmentReply', () => {
   });
 
   it('ignores non-string entries without coercing them into permissions', () => {
-    const extra = [null, 42, { toString: () => 'application/pdf' }, 'APPLICATION/ZIP'];
-    expect(isIngestableFile(makeFile({ mimetype: 'application/pdf' }), extra)).toBe(false);
+    const extra = [null, 42, { toString: () => 'application/x-tar' }, 'APPLICATION/ZIP'];
+    expect(isIngestableFile(makeFile({ mimetype: 'application/x-tar' }), extra)).toBe(false);
     expect(isIngestableFile(makeFile({ mimetype: 'application/zip' }), extra)).toBe(true);
     expect(isIngestableFile(makeFile({ mimetype: 'image/png' }), extra)).toBe(true);
   });
@@ -722,7 +722,7 @@ describe('ingestInboundAttachments', () => {
     expect(await fs.readdir(uploadDir)).toEqual([]);
   });
 
-  it.each([null, 'application/pdf', {}, false])(
+  it.each([null, 'application/x-tar', {}, false])(
     'ignores malformed MIME configuration %j without aborting ingestion',
     async (extraMimeTypes) => {
       const fetchImpl = vi.fn(
@@ -733,7 +733,7 @@ describe('ingestInboundAttachments', () => {
       );
       const result = await ingestInboundAttachments({
         files: [
-          makeFile({ mimetype: 'application/pdf', name: 'report.pdf' }),
+          makeFile({ mimetype: 'application/x-tar', name: 'report.tar' }),
           makeFile({ mimetype: 'text/plain', name: 'notes.txt' }),
         ],
         botToken: 'xoxb-test',
@@ -789,9 +789,10 @@ describe('ingestInboundAttachments', () => {
       store,
     };
 
-    expect(await ingestInboundAttachments({ ...args, files: [zip] })).toEqual({
+    expect(await ingestInboundAttachments({ ...args, files: [zip] })).toMatchObject({
       uploads: [],
       failed: 0,
+      skipped: 1,
     });
     const result = await ingestInboundAttachments({
       ...args,
@@ -807,7 +808,7 @@ describe('ingestInboundAttachments', () => {
         ref: result.uploads[0].ref,
       })
     ).rejects.toMatchObject({ status: 404 });
-    expect(isIngestableFile(makeFile({ mimetype: 'application/pdf' }), ['application/*'])).toBe(
+    expect(isIngestableFile(makeFile({ mimetype: 'application/x-tar' }), ['application/*'])).toBe(
       true
     );
   });

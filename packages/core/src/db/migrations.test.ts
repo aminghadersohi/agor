@@ -7,6 +7,7 @@ import { getTableConfig, SQLiteTable } from 'drizzle-orm/sqlite-core';
 import { describe, expect, it } from 'vitest';
 import { createDatabase } from './client';
 import { executeRaw, isSQLiteDatabase, rawRows } from './database-wrapper';
+import { dropTeamsAndDeletionDiscoveryObjects } from './fork-rewind.test-support';
 import {
   classifyMigrationWatermark,
   OWNER_ATTRIBUTION_SQLSTATE,
@@ -1842,6 +1843,8 @@ describe('front desk / profile image watermark reconciliation', () => {
       // And the restored session attention (SQLite cannot ADD COLUMN conditionally).
       await executeRaw(db, sql`DROP TABLE session_attention_states`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
+      // And upstream's Teams gateway HA and failed-deletion discovery objects.
+      await dropTeamsAndDeletionDiscoveryObjects(db);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
 
@@ -1860,6 +1863,8 @@ describe('front desk / profile image watermark reconciliation', () => {
       // And the restored session attention (SQLite cannot ADD COLUMN conditionally).
       await executeRaw(db, sql`DROP TABLE session_attention_states`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
+      // And upstream's Teams gateway HA and failed-deletion discovery objects.
+      await dropTeamsAndDeletionDiscoveryObjects(db);
       await runMigrations(db, { allowOfflineCutover: true });
       expect(Number(await tableCount())).toBe(1);
     } finally {

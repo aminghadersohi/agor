@@ -25,11 +25,10 @@ export async function beforeTeamsMigrations(dialect: 'sqlite' | 'postgres') {
   };
   const next = journal.entries.find(({ tag }) => tag === teamsMigration(dialect))!;
   journal.entries = journal.entries.filter(({ idx }) => idx < next.idx);
-  const expected =
-    dialect === 'postgres'
-      ? '0117_opencode_checkpoint_attempts'
-      : '0116_opencode_checkpoint_attempts';
-  if (journal.entries.at(-1)?.tag !== expected) throw new Error('Unexpected main watermark');
+  // The fork journals Teams right after its own tail (session attention), not
+  // directly after upstream's OpenCode checkpoint migration.
+  if (journal.entries.at(-1)?.tag !== '9032_session_attention_states')
+    throw new Error('Unexpected main watermark');
   await writeFile(journalPath, JSON.stringify(journal));
   return folder;
 }

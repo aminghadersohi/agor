@@ -5298,6 +5298,10 @@ export class GatewayService {
     );
     return {
       success: true,
+      // Teams sends are recorded with `create`, i.e. as the thread's seed.
+      delivered: true,
+      recorded: true,
+      audit_role: 'thread_seed',
       gateway_outbound_message_id: row.id,
       gateway_channel_id: channel.id,
       channel_type: channel.channel_type,
@@ -5510,6 +5514,10 @@ export class GatewayService {
     );
     return {
       success: true,
+      // Teams sends are recorded with `create`, i.e. as the thread's seed.
+      delivered: true,
+      recorded: true,
+      audit_role: 'thread_seed',
       gateway_outbound_message_id: row.id,
       gateway_channel_id: channel.id,
       channel_type: channel.channel_type,
