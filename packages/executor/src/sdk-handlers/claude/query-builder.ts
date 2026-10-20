@@ -13,7 +13,10 @@ import {
   renderAgorSessionIdentity,
   renderAgorSystemPrompt,
 } from '@agor/core/templates/session-context';
-import { mergeMCPRemoteHeaders } from '@agor/core/tools/mcp/http-headers';
+import {
+  hasPrescribedMCPAuthHeader,
+  mergeMCPRemoteHeaders,
+} from '@agor/core/tools/mcp/http-headers';
 import type {
   MCPRuntimeRefreshRequest,
   MCPRuntimeReprojection,
@@ -62,6 +65,7 @@ import {
   mcpToolNameAliasesForTool,
 } from '../base/mcp-tool-permissions.js';
 import { createCanUseToolCallback } from '../base/permission-hooks.js';
+import { AgorSetupError, sanitizeClaudeExecutionError } from './claude-error.js';
 import { CLAUDE_CODE_DISALLOWED_TOOLS, CLAUDE_CODE_TODO_TOOLS } from './constants.js';
 import { DEFAULT_CLAUDE_MODEL } from './models.js';
 
@@ -179,7 +183,7 @@ export async function setupQuery(
 
   const session = await deps.sessionsRepo.findById(sessionId);
   if (!session) {
-    throw new Error(`Session not found: ${sessionId}`);
+    throw new AgorSetupError(`Session not found: ${sessionId}`);
   }
   const shouldBlockOnMcpStartup = isGatewaySession(session);
 
@@ -242,16 +246,12 @@ export async function setupQuery(
     } catch (listError) {
       console.warn(`⚠️  Could not list directory contents:`, listError);
     }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`❌ Working directory validation failed: ${errorMessage}`);
-    throw new Error(
-      `${errorMessage}${
-        session.branch_id
-          ? ` Session references branch ${session.branch_id} which may not be initialized.`
-          : ''
-      }`
-    );
+  } catch {
+    console.error('[claude.query] working_directory_unavailable');
+    const branchSuffix = session.branch_id
+      ? ` Session references branch ${session.branch_id} which may not be initialized.`
+      : ' The branch may not be initialized.';
+    throw new AgorSetupError(`Working directory for this session is unavailable.${branchSuffix}`);
   }
 
   // Get Claude Code path
@@ -563,10 +563,7 @@ export async function setupQuery(
               surfaceAuthorityError: true,
             });
             const missingRequiredAuth =
-              !!server.auth &&
-              server.auth.type !== 'none' &&
-              transport !== 'stdio' &&
-              !authHeaders?.Authorization;
+              transport !== 'stdio' && !hasPrescribedMCPAuthHeader(server.auth, authHeaders);
             const headers = mergeMCPRemoteHeaders({ custom: server.headers, auth: authHeaders });
             if (headers && transport !== 'stdio') {
               serverConfig.headers = headers;
@@ -709,9 +706,16 @@ export async function setupQuery(
     await inputHeldPromise;
   }
 
+  let Claude: typeof ClaudeSdk;
+  try {
+    Claude = await loadManagedAgenticToolSdk<typeof ClaudeSdk>('claude-code');
+  } catch {
+    throw new AgorSetupError(
+      'Claude Code runtime could not be loaded. Ask your administrator to check the managed runtime installation.'
+    );
+  }
   let result: AsyncGenerator<unknown>;
   try {
-    const Claude = await loadManagedAgenticToolSdk<typeof ClaudeSdk>('claude-code');
     result = Claude.query({
       prompt: asUserMessageIterable(prompt),
       // queryOptions uses Record<string,unknown> to accommodate apiKey, which is valid at
@@ -719,12 +723,9 @@ export async function setupQuery(
       options: queryOptions as unknown as Options,
     });
   } catch (syncError) {
-    // This is rare - SDK usually returns AsyncGenerator that throws later
-    const safe = sanitizeMCPExternalError(syncError, { stage: 'runtime' });
-    console.error(
-      `❌ CRITICAL: query() threw synchronously category=${safe.category} type=${safe.diagnostic.type}`
-    );
-    throw new Error(safe.message);
+    // This is rare - SDK usually returns AsyncGenerator that throws later.
+    // Query setup failures are logged authoritatively by the calling prompt service.
+    throw sanitizeClaudeExecutionError(syncError);
   }
 
   const getStderrMetadata = () => ({

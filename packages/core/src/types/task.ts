@@ -448,6 +448,8 @@ export interface TaskMetadata {
   };
   /** Provider-event occurrence that durably admitted this gateway prompt. */
   gateway_inbound_event_id?: GatewayInboundEventID;
+  /** Teams catch-up cursor this admission earns; a retry that finds the Task repairs it from here. */
+  gateway_teams_cursor?: string;
   /** Provider reply target captured for this gateway Task (for example an editable ack ID). */
   gateway_reply_metadata?: Record<string, unknown>;
   /**

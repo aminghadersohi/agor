@@ -22,6 +22,10 @@ const state = vi.hoisted(() => ({
   events: [] as SDK.ServerGeminiStreamEvent[][],
 }));
 vi.mock('../../config.js', () => ({ getDaemonUrl: vi.fn(async () => 'http://localhost:3030') }));
+vi.mock('@agor/core/utils/logger', async (original) => ({
+  ...(await original<typeof import('@agor/core/utils/logger')>()),
+  writeLogLine: vi.fn(),
+}));
 const mcp = vi.hoisted(() => ({
   servers: [] as unknown[],
   authorization: undefined as string | undefined,
@@ -119,6 +123,9 @@ vi.mock('@agor/core/agentic-integrations', () => ({
   })),
 }));
 
+import { getMcpServersForSession, resolveScopedMCPAuthHeaders } from '@agor/core/mcp';
+import { renderMCPTokenHeader } from '@agor/core/tools/mcp/http-headers';
+import { writeLogLine } from '@agor/core/utils/logger';
 import {
   realMcpScoping,
   shippedAsanaInstall,
@@ -268,6 +275,53 @@ describe('Gemini prompt boundary', () => {
       )
     ).toBe(true);
   });
+  it('treats vendor token header recipes as resolved MCP auth', async () => {
+    vi.mocked(getMcpServersForSession).mockResolvedValueOnce([
+      {
+        server: {
+          name: 'pagerduty',
+          transport: 'http',
+          url: 'https://pd.example.com/mcp',
+          auth: { type: 'bearer', token: 'pd-key', token_prefix: 'Token token=' },
+        },
+      },
+      {
+        server: {
+          name: 'similarweb',
+          transport: 'http',
+          url: 'https://sw.example.com/mcp',
+          auth: { type: 'bearer', token: 'sw-key', token_header: 'api-key' },
+        },
+      },
+    ] as never);
+    const render = (async ({ server }: { server: { auth: { token: string } } }) =>
+      renderMCPTokenHeader(server.auth)) as never;
+    vi.mocked(resolveScopedMCPAuthHeaders)
+      .mockImplementationOnce(render)
+      .mockImplementationOnce(render);
+    state.events = [[event('content', 'answer'), event('finished', {})]];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await collect(
+        new GeminiPromptService(
+          messages,
+          sessions,
+          'fake-key',
+          branches,
+          undefined,
+          {} as never,
+          {} as never,
+          false
+        )
+      );
+      const { mcpServers } = state.config.mock.calls[0][0];
+      expect(mcpServers.pagerduty.headers).toEqual({ Authorization: 'Token token=pd-key' });
+      expect(mcpServers.similarweb.headers).toEqual({ 'api-key': 'sw-key' });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('credential_unavailable');
+    } finally {
+      warn.mockRestore();
+    }
+  });
   it('records every tool result and sums model turns, keeping last context usage', async () => {
     state.events = [
       [
@@ -405,17 +459,23 @@ describe('Gemini prompt boundary', () => {
     expect(tasksService.patch).not.toHaveBeenCalled();
   });
   it('does not classify a local Forbidden error as a rejected provider key', async () => {
-    const diagnostic = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     vi.mocked(messages.getNextIndexBySessionId).mockRejectedValueOnce(
       Object.assign(new Error('private repository detail'), { status: 403 })
     );
-    try {
-      await expect(collect()).rejects.toThrow('Gemini integration error.');
-      expect(diagnostic).toHaveBeenCalledWith('Gemini task failure stage=history category=local\n');
-      expect(JSON.stringify(diagnostic.mock.calls)).not.toContain('private repository detail');
-    } finally {
-      diagnostic.mockRestore();
-    }
+    await expect(collect()).rejects.toThrow('Gemini integration error.');
+    expect(vi.mocked(writeLogLine).mock.calls).toEqual([
+      ['error', '[gemini.failure] stage=history category=local'],
+    ]);
+  });
+  it('emits exactly one [gemini.failure] line for a failing stream, without provider text', async () => {
+    state.events = [
+      [event('error', { error: { status: 401, message: 'SECRET-provider AIza-key' } })],
+    ];
+    await expect(collect()).rejects.toThrow('Gemini rejected the API key.');
+    expect(vi.mocked(writeLogLine).mock.calls).toEqual([
+      ['error', '[gemini.failure] stage=generation category=authentication http_status=401'],
+    ]);
+    expect(JSON.stringify(vi.mocked(writeLogLine).mock.calls)).not.toContain('SECRET');
   });
   it('does not classify a local SDK-iteration Forbidden error as a rejected provider key', async () => {
     state.streamError = Object.assign(new Error('private local detail'), { status: 403 });

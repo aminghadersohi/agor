@@ -9,6 +9,7 @@ import {
   GEMINI_RESET_HISTORY_FOR,
   GeminiIntegrationError,
   geminiError,
+  geminiFailureLine,
   geminiSessionId,
 } from './runtime.js';
 
@@ -179,4 +180,82 @@ it('quarantines ambiguous recordings only for an explicit matching session reset
     else process.env[GEMINI_RESET_HISTORY_FOR] = priorReset;
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+describe('Gemini failure fields', () => {
+  it('records authentication and the HTTP status for a 401', () => {
+    const error = geminiError({ status: 401, message: 'SECRET' }, 'test');
+    expect(error).toMatchObject({ category: 'authentication', httpStatus: 401 });
+    expect(geminiFailureLine('generation', error)).toBe(
+      '[gemini.failure] stage=generation category=authentication http_status=401'
+    );
+  });
+
+  it('records quota and the allowlisted class for a TerminalQuotaError', () => {
+    class TerminalQuotaError extends Error {
+      override name = 'TerminalQuotaError';
+    }
+    const error = geminiError(new TerminalQuotaError('SECRET quota detail'), 'test');
+    expect(error).toMatchObject({ category: 'quota', errorClass: 'TerminalQuotaError' });
+    expect(geminiFailureLine('generation', error)).toBe(
+      '[gemini.failure] stage=generation category=quota error_class=TerminalQuotaError'
+    );
+  });
+
+  it('drops a class name that is not allowlisted', () => {
+    class SecretLeakingError extends Error {
+      override name = 'SecretLeakingError';
+    }
+    const error = geminiError(Object.assign(new SecretLeakingError('x'), { status: 503 }), 'test');
+    expect(error).toMatchObject({ category: 'busy', httpStatus: 503 });
+    expect(error.errorClass).toBeUndefined();
+    expect(geminiFailureLine('stream', error)).not.toContain('SecretLeakingError');
+  });
+
+  it('logs the same line for the same status and class whatever the provider text', () => {
+    const shapes: Array<[Record<string, unknown>, string]> = [
+      [{ status: 400 }, 'category=unknown http_status=400'],
+      [{ status: 403 }, 'category=authentication http_status=403'],
+      [{ status: 404 }, 'category=model_unavailable http_status=404'],
+      [{ status: 429 }, 'category=busy http_status=429'],
+      [
+        { status: 429, name: 'TerminalQuotaError' },
+        'category=quota http_status=429 error_class=TerminalQuotaError',
+      ],
+      [{ status: 500 }, 'category=provider_error http_status=500'],
+      [{ code: 'ECONNREFUSED' }, 'category=network'],
+      [{}, 'category=unknown'],
+    ];
+    const bodies = [
+      'API key not valid. API_KEY_INVALID terms of service model not found retryDelay fetch failed',
+      'SECRET unrelated provider detail',
+    ];
+    for (const [shape, fields] of shapes) {
+      const lines = bodies.map((message) =>
+        geminiFailureLine('generation', geminiError({ ...shape, message }, 'test'))
+      );
+      expect(lines[0]).toBe(`[gemini.failure] stage=generation ${fields}`);
+      expect(lines[1]).toBe(lines[0]);
+    }
+  });
+
+  it('reads a network code from a fetch failure cause', () => {
+    const error = geminiError(
+      new TypeError('fetch failed', {
+        cause: Object.assign(new Error('x'), { code: 'ENOTFOUND' }),
+      }),
+      'test'
+    );
+    expect(error.message).toBe('Could not reach the Gemini API.');
+    expect(error.category).toBe('network');
+  });
+
+  it('labels fixed integration and local failures without provider fields', () => {
+    expect(geminiFailureLine('preflight', new GeminiIntegrationError('fixed'))).toBe(
+      '[gemini.failure] stage=preflight category=integration'
+    );
+    expect(geminiFailureLine('persistence', new Error('SECRET'))).toBe(
+      '[gemini.failure] stage=persistence category=local'
+    );
+  });
 });

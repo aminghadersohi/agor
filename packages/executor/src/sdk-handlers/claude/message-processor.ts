@@ -28,6 +28,11 @@ import type {
 } from '@agor/core/sdk';
 import type { ContextUsageSnapshot, SessionID } from '@agor/core/types';
 import { MessageRole } from '@agor/core/types';
+import {
+  type ClaudeExecutionError,
+  classifyClaudeResultFailure,
+  claudeProviderError,
+} from './claude-error.js';
 import { CLAUDE_CODE_TODO_TOOLS } from './constants.js';
 
 const CLAUDE_CODE_TODO_TOOL_NAMES = new Set<string>(CLAUDE_CODE_TODO_TOOLS);
@@ -116,6 +121,8 @@ export type ProcessedEvent =
     }
   | {
       type: 'result';
+      /** Internal-only safe diagnosis; never a credential-recovery instruction. */
+      failure?: ClaudeExecutionError;
       /** Internal-only SDK value used for accounting before the executor applies
        * the closed persistence projection. Never persist or publish directly. */
       raw_sdk_message: SDKResultMessage;
@@ -212,6 +219,8 @@ interface ProcessorState {
   skills: string[];
   /** Built-in tool names keyed by call ID until the matching result arrives. */
   toolNamesByUseId: Map<string, string>;
+  /** Latest closed SDK assistant-message error class, for result diagnosis. */
+  assistantError?: ReturnType<typeof claudeProviderError>;
 }
 
 /**
@@ -320,6 +329,9 @@ export class SDKMessageProcessor {
   private handleAssistant(msg: SDKAssistantMessage): ProcessedEvent[] {
     this.state.lastAssistantMessageTime = Date.now();
     this.state.assistantMessageCount++;
+    // Unknown strings are ignored: only the SDK's closed classes are kept.
+    // Latest assistant wins: a clean message clears an earlier error class.
+    this.state.assistantError = claudeProviderError(msg.error);
 
     const contentBlocks = this.processContentBlocks(msg.message?.content as ContentBlock[]);
     const toolUses = this.extractToolUses(contentBlocks);
@@ -597,10 +609,14 @@ export class SDKMessageProcessor {
       }
     }
 
+    const failure = classifyClaudeResultFailure(msg, { assistantError: this.state.assistantError });
+    // A result closes the turn; a later turn must not inherit this error class.
+    this.state.assistantError = undefined;
     events.push(
       {
         type: 'result',
         raw_sdk_message: msg,
+        failure,
         agentSessionId: this.state.capturedAgentSessionId,
       },
       {
@@ -682,8 +698,14 @@ export class SDKMessageProcessor {
 
       // Capture available slash commands and skills for autocomplete
       if (initMsg.slash_commands || initMsg.skills) {
-        this.state.slashCommands = initMsg.slash_commands || [];
-        this.state.skills = initMsg.skills || [];
+        // The SDK supplies headless-supported commands, including custom ones.
+        // Hide entries it tags as terminal-oriented from both autocomplete lists;
+        // a bundled skill (e.g. doctor) can appear in both inventories.
+        const terminalCommands = new Set(initMsg.terminal_slash_commands ?? []);
+        this.state.slashCommands = (initMsg.slash_commands ?? []).filter(
+          (command) => !terminalCommands.has(command)
+        );
+        this.state.skills = (initMsg.skills ?? []).filter((skill) => !terminalCommands.has(skill));
 
         // Emit event so claude-tool can persist to session for UI autocomplete
         events.push({

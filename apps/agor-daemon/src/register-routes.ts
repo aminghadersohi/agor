@@ -87,6 +87,7 @@ import {
   isMCPServerUsableBy,
   MCP_RUNTIME_PROVIDER_CAPABILITIES,
   mcpRuntimeProviderCapability,
+  resolveEffectiveSessionMcpServers,
 } from '@agor/core/mcp';
 import { escapePromptProvenanceSentinels } from '@agor/core/templates/prompt-provenance';
 import type {
@@ -149,6 +150,7 @@ import {
   UPLOAD_REQUEST_ID_HEADER,
 } from '@agor/core/types';
 import { isNotFoundError } from '@agor/core/utils/errors';
+import { type LogContext, runWithLogContext } from '@agor/core/utils/log-context';
 import type { NextFunction, Request, Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
@@ -224,10 +226,16 @@ import {
   type PowerPolicyController,
 } from './power-management/index.js';
 import { registerProfileImageRoutes } from './profile-image-routes.js';
+import { registerTeamsGatewayIngressRoute } from './routes/teams-gateway-ingress.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
 import { createBranchFrontDeskRoute } from './services/branch-front-desk.js';
 import { createBranchSkillsRoute } from './services/branch-skills.js';
 import type { GatewayService } from './services/gateway.js';
+import {
+  type GatewayAdmissionFenceParams,
+  gatewayAdmissionFenceFromParams,
+  requiresGatewayAdmissionFence,
+} from './services/gateway-authority.js';
 import { authorizeCatalogCaller } from './services/mcp-catalog-access.js';
 import { createMCPCatalogConnectService } from './services/mcp-catalog-connect.js';
 import { createMCPCatalogStartSessionService } from './services/mcp-catalog-start-session.js';
@@ -425,7 +433,7 @@ export class AgorLocalStrategy extends LocalStrategy {
 /**
  * Extended Params with route ID parameter.
  */
-export interface RouteParams extends AuthenticatedParams {
+export interface RouteParams extends AuthenticatedParams, GatewayAdmissionFenceParams {
   route?: {
     id?: string;
     messageId?: string;
@@ -1057,6 +1065,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     suppliedPowerPolicyController ?? createDisabledPowerPolicyController();
 
   registerExecutorResponseRoutes(app);
+  registerTeamsGatewayIngressRoute({ app, db });
 
   // Health and launch auth share the exact startup-resolved provider. The
   // public DTO is immutable and contains no verification or exchange secrets.
@@ -1118,6 +1127,18 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   /** Schedule orchestration after commit with tenant identity but no open transaction. */
   function deferInFreshTenantScope(params: RouteParams, fn: () => Promise<void>): void {
     deferWithTenantContext(params, fn);
+  }
+
+  /**
+   * deferInFreshTenantScope with the deferred work's own log context, so its
+   * lines never carry the scheduling caller's identity.
+   */
+  function deferInFreshTenantLogScope(
+    params: RouteParams,
+    logContext: LogContext,
+    fn: () => Promise<void>
+  ): void {
+    deferWithTenantContext(params, () => runWithLogContext(logContext, fn));
   }
 
   const registerAuthenticatedRoute = createTenantScopedAuthenticatedRouteRegistrar({
@@ -2569,8 +2590,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     // caller before this resolves matches the previous behavior — the HTTP
     // response should not block on the executor process being live.
     // deferInFreshTenantScope uses a fresh DB connection and tenant RLS scope
-    // instead of inheriting a stale committed transaction.
-    deferInFreshTenantScope(params, async () => {
+    // instead of inheriting a stale committed transaction. The log context
+    // names the Task's own prompter: a drained Task may run inside another
+    // caller's request, whose user must not be inherited.
+    const dispatchLogContext = { session_id: sessionId, task_id: taskId, user_id: task.created_by };
+    deferInFreshTenantLogScope(params, dispatchLogContext, async () => {
       try {
         console.log(
           `🚀 [Daemon] Routing ${session.agentic_tool} to Feathers/WebSocket executor (task ${shortId(taskId)})`
@@ -2927,6 +2951,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
               throw new Conflict(`Task identity ${data.idempotencyTaskId} is already in use`);
             }
 
+            // A fenced gateway provider never admits a Task without its event fence.
+            const admissionFence = gatewayAdmissionFenceFromParams(params);
+            if (
+              !admissionFence &&
+              requiresGatewayAdmissionFence(data.metadata?.gateway_task_source?.channel_type)
+            ) {
+              throw new Forbidden('Gateway Task admission requires its provider event fence');
+            }
             const taskMetadata = buildPromptTaskMetadata(data.metadata, messageSource, createdBy, {
               trustedInternalMetadata: !params.provider,
             });
@@ -2980,6 +3012,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   throw new Conflict('Cannot deliver to an archived Session');
                 }
                 await assertCurrentPromptAuthority(operationDb, admissionSession);
+                if (admissionFence) await admissionFence(operationDb);
                 return new TaskRepository(operationDb).createPending({
                   // Only a caller-supplied stable identity may pin the Task ID.
                   // Direct admission requires a fresh queued input, so a
@@ -5473,6 +5506,30 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     before: { create: [requireAuth, requireMinimumRole(ROLES.MEMBER, 'clean branches')] },
   });
 
+  // Administrator recovery for a fenced deletion with no containment evidence.
+  app.use('/branches/:id/release-deletion', {
+    async create(data: unknown, params: RouteParams) {
+      if (
+        !params.route?.id ||
+        !data ||
+        typeof data !== 'object' ||
+        Array.isArray(data) ||
+        Object.keys(data).length
+      )
+        throw new BadRequest('Deletion release accepts an empty body and branch route ID only');
+      return branchesService.forceReleaseDeletion(
+        params.route.id as import('@agor/core/types').BranchID,
+        params
+      );
+    },
+  });
+  app.service('/branches/:id/release-deletion').hooks({
+    around: { all: [tenantIdentityAround, tenantWriteAdmissionAround] },
+    before: {
+      create: [requireAuth, requireMinimumRole(ROLES.ADMIN, 'release fenced branch deletions')],
+    },
+  });
+
   // Explicit, metadata-only retirement: same tenant/write boundary as cleanup.
   app.use('/branches/:id/retire-teammate', {
     async create(data: unknown, params: RouteParams) {
@@ -6462,26 +6519,21 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           usableByUserId: credentialUserId,
           $limit: 1000,
         };
-        const globalResult = includeGlobal
-          ? await mcpService.find({
-              ...params,
-              provider: undefined,
-              query: globalQuery,
-            })
-          : [];
-        const globalServers = Array.isArray(globalResult) ? globalResult : globalResult.data;
-        const servers = (
-          includeGlobal
-            ? [
-                ...new Map(
-                  [...globalServers, ...sessionServers].map((server) => [
-                    server.mcp_server_id,
-                    server,
-                  ])
-                ).values(),
-              ]
-            : sessionServers
-        ).filter((server) => isMCPServerUsableBy(server, credentialUserId));
+        const servers = await resolveEffectiveSessionMcpServers(
+          session,
+          sessionServers,
+          async () => {
+            const globalResult = includeGlobal
+              ? await mcpService.find({
+                  ...params,
+                  provider: undefined,
+                  query: globalQuery,
+                })
+              : [];
+            return Array.isArray(globalResult) ? globalResult : globalResult.data;
+          },
+          credentialUserId
+        );
         return !(params as RouteParams & { _forceMcpRuntimeRedaction?: boolean })
           ._forceMcpRuntimeRedaction &&
           shouldExposeMCPServerSecrets(params, {
@@ -7690,7 +7742,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           envVarNames: configuredEnvVarNames,
           setMcpServers: async (serverIds) => {
             try {
-              await sessionMCPServersService.setServers(session.session_id, serverIds, params);
+              // Initialization completes creation: its selection is explicit intent.
+              await sessionMCPServersService.setServers(session.session_id, serverIds, params, {
+                markSelectionExplicit: true,
+              });
             } catch (error) {
               if (isMCPServerNotUsableError(error)) {
                 throw new Forbidden('An MCP server is private to another user');

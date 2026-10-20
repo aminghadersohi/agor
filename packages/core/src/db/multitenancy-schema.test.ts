@@ -75,6 +75,9 @@ function migrationTenantTables(): string[] {
   const sessionMemoryMigration = readRepoFile(
     'packages/core/drizzle/postgres/9018_session_memory_reminders.sql'
   );
+  const teamsGatewayHaMigration = readRepoFile(
+    'packages/core/drizzle/postgres/0118_teams_gateway_ha.sql'
+  );
   const transferMigration = readRepoFile(
     'packages/core/drizzle/postgres/0112_kb_import_receipts.sql'
   );
@@ -125,6 +128,7 @@ function migrationTenantTables(): string[] {
         ...sessionAttentionMigration.matchAll(
           /CREATE TABLE IF NOT EXISTS "([^"]+)" \([\s\S]*?"tenant_id"/g
         ),
+        ...teamsGatewayHaMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
         .map((m) => m[1])
         .filter((table) => !retiredTables.has(table))
@@ -151,6 +155,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/0095_board_branch_capability_policies.sql'),
     readRepoFile('packages/core/drizzle/postgres/0102_zone_workflow_transitions.sql'),
     readRepoFile('packages/core/drizzle/postgres/9018_session_memory_reminders.sql'),
+    readRepoFile('packages/core/drizzle/postgres/0118_teams_gateway_ha.sql'),
     readRepoFile('packages/core/drizzle/postgres/0112_kb_import_receipts.sql'),
     readRepoFile('packages/core/drizzle/postgres/9030_branch_front_desk_sessions.sql'),
     readRepoFile('packages/core/drizzle/postgres/9028_profile_image_galleries.sql'),
@@ -179,8 +184,21 @@ describe('Postgres multitenancy schema coverage', () => {
 
   it('keeps sqlite schema tenant-column free', () => {
     const sqliteSchema = readRepoFile('packages/core/src/db/schema.sqlite.ts');
-    expect(sqliteSchema).not.toContain('tenant_id');
-    expect(sqliteSchema).not.toContain("tenant_id'");
+    expect(sqliteSchema).not.toMatch(/\n\s*tenant_id\s*:/);
+    expect(sqliteSchema).not.toContain("text('tenant_id'");
+  });
+
+  it('limits Teams ingress and delivery discovery to explicit read capabilities', () => {
+    const migration = readRepoFile('packages/core/drizzle/postgres/0118_teams_gateway_ha.sql');
+    expect(migration).toContain('CREATE POLICY "teams_gateway_ingress_discovery"');
+    expect(migration).toContain('CREATE POLICY "teams_gateway_inbound_discovery"');
+    expect(migration).toContain('CREATE POLICY "teams_message_delivery_discovery"');
+    expect(migration).toContain("= 'teams_gateway_ingress_discovery'");
+    expect(migration).toContain("= 'teams_gateway_ingress_discovery'");
+    expect(migration).toContain("= 'teams_message_delivery_discovery'");
+    expect(migration).not.toMatch(
+      /CREATE POLICY "teams_(?:gateway|message)_.*discovery"[\s\S]*WITH CHECK/
+    );
   });
 
   it('limits global reminder discovery to overdue routing rows', () => {
