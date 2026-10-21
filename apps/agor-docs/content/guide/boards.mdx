@@ -133,6 +133,14 @@ to its start, and zones with no transitions are placed below the flow. Boards
 without transitions, and arrangements with an explicit column count, keep the
 ordinary Grid/Compact result.
 
+Arrows are drawn as right-angled connectors that route around zones rather
+than through them. Each arrow gets its own attachment point on a zone's edge,
+arrows sharing a gap run side by side instead of on top of each other, and an
+arrow that runs backwards loops over or under the chart. Moving a zone re-routes
+its arrows once you let go. Lines and arrowheads keep the same on-screen
+thickness at every zoom level; labels hide when you zoom far out and return as
+you zoom in.
+
 Every advance is recorded. Select an arrow and choose **History** to see who
 advanced what, when, and whether the target-zone prompt ran. Agents read the
 same trail with `agor_zone_workflow_advances_list`, which needs only view access

@@ -58,6 +58,12 @@
       "import": "./dist/layout/board-layout-options.js",
       "default": "./dist/layout/board-layout-options.js"
     },
+    "./layout/orthogonal-edge-routing": {
+      "source": "./src/layout/orthogonal-edge-routing.ts",
+      "types": "./dist/layout/orthogonal-edge-routing.d.ts",
+      "import": "./dist/layout/orthogonal-edge-routing.js",
+      "default": "./dist/layout/orthogonal-edge-routing.js"
+    },
     "./layout/rectangle-packing": {
       "source": "./src/layout/rectangle-packing.ts",
       "types": "./dist/layout/rectangle-packing.d.ts",
