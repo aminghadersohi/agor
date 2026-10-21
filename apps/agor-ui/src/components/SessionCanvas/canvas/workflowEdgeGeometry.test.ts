@@ -2,7 +2,7 @@ import type { ZoneWorkflowTransition } from '@agor-live/client';
 import { describe, expect, it } from 'vitest';
 import {
   arrowHeadPath,
-  positionsKey,
+  geometryMatches,
   rectKey,
   roundedOrthogonalPath,
   routeWorkflowTransitions,
@@ -104,7 +104,8 @@ describe('routeWorkflowTransitions', () => {
     );
     expect([...routes.keys()]).toEqual(['t1']);
     const t1 = routes.get('t1');
-    expect(t1?.positions).toBe(positionsKey(rects[0], rects[1]));
+    expect(t1?.source).toEqual(rects[0]);
+    expect(t1?.target).toEqual(rects[1]);
     expect(t1?.route.points[0]).toEqual({ x: 300, y: 70 });
     expect(t1?.route.points.at(-1)).toEqual({ x: 500, y: 70 });
   });
@@ -112,5 +113,21 @@ describe('routeWorkflowTransitions', () => {
   it('is empty without zones or transitions', () => {
     expect(routeWorkflowTransitions([], [transition('t1', 'a', 'b', 'x')], 12).size).toBe(0);
     expect(routeWorkflowTransitions(rects, [], 12).size).toBe(0);
+  });
+});
+
+describe('geometryMatches', () => {
+  const routed = { id: 'z', x: 100, y: 200, width: 300, height: 140 };
+
+  it('accepts sub-pixel noise and unmeasured nodes', () => {
+    expect(geometryMatches({ x: 100.6, y: 199.4, width: 300.9, height: 140 }, routed)).toBe(true);
+    expect(geometryMatches({ x: 100, y: 200, width: null, height: null }, routed)).toBe(true);
+  });
+
+  it('treats a move or a resize as stale', () => {
+    expect(geometryMatches({ x: 140, y: 200, width: 300, height: 140 }, routed)).toBe(false);
+    // Dragging the right edge keeps the position but changes the size.
+    expect(geometryMatches({ x: 100, y: 200, width: 360, height: 140 }, routed)).toBe(false);
+    expect(geometryMatches(undefined, routed)).toBe(false);
   });
 });

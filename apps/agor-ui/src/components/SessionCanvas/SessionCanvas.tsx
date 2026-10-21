@@ -1794,7 +1794,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
               data: {
                 transition,
                 route: routed?.route,
-                routedPositions: routed?.positions,
+                routedSource: routed?.source,
+                routedTarget: routed?.target,
                 color: transition.enabled ? token.colorPrimary : token.colorTextTertiary,
                 haloColor: token.colorBgLayout,
                 labelColor: token.colorText,

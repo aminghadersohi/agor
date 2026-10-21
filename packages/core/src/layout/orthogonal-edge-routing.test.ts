@@ -147,6 +147,32 @@ describe('routeOrthogonalEdges', () => {
     expect(routes[0].points.length).toBeGreaterThan(2);
   });
 
+  it('starts in free space when a neighbour sits closer than the clearance', () => {
+    // Review repro: a 20px gap is narrower than the 24px stub, which used to
+    // put the stub inside the obstacle and fall back to a straight line through it.
+    const rects = [
+      rect('a', 0, 0, 280, 200),
+      rect('wall', 300, 0, 200, 200),
+      rect('b', 900, 0, 280, 200),
+    ];
+    const edges = [edge('a', 'b')];
+    const routes = routeOrthogonalEdges(rects, edges);
+    expectWellFormed(routes, rects, edges);
+    expect(routes[0].points.length).toBeGreaterThan(2);
+  });
+
+  it('still routes when zones touch, crossing as little zone as possible', () => {
+    const rects = [rect('a', 0, 0), rect('touching', 280, 0), rect('b', 900, 0)];
+    const [route] = routeOrthogonalEdges(rects, [edge('a', 'b')]);
+    expect(route.points[0]).toEqual({ x: 280, y: 60 });
+    expect(route.points.at(-1)).toEqual({ x: 900, y: 60 });
+    for (let i = 0; i + 1 < route.points.length; i += 1) {
+      const a = route.points[i];
+      const b = route.points[i + 1];
+      expect(isHorizontal(a, b) || isVertical(a, b)).toBe(true);
+    }
+  });
+
   it('gives every edge on a side its own port', () => {
     const rects = [
       rect('hub', 0, 200, 280, 200),
