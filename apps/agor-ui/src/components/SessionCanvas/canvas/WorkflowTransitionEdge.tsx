@@ -1,4 +1,4 @@
-import type { RoutedEdge, RoutePoint } from '@agor/core/layout/orthogonal-edge-routing';
+import type { RoutedEdge, RoutePoint, RouteRect } from '@agor/core/layout/orthogonal-edge-routing';
 import type { ZoneWorkflowTransition } from '@agor-live/client';
 import { memo, useCallback } from 'react';
 import {
@@ -10,7 +10,7 @@ import {
 } from 'reactflow';
 import {
   arrowHeadPath,
-  positionsKey,
+  geometryMatches,
   roundedOrthogonalPath,
   screenConstant,
   trimEnd,
@@ -23,10 +23,10 @@ export const WORKFLOW_TRANSITION_EDGE_TYPE = 'workflowTransition';
 
 export interface WorkflowTransitionEdgeData {
   transition: ZoneWorkflowTransition;
-  /** Orthogonal route computed for the zone layout in `routedPositions`. */
+  /** Orthogonal route computed for the zone geometry in `routedSource`/`routedTarget`. */
   route?: RoutedEdge;
-  /** Source and target zone positions the route was computed for ("x,y|x,y"). */
-  routedPositions?: string;
+  routedSource?: RouteRect;
+  routedTarget?: RouteRect;
   color: string;
   haloColor: string;
   labelColor: string;
@@ -72,22 +72,34 @@ function WorkflowTransitionEdgeImpl({
   interactionWidth,
 }: EdgeProps<WorkflowTransitionEdgeData>) {
   const zoom = useStore(selectZoom);
-  // Live zone positions; a drag moves these every frame while the route is
-  // only recomputed once the layout settles.
-  const livePositions = useStore(
+  // Live zone geometry; a drag or resize changes it every frame while the
+  // route is only recomputed once the layout settles. Until then the edge
+  // follows the live handles.
+  const routedSource = data?.routedSource;
+  const routedTarget = data?.routedTarget;
+  const routeIsCurrent = useStore(
     useCallback(
       (state: ReactFlowState) => {
-        const a = state.nodeInternals.get(source)?.positionAbsolute;
-        const b = state.nodeInternals.get(target)?.positionAbsolute;
-        if (!a || !b) return '';
-        return positionsKey(a, b);
+        if (!routedSource || !routedTarget) return false;
+        const a = state.nodeInternals.get(source);
+        const b = state.nodeInternals.get(target);
+        return (
+          geometryMatches(
+            a?.positionAbsolute && { ...a.positionAbsolute, width: a.width, height: a.height },
+            routedSource
+          ) &&
+          geometryMatches(
+            b?.positionAbsolute && { ...b.positionAbsolute, width: b.width, height: b.height },
+            routedTarget
+          )
+        );
       },
-      [source, target]
+      [source, target, routedSource, routedTarget]
     )
   );
   if (!data) return null;
   const { transition } = data;
-  const fresh = data.route && data.routedPositions === livePositions;
+  const fresh = Boolean(data.route) && routeIsCurrent;
   const points =
     fresh && data.route ? data.route.points : elbow(sourceX, sourceY, targetX, targetY);
   const labelPoint =

@@ -121,8 +121,9 @@ export function rectKey(rect: Pick<RouteRect, 'x' | 'y' | 'width' | 'height'>): 
 
 export interface WorkflowRoute {
   route: RoutedEdge;
-  /** Source and target zone positions the route was computed for ("x,y|x,y"). */
-  positions: string;
+  /** Source and target zone geometry the route was computed for. */
+  source: RouteRect;
+  target: RouteRect;
 }
 
 /** Rough rendered label box at zoom 1 (padding + border included). */
@@ -169,13 +170,34 @@ export function routeWorkflowTransitions(
     if (!a || !b) continue;
     result.set(route.id, {
       route: { ...route, labelPoint: labels.get(route.id) ?? route.labelPoint },
-      positions: positionsKey(a, b),
+      source: a,
+      target: b,
     });
   }
   return result;
 }
 
-/** Comparable key for a source/target zone position pair. */
-export function positionsKey(a: { x: number; y: number }, b: { x: number; y: number }): string {
-  return `${Math.round(a.x)},${Math.round(a.y)}|${Math.round(b.x)},${Math.round(b.y)}`;
+/** Live React Flow geometry for a zone node; size is null until measured. */
+export interface LiveZoneGeometry {
+  x: number;
+  y: number;
+  width?: number | null;
+  height?: number | null;
+}
+
+/** Sub-pixel layout noise that should not count as the zone having moved. */
+const GEOMETRY_TOLERANCE = 1.5;
+
+/**
+ * True when a zone still has the position and size a route was computed for.
+ * Size is compared once React Flow has measured the node, so a resize (which
+ * keeps the position) also marks the route stale.
+ */
+export function geometryMatches(live: LiveZoneGeometry | undefined, routed: RouteRect): boolean {
+  if (!live) return false;
+  const close = (a: number, b: number) => Math.abs(a - b) <= GEOMETRY_TOLERANCE;
+  if (!close(live.x, routed.x) || !close(live.y, routed.y)) return false;
+  if (typeof live.width === 'number' && !close(live.width, routed.width)) return false;
+  if (typeof live.height === 'number' && !close(live.height, routed.height)) return false;
+  return true;
 }

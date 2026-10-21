@@ -73,6 +73,8 @@ const DEFAULTS = {
 
 /** Cost multiplier for travelling inside another zone's clearance margin. */
 const MARGIN_COST = 4;
+/** Cost multiplier for the last-resort search that may cross zone interiors. */
+const ZONE_COST = 50;
 /** Per-unit-length cost of running on a track another edge already uses. */
 const SHARED_TRACK_COST = 0.5;
 /** Shortest segment nudging may leave next to a bend. */
@@ -126,10 +128,40 @@ const sideMidpoint = (rect: RouteRect, side: RouteSide): RoutePoint => {
   }
 };
 
-const stubOf = (port: RoutePoint, side: RouteSide, length: number): RoutePoint => ({
+const stubAt = (port: RoutePoint, side: RouteSide, length: number): RoutePoint => ({
   x: port.x + sideNormal[side].x * length,
   y: port.y + sideNormal[side].y * length,
 });
+
+/**
+ * Port stub: a short run straight out of the zone before the route may turn.
+ * It is normally `clearance` long, but when a neighbouring zone sits closer
+ * than that it stops halfway across the gap, so the route still starts in free
+ * space instead of inside the neighbour (where no path could leave).
+ */
+function stubOf(
+  rects: readonly RouteRect[],
+  port: RoutePoint,
+  side: RouteSide,
+  clearance: number
+): RoutePoint {
+  const normal = sideNormal[side];
+  let free = Number.POSITIVE_INFINITY;
+  for (const rect of rects) {
+    const right = rect.x + rect.width;
+    const bottom = rect.y + rect.height;
+    if (normal.x !== 0) {
+      if (!(port.y > rect.y + EPSILON && port.y < bottom - EPSILON)) continue;
+      const gap = normal.x > 0 ? rect.x - port.x : port.x - right;
+      if (gap > EPSILON) free = Math.min(free, gap);
+    } else {
+      if (!(port.x > rect.x + EPSILON && port.x < right - EPSILON)) continue;
+      const gap = normal.y > 0 ? rect.y - port.y : port.y - bottom;
+      if (gap > EPSILON) free = Math.min(free, gap);
+    }
+  }
+  return stubAt(port, side, Math.min(clearance, free / 2));
+}
 
 /** Candidate (source side, target side) pairs, best guess first. */
 function candidateSides(
@@ -342,6 +374,10 @@ class RoutingGrid {
   }
 
   /** Grid step from `point` in `dir`, or -1 when it leaves the grid or is blocked. */
+  /**
+   * Grid step from `point` in `dir`: -1 when it leaves the grid, -2 when it
+   * enters a zone interior, otherwise the next point index.
+   */
   private step(point: number, dir: number): number {
     const nx = this.nx;
     const xi = point % nx;
@@ -350,12 +386,23 @@ class RoutingGrid {
     const ty = yi + DY[dir];
     if (tx < 0 || ty < 0 || tx >= nx || ty >= this.ny) return -1;
     const next = ty * nx + tx;
-    if (this.pointBlocked[next]) return -1;
+    if (this.pointBlocked[next]) return -2;
     const blocked =
       dir < 2
         ? this.hBlocked[yi * nx + Math.min(xi, tx)]
         : this.vBlocked[Math.min(yi, ty) * nx + xi];
-    return blocked ? -1 : next;
+    return blocked ? -2 : next;
+  }
+
+  /** Raw neighbour index ignoring zone blocking (grid bounds only). */
+  private neighbour(point: number, dir: number): number {
+    const nx = this.nx;
+    const xi = point % nx;
+    const yi = (point - xi) / nx;
+    const tx = xi + DX[dir];
+    const ty = yi + DY[dir];
+    if (tx < 0 || ty < 0 || tx >= nx || ty >= this.ny) return -1;
+    return ty * nx + tx;
   }
 
   /**
@@ -367,7 +414,12 @@ class RoutingGrid {
     startDir: number,
     goal: number,
     goalDir: number,
-    penalties: { bend: number; crossing: number }
+    penalties: { bend: number; crossing: number },
+    /**
+     * Last resort for boxed-in ends (touching or overlapping zones): allow
+     * crossing zone interiors at a steep cost instead of failing.
+     */
+    throughZones = false
   ): { path: number[]; cost: number } | null {
     if (start < 0 || goal < 0) return null;
     this.generation += 1;
@@ -404,8 +456,10 @@ class RoutingGrid {
       }
       for (let nextDir = 0; nextDir < 4; nextDir += 1) {
         if (nextDir === OPPOSITE[dir]) continue;
-        const next = this.step(point, nextDir);
-        if (next < 0) continue;
+        const stepped = this.step(point, nextDir);
+        if (stepped === -1 || (stepped === -2 && !throughZones)) continue;
+        const inZone = stepped === -2;
+        const next = inZone ? this.neighbour(point, nextDir) : stepped;
         const horizontal = nextDir < 2;
         const segment = horizontal
           ? Math.floor(point / nx) * nx + Math.min(point % nx, next % nx)
@@ -415,7 +469,9 @@ class RoutingGrid {
           : Math.abs(ys[Math.floor(next / nx)] - ys[Math.floor(point / nx)]);
         const margin = horizontal ? this.hMargin[segment] : this.vMargin[segment];
         const use = horizontal ? this.hUse[segment] : this.vUse[segment];
-        let stepCost = length * (margin ? MARGIN_COST : 1) + length * SHARED_TRACK_COST * use;
+        let stepCost =
+          length * (inZone ? ZONE_COST : margin ? MARGIN_COST : 1) +
+          length * SHARED_TRACK_COST * use;
         if (nextDir !== dir) stepCost += penalties.bend;
         if (next !== goal && (horizontal ? this.passV[next] : this.passH[next])) {
           stepCost += penalties.crossing;
@@ -955,16 +1011,16 @@ export function routeOrthogonalEdges(
         if (!probeGrid) {
           const stubs = candidatesByEdge.flatMap((entry) =>
             entry.candidates.flatMap(([s, t]) => [
-              stubOf(sideMidpoint(entry.source, s), s, clearance),
-              stubOf(sideMidpoint(entry.target, t), t, clearance),
+              stubOf(rects, sideMidpoint(entry.source, s), s, clearance),
+              stubOf(rects, sideMidpoint(entry.target, t), t, clearance),
             ])
           );
           probeGrid = new RoutingGrid(rects, stubs, clearance);
         }
         let bestCost = Number.POSITIVE_INFINITY;
         for (const [s, t] of candidates) {
-          const from = stubOf(sideMidpoint(source, s), s, clearance);
-          const to = stubOf(sideMidpoint(target, t), t, clearance);
+          const from = stubOf(rects, sideMidpoint(source, s), s, clearance);
+          const to = stubOf(rects, sideMidpoint(target, t), t, clearance);
           const found = probeGrid.search(
             probeGrid.pointIndex(from),
             directionIndex(sideNormal[s]),
@@ -999,8 +1055,8 @@ export function routeOrthogonalEdges(
   // 3. Route, shortest forward edges first so the main flow claims the
   // straight tracks and loops go around it.
   const stubs = planned.flatMap((plan) => [
-    stubOf(plan.sourcePort, plan.sourceSide, clearance),
-    stubOf(plan.targetPort, plan.targetSide, clearance),
+    stubOf(rects, plan.sourcePort, plan.sourceSide, clearance),
+    stubOf(rects, plan.targetPort, plan.targetSide, clearance),
   ]);
   const grid = new RoutingGrid(rects, stubs, clearance);
   const routeOrder = [...planned].sort((a, b) => {
@@ -1016,15 +1072,15 @@ export function routeOrthogonalEdges(
   });
   const pointsByOrder: RoutePoint[][] = new Array(planned.length);
   for (const plan of routeOrder) {
-    const fromStub = stubOf(plan.sourcePort, plan.sourceSide, clearance);
-    const toStub = stubOf(plan.targetPort, plan.targetSide, clearance);
-    const found = grid.search(
+    const fromStub = stubOf(rects, plan.sourcePort, plan.sourceSide, clearance);
+    const toStub = stubOf(rects, plan.targetPort, plan.targetSide, clearance);
+    const ends = [
       grid.pointIndex(fromStub),
       directionIndex(sideNormal[plan.sourceSide]),
       grid.pointIndex(toStub),
       directionIndex({ x: -sideNormal[plan.targetSide].x, y: -sideNormal[plan.targetSide].y }),
-      penalties
-    );
+    ] as const;
+    const found = grid.search(...ends, penalties) ?? grid.search(...ends, penalties, true);
     let points: RoutePoint[];
     if (found) {
       grid.occupy(found.path);
@@ -1034,6 +1090,8 @@ export function routeOrthogonalEdges(
         plan.targetPort,
       ];
     } else {
+      // Unreachable on a grid that contains both stubs; kept as a type-safe
+      // backstop so an edge is never silently dropped.
       points = [
         plan.sourcePort,
         ...elbow(fromStub, plan.sourceSide, toStub, plan.targetSide),
