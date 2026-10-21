@@ -161,6 +161,20 @@ describe('routeOrthogonalEdges', () => {
     expect(routes[0].points.length).toBeGreaterThan(2);
   });
 
+  it('finds narrow corridors before ever crossing a zone', () => {
+    // Review repro: every clear path runs through gaps narrower than twice
+    // the clearance, which the inflated-outline grid alone has no track for.
+    const rects = [
+      rect('a', 0, 500, 200, 200),
+      rect('b', 600, 200, 200, 200),
+      rect('o1', 380, 420, 200, 200),
+      rect('o2', 380, -20, 200, 260),
+      rect('o3', 160, 180, 200, 260),
+    ];
+    const edges = [edge('a', 'b')];
+    expectWellFormed(routeOrthogonalEdges(rects, edges), rects, edges);
+  });
+
   it('still routes when zones touch, crossing as little zone as possible', () => {
     const rects = [rect('a', 0, 0), rect('touching', 280, 0), rect('b', 900, 0)];
     const [route] = routeOrthogonalEdges(rects, [edge('a', 'b')]);

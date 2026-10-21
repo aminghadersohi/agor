@@ -308,6 +308,17 @@ class RoutingGrid {
     // An outer ring so loops can always go around everything.
     xs.push(minX - clearance * 2, maxX + clearance * 2);
     ys.push(minY - clearance * 2, maxY + clearance * 2);
+    // Corridor midlines: one line halfway between every pair of neighbouring
+    // zone edges, so a gap narrower than twice the clearance (where the
+    // inflated outlines overlap) still has a track running through it.
+    const midlines = (edges: number[]) => {
+      const sorted = uniqueSorted(edges);
+      const out: number[] = [];
+      for (let i = 0; i + 1 < sorted.length; i += 1) out.push((sorted[i] + sorted[i + 1]) / 2);
+      return out;
+    };
+    xs.push(...midlines(rects.flatMap((rect) => [rect.x, rect.x + rect.width])));
+    ys.push(...midlines(rects.flatMap((rect) => [rect.y, rect.y + rect.height])));
     this.xs = uniqueSorted(xs);
     this.ys = uniqueSorted(ys);
     this.nx = this.xs.length;
