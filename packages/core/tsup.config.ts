@@ -11,6 +11,7 @@ export default defineConfig({
     'layout/justified-zones': 'src/layout/justified-zones.ts',
     'layout/board-zone-arrangement': 'src/layout/board-zone-arrangement.ts',
     'layout/board-layout-options': 'src/layout/board-layout-options.ts',
+    'layout/orthogonal-edge-routing': 'src/layout/orthogonal-edge-routing.ts',
     'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
     'layout/zone-layout': 'src/layout/zone-layout.ts',
     'layout/zone-growth-reflow': 'src/layout/zone-growth-reflow.ts',
