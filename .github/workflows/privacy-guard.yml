@@ -1,0 +1,70 @@
+# Privacy guard for this fork.
+#
+# Scans what a push or PR adds (lines, commit messages, author/committer
+# identities) for credentials, machine-local identities and instance-specific
+# links. Content merged from the upstream project is skipped: lines that match
+# upstream main verbatim and commits reachable from it.
+#
+# Deployment-specific terms live in the PRIVACY_POLICY repository secret (one
+# regular expression per line). The script reports file, line and rule number
+# only, so neither the policy nor matched text reaches the log.
+name: Privacy guard
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privacy-guard-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  privacy:
+    name: Privacy guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Guard self-test
+        run: node --test scripts/check-privacy.test.mjs
+
+      - name: Fetch upstream baseline
+        run: |
+          git fetch --no-tags --quiet https://github.com/preset-io/agor.git \
+            +refs/heads/main:refs/remotes/upstream/main || echo "upstream baseline unavailable"
+
+      - name: Scan added content
+        env:
+          AGOR_PRIVACY_POLICY: ${{ secrets.PRIVACY_POLICY }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          head="${PR_HEAD:-$GITHUB_SHA}"
+          if [ "$EVENT" = pull_request ]; then
+            base="$PR_BASE"
+          elif [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != 0000000000000000000000000000000000000000 ] \
+            && git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null \
+            && git merge-base --is-ancestor "$PUSH_BEFORE" "$head"; then
+            base="$PUSH_BEFORE"
+          else
+            # New branch, force-push or manual run: everything not on main.
+            base="$(git merge-base origin/main "$head" 2>/dev/null || git rev-list --max-parents=0 "$head" | tail -1)"
+          fi
+          if [ -z "$AGOR_PRIVACY_POLICY" ]; then
+            echo "::notice::PRIVACY_POLICY secret not available; running generic detectors only."
+          fi
+          node scripts/check-privacy.mjs --range "$base..$head" --exclude-ref refs/remotes/upstream/main
