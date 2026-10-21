@@ -6,6 +6,7 @@ import {
   DEFAULT_BOARD_LAYOUT_SETTINGS,
   normalizeBoardLayoutSettings,
 } from '@agor/core/layout/board-layout-options';
+import type { RouteRect } from '@agor/core/layout/orthogonal-edge-routing';
 import {
   BOARD_GRID_SIZE,
   BOARD_SNAP_GRID,
@@ -101,7 +102,6 @@ import {
   Controls,
   type Edge,
   getNodesBounds,
-  MarkerType,
   MiniMap,
   type Node,
   type NodeChange,
@@ -238,6 +238,12 @@ import {
 import { getValidZoneParentId, sanitizeOrphanedNodeParents } from './canvas/utils/nodeParentUtils';
 import { mergePendingZoneGeometry, type ZoneGeometry } from './canvas/utils/pendingZoneGeometry';
 import { persistedResizeRect, type ResizeRect } from './canvas/utils/resizeGeometry';
+import {
+  WORKFLOW_TRANSITION_EDGE_TYPE,
+  WorkflowTransitionEdge,
+  type WorkflowTransitionEdgeData,
+} from './canvas/WorkflowTransitionEdge';
+import { rectKey, routeWorkflowTransitions } from './canvas/workflowEdgeGeometry';
 import { ZoneTriggerModal } from './canvas/ZoneTriggerModal';
 import { ZoneWorkflowAdvanceHistoryModal } from './canvas/ZoneWorkflowAdvanceHistoryModal';
 import {
@@ -546,6 +552,34 @@ const firstNodeToRead = (nodes: Node[]): Node | undefined => {
 };
 
 // Define nodeTypes outside component to avoid recreation on every render
+const edgeTypes = {
+  [WORKFLOW_TRANSITION_EDGE_TYPE]: WorkflowTransitionEdge,
+};
+
+/** Quiet period after zones move before workflow transitions are re-routed. */
+const WORKFLOW_REROUTE_DELAY_MS = 150;
+const EMPTY_ROUTE_RECTS: RouteRect[] = [];
+
+/** `rects` once it has stopped changing for `delay` ms (compared by value). */
+function useSettledRouteRects(rects: RouteRect[], delay: number): RouteRect[] {
+  const [settled, setSettled] = useState(rects);
+  const key = useMemo(() => rects.map((r) => `${r.id}:${rectKey(r)}`).join(';'), [rects]);
+  const settledKey = useRef(key);
+  const latest = useRef(rects);
+  latest.current = rects;
+  useEffect(() => {
+    if (key === settledKey.current) return;
+    // First routes appear immediately; later moves wait for the drag to settle.
+    const wait = settledKey.current === '' ? 0 : delay;
+    const timer = setTimeout(() => {
+      settledKey.current = key;
+      setSettled(latest.current);
+    }, wait);
+    return () => clearTimeout(timer);
+  }, [key, delay]);
+  return settled;
+}
+
 const nodeTypes = {
   sessionNode: SessionNode,
   branchNode: BranchNode,
@@ -1711,10 +1745,30 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     );
 
     // Zones are the workflow nodes and persistent directed transitions are the
-    // links, matching ComfyUI's stable node-id/link-id graph model. React Flow
-    // owns viewport projection, so anchors stay attached through drag, resize,
-    // pan, and zoom without storing derived edge coordinates.
-    const initialEdges: Edge[] = useMemo(
+    // links, matching ComfyUI's stable node-id/link-id graph model. Links are
+    // drawn as orthogonal routes around the zones (EDA-style), derived from
+    // the current zone geometry rather than stored. Moving zones re-routes once
+    // the layout settles; until then the edge follows its live handles.
+    const workflowZoneRects = useMemo(() => {
+      if (zoneWorkflow.transitions.length === 0) return EMPTY_ROUTE_RECTS;
+      const rects: RouteRect[] = [];
+      for (const node of nodes) {
+        if (node.type !== 'zone' || node.parentId) continue;
+        const width = Number(node.width ?? node.style?.width ?? 0);
+        const height = Number(node.height ?? node.style?.height ?? 0);
+        if (!(width > 0 && height > 0)) continue;
+        rects.push({ id: node.id, x: node.position.x, y: node.position.y, width, height });
+      }
+      rects.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      return rects;
+    }, [nodes, zoneWorkflow.transitions.length]);
+    const settledZoneRects = useSettledRouteRects(workflowZoneRects, WORKFLOW_REROUTE_DELAY_MS);
+    const workflowRoutes = useMemo(
+      () => routeWorkflowTransitions(settledZoneRects, zoneWorkflow.transitions, token.fontSizeSM),
+      [settledZoneRects, zoneWorkflow.transitions, token.fontSizeSM]
+    );
+
+    const initialEdges: Edge<WorkflowTransitionEdgeData>[] = useMemo(
       () =>
         zoneWorkflow.transitions
           .filter(
@@ -1724,51 +1778,45 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           )
           .map((transition) => {
             const selected = transition.transition_id === selectedTransitionId;
+            const interactive = activeTool === 'workflow';
+            const routed = workflowRoutes.get(transition.transition_id);
             return {
               id: transition.transition_id,
               source: transition.source_zone_id,
               target: transition.target_zone_id,
               sourceHandle: 'workflow-right',
               targetHandle: 'workflow-left',
-              label: transition.label,
-              type: 'smoothstep',
+              type: WORKFLOW_TRANSITION_EDGE_TYPE,
               selected,
-              focusable: activeTool === 'workflow',
-              interactionWidth: activeTool === 'workflow' ? 24 : 0,
-              markerEnd: {
-                type: MarkerType.ArrowClosed,
-                color: transition.enabled ? token.colorPrimary : token.colorTextDisabled,
-                width: 16,
-                height: 16,
+              focusable: interactive,
+              interactionWidth: interactive ? 24 : 0,
+              ariaLabel: transition.label || undefined,
+              data: {
+                transition,
+                route: routed?.route,
+                routedPositions: routed?.positions,
+                color: transition.enabled ? token.colorPrimary : token.colorTextTertiary,
+                haloColor: token.colorBgLayout,
+                labelColor: token.colorText,
+                labelBackground: token.colorBgElevated,
+                labelFontSize: token.fontSizeSM,
+                labelRadius: token.borderRadiusSM,
+                interactive,
+                opacity: transition.enabled ? 1 : 0.7,
+                onSelect: setSelectedTransitionId,
               },
-              style: {
-                stroke: transition.enabled ? token.colorPrimary : token.colorTextDisabled,
-                strokeWidth: selected ? 3 : 1.5,
-                strokeDasharray: transition.enabled ? undefined : '6 5',
-                opacity: activeTool === 'workflow' ? (transition.enabled ? 0.8 : 0.45) : 0.35,
-              },
-              labelStyle: {
-                fill: token.colorTextSecondary,
-                fontSize: token.fontSizeSM,
-                fontWeight: selected ? 600 : 400,
-              },
-              labelBgStyle: {
-                fill: token.colorBgElevated,
-                fillOpacity: 0.88,
-              },
-              labelBgPadding: [6, 3] as [number, number],
-              labelBgBorderRadius: token.borderRadiusSM,
-              data: { transition },
-            } satisfies Edge;
+            } satisfies Edge<WorkflowTransitionEdgeData>;
           }),
       [
         zoneWorkflow.transitions,
+        workflowRoutes,
         board?.objects,
         selectedTransitionId,
         activeTool,
         token.colorPrimary,
-        token.colorTextDisabled,
-        token.colorTextSecondary,
+        token.colorTextTertiary,
+        token.colorBgLayout,
+        token.colorText,
         token.colorBgElevated,
         token.fontSizeSM,
         token.borderRadiusSM,
@@ -5032,6 +5080,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
                 : undefined
             }
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             snapToGrid={true}
             snapGrid={BOARD_SNAP_GRID}
             minZoom={0.1}
