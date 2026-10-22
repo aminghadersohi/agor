@@ -29,13 +29,13 @@ import { runWithTenantDatabaseScope } from './tenant-scope';
 
 let branchUnique = Date.now() % 1_000_000;
 
-const ORIGIN_SESSION_ID = '01a0d369-82f3-7458-8265-861a4752b7b2';
+const ORIGIN_SESSION_ID = '01a0c0de-0000-7000-8000-000000000369';
 
 export function stampedPrompt(): { prompt: string; block: string } {
   const block = renderPromptProvenanceBlock({
     origin: {
       sessionId: ORIGIN_SESSION_ID,
-      sessionShortId: '01a0d369',
+      sessionShortId: '01a0c0de',
       agenticTool: 'claude-code',
     },
     userLabel: 'relay@example.invalid',
