@@ -65,10 +65,7 @@ describe('resolveMCPOAuthClientTemplates', () => {
         OTHER_SECRET: 'must-not-appear',
       })
     );
-    expect(error.missingVars).toEqual([
-      'GOOGLE_EXAMPLE_CLIENT_ID',
-      'GOOGLE_EXAMPLE_CLIENT_SECRET',
-    ]);
+    expect(error.missingVars).toEqual(['GOOGLE_EXAMPLE_CLIENT_ID', 'GOOGLE_EXAMPLE_CLIENT_SECRET']);
     expect(error.message).toContain('GOOGLE_EXAMPLE_CLIENT_ID');
     expect(error.message).toContain('GOOGLE_EXAMPLE_CLIENT_SECRET');
     expect(error.message).toContain('Settings → Environment Variables');

@@ -1,1 +1,8 @@
 pnpm exec lint-staged
+
+# Privacy guard: staged additions only; lines inherited from upstream are skipped.
+privacy_baseline=""
+for ref in refs/remotes/upstream/main refs/remotes/origin/main; do
+  if git rev-parse -q --verify "$ref" >/dev/null; then privacy_baseline="$ref"; break; fi
+done
+node scripts/check-privacy.mjs --staged ${privacy_baseline:+--exclude-ref "$privacy_baseline"}
