@@ -1,0 +1,8 @@
+# Privacy guard: what the merge brings in, including withdrawn history.
+privacy_baseline=""
+for ref in refs/remotes/upstream/main refs/remotes/origin/main; do
+  if git rev-parse -q --verify "$ref" >/dev/null; then privacy_baseline="$ref"; break; fi
+done
+if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+  node scripts/check-privacy.mjs --new MERGE_HEAD ${privacy_baseline:+--exclude-ref "$privacy_baseline"}
+fi

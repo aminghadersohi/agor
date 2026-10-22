@@ -135,6 +135,37 @@ describe('CLI against a scratch repository', () => {
     assert.equal(cli('--range', 'main..topic', '--exclude-ref', 'baseline').status, 0);
   });
 
+  it('catches content added by an intermediate commit and later removed', () => {
+    git('checkout', '-q', '-b', 'stale', 'main');
+    writeFileSync(join(dir, 'tmp.txt'), 'acme widgets roadmap\n');
+    git('add', 'tmp.txt');
+    git('commit', '-q', '-m', 'add');
+    git('rm', '-q', 'tmp.txt');
+    git('commit', '-q', '-m', 'remove');
+    const res = cli('--range', 'main..stale');
+    assert.equal(res.status, 1);
+    assert.match(res.stdout, /tmp\.txt:1 private-policy #1/);
+  });
+
+  it('blocks history that contains a retired commit, printing only a count', () => {
+    const retired = git('rev-parse', 'stale~1').trim();
+    const res = spawnSync(process.execPath, [SCRIPT, '--new', 'stale'], {
+      cwd: dir,
+      env: { ...env, AGOR_PRIVACY_POLICY: `retired:${retired.slice(0, 12)}` },
+      encoding: 'utf8',
+    });
+    assert.equal(res.status, 1);
+    assert.match(res.stdout, /stale:1 commit\(s\) retired-history/);
+    assert.ok(!res.stdout.includes(retired.slice(0, 7)));
+  });
+
+  it('--new skips commits a remote-tracking ref already has', () => {
+    git('update-ref', 'refs/remotes/origin/stale', 'stale');
+    assert.equal(cli('--new', 'stale').status, 0);
+    git('update-ref', '-d', 'refs/remotes/origin/stale');
+    git('checkout', '-q', 'topic');
+  });
+
   it('flags commit metadata from a machine-local identity', () => {
     writeFileSync(join(dir, 'other.txt'), 'fine\n');
     git('add', 'other.txt');
