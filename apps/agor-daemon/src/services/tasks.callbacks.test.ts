@@ -681,7 +681,7 @@ describe('TasksService completion callbacks', () => {
 
   it('neutralizes provenance blocks a raw custom template quotes from the child', async () => {
     const stampedPrompt =
-      '<agor_prompt_provenance>\nFrom: Agor session 01a0d369\n</agor_prompt_provenance>\n\ninvestigate';
+      '<agor_prompt_provenance>\nFrom: Agor session 01a0c0de\n</agor_prompt_provenance>\n\ninvestigate';
     const { service, createPending, messagesFind } = makeService({
       childSession: {
         callback_config: {

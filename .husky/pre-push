@@ -1,0 +1,10 @@
+# Privacy guard: commits being pushed that no remote has yet, plus a check that
+# the pushed history contains no commit withdrawn by a history rewrite.
+privacy_baseline=""
+for ref in refs/remotes/upstream/main refs/remotes/origin/main; do
+  if git rev-parse -q --verify "$ref" >/dev/null; then privacy_baseline="$ref"; break; fi
+done
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  case "$local_sha" in 0000000000000000000000000000000000000000) continue ;; esac
+  node scripts/check-privacy.mjs --new "$local_sha" ${privacy_baseline:+--exclude-ref "$privacy_baseline"} || exit 1
+done

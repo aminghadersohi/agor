@@ -8,15 +8,21 @@
 // AGOR_PRIVACY_POLICY environment variable (CI reads it from a repository
 // secret), or keep it at ~/.config/agor/privacy-policy. One JavaScript regular
 // expression per line, case-insensitive unless prefixed with `case:`; blank
-// lines and lines starting with `#` are ignored.
+// lines and lines starting with `#` are ignored. Lines of the form
+// `retired:<hex prefix>` name commits withdrawn by a history rewrite: if any of
+// them is reachable from a scanned head, the check fails, so a stale clone
+// cannot quietly push or merge the old history back.
 //
 // Findings report the location and the rule, never the matched text, so the
 // output is safe to print in public CI logs.
 //
 // Modes:
 //   --staged                 added lines of the staged diff (pre-commit)
-//   --range <base>..<head>   added lines, commit messages and author/committer
-//                            identities of every commit in the range
+//   --range <base>..<head>   added lines of the range and of every commit in it,
+//                            commit messages and author/committer identities
+//   --new <rev>              like --range for every commit reachable from <rev>
+//                            that no remote-tracking ref has yet (pre-push,
+//                            pre-merge-commit)
 //   --files <path>...        whole files
 // Options:
 //   --exclude-ref <ref>      skip commits reachable from <ref> and lines that
@@ -176,7 +182,7 @@ export function parsePolicy(text) {
   const rules = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
+    if (!line || line.startsWith('#') || line.startsWith('retired:')) continue;
     const caseSensitive = line.startsWith('case:');
     try {
       rules.push(new RegExp(caseSensitive ? line.slice(5) : line, caseSensitive ? 'g' : 'gi'));
@@ -187,17 +193,31 @@ export function parsePolicy(text) {
   return rules;
 }
 
-export function loadPolicy({ policyFile, env = process.env } = {}) {
-  if (env.AGOR_PRIVACY_POLICY?.trim()) return parsePolicy(env.AGOR_PRIVACY_POLICY);
+/** `retired:<hex>` lines: commit SHA prefixes withdrawn by a history rewrite. */
+export function parseRetired(text) {
+  const out = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const m = /^retired:([0-9a-f]{7,40})$/i.exec(raw.trim());
+    if (m) out.push(m[1].toLowerCase());
+  }
+  return out;
+}
+
+function policyText({ policyFile, env }) {
+  if (env.AGOR_PRIVACY_POLICY?.trim()) return env.AGOR_PRIVACY_POLICY;
   const candidates = [
     policyFile,
     env.AGOR_PRIVACY_POLICY_FILE,
     join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'agor', 'privacy-policy'),
   ].filter(Boolean);
   for (const file of candidates) {
-    if (existsSync(file)) return parsePolicy(readFileSync(file, 'utf8'));
+    if (existsSync(file)) return readFileSync(file, 'utf8');
   }
-  return [];
+  return '';
+}
+
+export function loadPolicy({ policyFile, env = process.env } = {}) {
+  return parsePolicy(policyText({ policyFile, env }));
 }
 
 /** Scan one line of text; returns findings without the matched text. */
@@ -272,14 +292,22 @@ function scanAdded(lines, { policy, excludeRef }) {
   return findings;
 }
 
-function scanCommits(range, { policy, excludeRef }) {
-  const revArgs = ['rev-list', '--no-merges', range];
-  if (excludeRef) revArgs.push(`^${excludeRef}`);
+function scanCommits(revs, { policy, excludeRef }) {
+  // The baseline exclusion goes first: after `--not` a `^ref` would flip back.
+  const revArgs = ['rev-list', '--no-merges', ...(excludeRef ? [`^${excludeRef}`] : []), ...revs];
   const out = tryGit(revArgs);
-  if (out === null) throw new Error(`cannot list commits for ${range}`);
+  if (out === null) throw new Error(`cannot list commits for ${revs.join(' ')}`);
   const findings = [];
   for (const sha of out.split('\n').filter(Boolean)) {
     const short = sha.slice(0, 10);
+    // Each commit's own additions, so content that a later commit removed is
+    // still caught when old history is pushed again.
+    findings.push(
+      ...scanAdded(
+        addedLines(git(['show', '--format=', '-U0', '--no-color', '--no-ext-diff', sha])),
+        { policy, excludeRef }
+      )
+    );
     const meta = git(['show', '-s', '--format=%an%n%ae%n%cn%n%ce', sha]).split('\n');
     const identity = meta.slice(0, 4).join(' ');
     // Public authorship is expected here; machine-local identities are checked below.
@@ -309,6 +337,20 @@ function scanCommits(range, { policy, excludeRef }) {
   return findings;
 }
 
+/** Fail when any withdrawn commit is reachable from `head` (outside the baseline). */
+function scanRetired(head, retired, { excludeRef }) {
+  if (!retired.length) return [];
+  const args = ['rev-list', head];
+  if (excludeRef) args.push(`^${excludeRef}`);
+  const out = tryGit(args);
+  if (out === null) throw new Error(`cannot list history of ${head}`);
+  const hits = out.split('\n').filter((sha) => sha && retired.some((p) => sha.startsWith(p)));
+  // Only the count is printed: the commit IDs themselves point at withdrawn content.
+  return hits.length
+    ? [{ path: head, line: `${hits.length} commit(s)`, rule: 'retired-history', severity: 'block' }]
+    : [];
+}
+
 function scanFiles(files, { policy }) {
   const findings = [];
   for (const path of files) {
@@ -334,7 +376,10 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--staged') opts.mode = 'staged';
-    else if (a === '--range') {
+    else if (a === '--new') {
+      opts.mode = 'new';
+      opts.rev = argv[++i];
+    } else if (a === '--range') {
       opts.mode = 'range';
       opts.range = argv[++i];
     } else if (a === '--files') {
@@ -346,7 +391,8 @@ function parseArgs(argv) {
     else if (a === '--strict') opts.strict = true;
     else throw new Error(`unknown argument: ${a}`);
   }
-  if (!opts.mode) throw new Error('choose --staged, --range <base>..<head> or --files <path>...');
+  if (!opts.mode)
+    throw new Error('choose --staged, --range <base>..<head>, --new <rev> or --files <path>...');
   if (opts.mode === 'range' && !/\.\./.test(opts.range ?? ''))
     throw new Error('--range needs <base>..<head>');
   if (opts.excludeRef && tryGit(['rev-parse', '--verify', '--quiet', opts.excludeRef]) === null) {
@@ -360,7 +406,9 @@ function parseArgs(argv) {
 
 export function run(argv, env = process.env) {
   const opts = parseArgs(argv);
-  const policy = loadPolicy({ policyFile: opts.policyFile, env });
+  const text = policyText({ policyFile: opts.policyFile, env });
+  const policy = parsePolicy(text);
+  const retired = parseRetired(text);
   let findings = [];
   if (opts.mode === 'staged') {
     findings = scanAdded(
@@ -380,7 +428,13 @@ export function run(argv, env = process.env) {
           excludeRef: opts.excludeRef,
         }
       ),
-      ...scanCommits(`${base}..${head}`, { policy, excludeRef: opts.excludeRef }),
+      ...scanCommits([`${base}..${head}`], { policy, excludeRef: opts.excludeRef }),
+      ...scanRetired(head, retired, { excludeRef: opts.excludeRef }),
+    ];
+  } else if (opts.mode === 'new') {
+    findings = [
+      ...scanCommits([opts.rev, '--not', '--remotes'], { policy, excludeRef: opts.excludeRef }),
+      ...scanRetired(opts.rev, retired, { excludeRef: opts.excludeRef }),
     ];
   } else {
     findings = scanFiles(opts.files, { policy });
@@ -392,7 +446,7 @@ export function run(argv, env = process.env) {
     console.log(`${tag}: ${f.path}:${f.line} ${f.rule}`);
   }
   const policyNote = policy.length
-    ? `${policy.length} private policy rule(s)`
+    ? `${policy.length} private policy rule(s), ${retired.length} retired commit(s)`
     : 'no private policy';
   console.log(
     `privacy: ${findings.length} finding(s), ${blocking.length} blocking (${policyNote}). Matched text is never printed.`
