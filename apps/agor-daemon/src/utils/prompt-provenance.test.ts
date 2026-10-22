@@ -5,13 +5,13 @@ import {
   withPromptProvenanceTool,
 } from './prompt-provenance.js';
 
-const ORIGIN_SESSION_ID = '01a0d369-82f3-7458-8265-861a4752b7b2';
+const ORIGIN_SESSION_ID = '01a0c0de-0000-7000-8000-000000000369';
 const ORIGIN_BRANCH_ID = '01a0d111-0000-7000-8000-000000000001';
 
 const STAMP: McpPromptProvenanceStamp = {
   authenticated_by: 'session_token',
   origin_user_id:
-    '019f1bc1-bb61-7ea4-b9e1-0ecc173cccfb' as McpPromptProvenanceStamp['origin_user_id'],
+    '019f0000-0000-7000-8000-0000000000a1' as McpPromptProvenanceStamp['origin_user_id'],
   origin_user_label: 'amin@example.com',
   origin_session_id: ORIGIN_SESSION_ID as McpPromptProvenanceStamp['origin_session_id'],
   origin_branch_id: ORIGIN_BRANCH_ID as McpPromptProvenanceStamp['origin_branch_id'],

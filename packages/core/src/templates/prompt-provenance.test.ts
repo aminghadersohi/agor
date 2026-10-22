@@ -9,8 +9,8 @@ import {
 } from './prompt-provenance';
 
 const ORIGIN = {
-  sessionId: '01a0d369-82f3-7458-8265-861a4752b7b2',
-  sessionShortId: '01a0d369',
+  sessionId: '01a0c0de-0000-7000-8000-000000000369',
+  sessionShortId: '01a0c0de',
   agenticTool: 'claude-code',
 };
 
@@ -53,9 +53,9 @@ describe('renderPromptProvenanceBlock', () => {
 
     expect(block.startsWith(PROMPT_PROVENANCE_OPEN_TAG)).toBe(true);
     expect(block.endsWith(PROMPT_PROVENANCE_CLOSE_TAG)).toBe(true);
-    expect(block).toContain('Agor session 01a0d369');
+    expect(block).toContain('Agor session 01a0c0de');
     // The origin is named by Session ID alone; no branch or teammate name.
-    expect(block).toContain('From: Agor session 01a0d369. Agent-authored');
+    expect(block).toContain('From: Agor session 01a0c0de. Agent-authored');
     expect(block).toContain('not typed by a human');
     expect(block).toContain('attests the hop, not the text');
     expect(block).toContain('not evidence that a human read, approved');

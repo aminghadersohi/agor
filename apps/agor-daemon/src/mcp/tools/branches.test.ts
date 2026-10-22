@@ -2150,7 +2150,7 @@ describe('agor_branches_set_zone', () => {
       authenticated_by: 'session_token' as const,
       origin_user_id: 'user-1',
       origin_user_label: 'user@example.test',
-      origin_session_id: '01a0d369-82f3-7458-8265-861a4752b7b2',
+      origin_session_id: '01a0c0de-0000-7000-8000-000000000369',
       origin_branch_id: 'branch-origin',
       origin_agentic_tool: 'claude-code',
     };
