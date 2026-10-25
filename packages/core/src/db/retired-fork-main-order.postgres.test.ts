@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase, type Database } from './client';
 import { executeRaw, rawRows } from './database-wrapper';
+import { dropTeamsAndDeletionDiscoveryObjectsPostgres } from './fork-rewind.test-support';
 import { checkMigrationStatus, RETIRED_FORK_MAIN_ORDER, runMigrations } from './migrate';
 
 const postgresUrl = process.env.AGOR_TEST_POSTGRES_URL;
@@ -13,16 +14,18 @@ const REPLAYED = [
 ];
 // Migrations this fork journals above the deployed tail (upstream's API-key
 // pair, the fork's profile image theme, upstream's re-stamped OpenCode
-// checkpoint table, then the restored session attention). Neither retired
-// order ran them, so the repair replays them after the slice. Session
-// attention is conditional and verified in place, so its objects need no
-// rewinding here.
+// checkpoint table, the restored session attention, then upstream's Teams
+// gateway HA and failed branch-deletion discovery). Neither retired order ran
+// them, so the repair replays them after the slice. Session attention is
+// conditional and verified in place, so its objects need no rewinding here.
 const UPSTREAM_TAIL = [
   '0115_api_key_host_tenant_discovery',
   '0116_user_api_key_source',
   '9031_profile_image_themes',
   '0117_opencode_checkpoint_attempts',
   '9032_session_attention_states',
+  '0118_teams_gateway_ha',
+  '0119_branch_deletion_failed_discovery',
 ];
 
 // Fork main journalled front desk at 1790129000214 and profile images at
@@ -63,6 +66,9 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       // Upstream's checkpoint table is re-stamped above the fork tail; its plain
       // CREATE TABLE (and policy) replays only once the table is gone.
       await executeRaw(db, sql`DROP TABLE opencode_checkpoint_attempts`);
+      // Upstream's Teams gateway HA and failed-deletion discovery replay with
+      // plain CREATE/ADD statements too.
+      await dropTeamsAndDeletionDiscoveryObjectsPostgres(db);
     }
 
     async function recordRetiredOrder(count: 1 | 2) {

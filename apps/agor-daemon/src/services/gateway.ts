@@ -6378,13 +6378,18 @@ export class GatewayService {
     let admittedTaskId: TaskID | undefined;
     let mcpAuthWarning: string | undefined;
     let mappingForCursor: ThreadSessionMap | null = existingMapping ?? null;
+    let authorizedMappedSession: Session | null = null;
 
     // Authorize before resolving configuration or mutating an existing
     // Session. Re-check at the actual Session/Task admission boundaries below
     // so a revoked aligned user cannot keep using a durable platform thread.
     if (existingMapping) {
       try {
-        await this.requireInboundPromptAuthority(channel, existingMapping.session_id, user.user_id);
+        authorizedMappedSession = await this.requireInboundPromptAuthority(
+          channel,
+          existingMapping.session_id,
+          user.user_id
+        );
       } catch (error) {
         if (!(error instanceof GatewayPromptAuthorizationError)) throw error;
         if (!isReaction && !discordUnaddressed) {
@@ -6452,7 +6457,7 @@ export class GatewayService {
       explicit: channel.mcp_server_ids,
       user,
     });
-    const permissionMode = gatewayPermissionConfig.mode;
+    let permissionMode = gatewayPermissionConfig.mode;
 
     // Seed admission is the one durable mutation that must happen before
     // creating a session. It also replaces the old lookup-then-late-claim
@@ -6555,7 +6560,34 @@ export class GatewayService {
     if (existingMapping) {
       // Existing thread → existing session
       sessionId = existingMapping.session_id;
-      if (resolvedPresetId) {
+      // The channel's configuration was materialized for the channel's
+      // runtime. A mapped Session keeps the runtime it was created with (the
+      // channel may have switched since, or the Session was retargeted), and
+      // another runtime's model/permission config must never be written onto
+      // it: that persisted e.g. a Codex model on a Claude Code Session. Only
+      // refresh configuration when the runtimes match; otherwise keep the
+      // Session's own config, including its permission mode for this prompt.
+      //
+      // The channel's configuration also only governs Sessions the channel
+      // created. A thread can be mapped to a Session that came from elsewhere
+      // (a Session that sent a proactive outbound message, or one adopted
+      // into the thread); its model, effort and permissions belong to that
+      // Session and a reply must never overwrite them.
+      const mappedSession =
+        authorizedMappedSession?.session_id === sessionId
+          ? authorizedMappedSession
+          : await this.sessionRepo.findById(sessionId);
+      if (!mappedSession) throw new Error(`Gateway mapped session not found: ${sessionId}`);
+      const mappedGatewaySource = mappedSession.custom_context?.gateway_source as
+        | Partial<GatewaySource>
+        | undefined;
+      const channelOwnsMappedSession = mappedGatewaySource?.channel_id === channel.id;
+      if (mappedSession.agentic_tool !== agenticTool || !channelOwnsMappedSession) {
+        console.warn(
+          `[gateway] Keeping ${mappedSession.agentic_tool} config on mapped session ${shortId(sessionId)}; channel ${shortId(channel.id)} runs ${agenticTool}${channelOwnsMappedSession ? '' : ' and did not create it'}`
+        );
+        permissionMode = mappedSession.permission_config?.mode;
+      } else if (resolvedPresetId) {
         await this.app.service('sessions').patch(sessionId, {
           agentic_tool_preset_id: resolvedPresetId,
         });
@@ -6565,6 +6597,9 @@ export class GatewayService {
           model_config: gatewayModelConfig,
           permission_config: gatewayPermissionConfig,
         });
+      } else {
+        // No channel configuration to refresh: the Session's own mode applies.
+        permissionMode = mappedSession.permission_config?.mode;
       }
 
       // Touch timestamps

@@ -278,6 +278,8 @@ function makeGatewayHarness(args: {
   };
   sessionSdkHomeScope?: SessionSdkHomeScope;
   sessionOwnerUserId?: UserID;
+  /** Persisted runtime/config of the mapped Session the repository returns. */
+  mappedSession?: Partial<Session>;
   outboundSeed?: GatewayOutboundMessage | null;
   setMCPServers?: (sessionId: SessionID, serverIds: string[], label: string) => Promise<void>;
 }) {
@@ -308,12 +310,16 @@ function makeGatewayHarness(args: {
     status: SessionStatus.IDLE,
     custom_context: { gateway_source: { channel_id: channel.id } },
   }));
+  const sessionsPatch = vi.fn(async (sessionId: string, data: Partial<Session>) => ({
+    session_id: sessionId,
+    ...data,
+  }));
   const setMCPServers = args.setMCPServers ?? vi.fn(async () => undefined);
   const app = {
     service: (name: string) => {
       if (name === 'users') return { get: vi.fn(async () => executionUser) };
       if (name === 'sessions') {
-        return { create: sessionsCreate, get: sessionsGet, setMCPServers };
+        return { create: sessionsCreate, get: sessionsGet, patch: sessionsPatch, setMCPServers };
       }
       if (name === '/sessions/:id/prompt') return { create: promptCreate };
       if (name === '/sessions/:id/stop') return { create: stopCreate };
@@ -377,6 +383,9 @@ function makeGatewayHarness(args: {
       created_by: args.sessionOwnerUserId ?? executionUser.user_id,
       status: SessionStatus.IDLE,
       sdk_home_scope: args.sessionSdkHomeScope ?? 'execution_home',
+      agentic_tool: 'claude-code',
+      custom_context: { gateway_source: { channel_id: channel.id } },
+      ...args.mappedSession,
     })),
   };
   const threadMapRepo = {
@@ -505,6 +514,7 @@ function makeGatewayHarness(args: {
     taskRepo,
     sessionsCreate,
     sessionsGet,
+    sessionsPatch,
     setMCPServers,
     channelRepo,
     branchRepo,
@@ -2072,6 +2082,229 @@ describe('GatewayService mapped-thread follow-ups', () => {
     const prompt = promptCreate.mock.calls[0][0].prompt as string;
     expect(prompt).toContain('any update?');
     expect(prompt).not.toContain('This Slack thread began from a proactive Agor gateway message');
+  });
+});
+
+describe('GatewayService mapped-session runtime reconciliation', () => {
+  const codexConfig = {
+    agentic_tool_preset_id: null,
+    permission_config: { mode: 'auto', codex: { sandboxMode: 'workspace-write' } },
+    model_config: { mode: 'exact', model: 'gpt-6-astra', effort: 'high' },
+  };
+  const claudeConfig = {
+    agentic_tool_preset_id: null,
+    permission_config: { mode: 'acceptEdits' },
+    model_config: { mode: 'exact', model: 'claude-opus-5-5', effort: 'high' },
+  };
+
+  async function followUp(args: {
+    channelAgent: 'claude-code' | 'codex';
+    channelPresetId?: string;
+    sessionTool: 'claude-code' | 'codex';
+    sessionPermissionMode: string;
+    sessionPresetId?: string;
+    /** Omit to model a Session this channel created; `null` for none. */
+    sessionGatewaySource?: Record<string, unknown> | null;
+    /** Model a channel with no explicit agentic_config (user default). */
+    channelWithoutConfig?: boolean;
+    materialized: typeof codexConfig | typeof claudeConfig;
+  }) {
+    vi.mocked(materializeAgenticToolConfiguration).mockResolvedValueOnce(
+      args.materialized as never
+    );
+    const channel = {
+      ...slackChannel,
+      agentic_config: args.channelWithoutConfig
+        ? null
+        : {
+            agent: args.channelAgent,
+            ...(args.channelPresetId ? { presetId: args.channelPresetId } : {}),
+          },
+    } as unknown as GatewayChannel;
+    const harness = makeGatewayHarness({
+      channel,
+      existingMapping: makeMapping(),
+      mappedSession: {
+        agentic_tool: args.sessionTool,
+        agentic_tool_preset_id: (args.sessionPresetId ?? null) as never,
+        permission_config: { mode: args.sessionPermissionMode } as never,
+        ...(args.sessionGatewaySource !== undefined
+          ? {
+              custom_context: args.sessionGatewaySource
+                ? { gateway_source: args.sessionGatewaySource }
+                : {},
+            }
+          : {}),
+      },
+      connector: {
+        fetchThreadHistory: vi.fn(async () => ({ has_more: false, messages: [] })),
+        sendMessage: vi.fn(async () => '104.000000'),
+      },
+    });
+    const result = await harness.service.create({
+      channel_key: channel.channel_key,
+      thread_id: 'C123-100.000000',
+      text: 'follow up',
+      metadata: {
+        channel: 'C123',
+        channel_type: 'channel',
+        slack_has_mention: true,
+        slack_message_ts: '103.000000',
+        slack_thread_ts: '100.000000',
+      },
+    });
+    expect(result).toMatchObject({ success: true, sessionId: 'sess-1', created: false });
+    expect(harness.sessionsCreate).not.toHaveBeenCalled();
+    expect(harness.promptCreate).toHaveBeenCalledTimes(1);
+    return harness;
+  }
+
+  it('does not write a Codex channel model or permissions onto a mapped Claude Code session', async () => {
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'codex',
+      sessionTool: 'claude-code',
+      sessionPermissionMode: 'acceptEdits',
+      materialized: codexConfig,
+    });
+
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'acceptEdits' });
+  });
+
+  it('does not write a Claude Code channel model or permissions onto a mapped Codex session', async () => {
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'claude-code',
+      sessionTool: 'codex',
+      sessionPermissionMode: 'auto',
+      materialized: claudeConfig,
+    });
+
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'auto' });
+  });
+
+  it('does not select another runtime preset on a mapped session', async () => {
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'codex',
+      channelPresetId: 'preset-codex',
+      sessionTool: 'claude-code',
+      sessionPermissionMode: 'default',
+      sessionPresetId: 'preset-claude',
+      materialized: { ...codexConfig, agentic_tool_preset_id: 'preset-codex' } as never,
+    });
+
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    // A preset-backed session rejects a per-task permission override that
+    // differs from its own mode, so the prompt must carry the session's mode.
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'default' });
+  });
+
+  it('still refreshes inline channel config on a mapped session of the same runtime', async () => {
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'codex',
+      sessionTool: 'codex',
+      sessionPermissionMode: 'ask',
+      materialized: codexConfig,
+    });
+
+    expect(sessionsPatch).toHaveBeenCalledExactlyOnceWith('sess-1', {
+      agentic_tool_preset_id: null,
+      model_config: codexConfig.model_config,
+      permission_config: codexConfig.permission_config,
+    });
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'auto' });
+  });
+
+  it('still selects the channel preset on a mapped session of the same runtime', async () => {
+    const { sessionsPatch } = await followUp({
+      channelAgent: 'claude-code',
+      channelPresetId: 'preset-claude',
+      sessionTool: 'claude-code',
+      sessionPermissionMode: 'default',
+      materialized: { ...claudeConfig, agentic_tool_preset_id: 'preset-claude' } as never,
+    });
+
+    expect(sessionsPatch).toHaveBeenCalledExactlyOnceWith('sess-1', {
+      agentic_tool_preset_id: 'preset-claude',
+    });
+  });
+
+  it('does not overwrite a same-runtime session the channel did not create (outbound seed)', async () => {
+    // A Claude Code Session messaged out through the gateway owns its own
+    // model and effort; a reply in that thread must not adopt the channel's.
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'claude-code',
+      sessionTool: 'claude-code',
+      sessionPermissionMode: 'bypassPermissions',
+      sessionGatewaySource: null,
+      materialized: {
+        ...claudeConfig,
+        model_config: { mode: 'exact', model: 'claude-sonnet-5-5', effort: 'low' },
+      },
+    });
+
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'bypassPermissions' });
+  });
+
+  it('does not overwrite a same-runtime session another channel created', async () => {
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'claude-code',
+      sessionTool: 'claude-code',
+      sessionPermissionMode: 'acceptEdits',
+      sessionGatewaySource: { channel_id: 'other-channel', channel_type: 'slack' },
+      materialized: claudeConfig,
+    });
+
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'acceptEdits' });
+  });
+
+  it('uses the session mode when a channel without config has nothing to refresh', async () => {
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'claude-code',
+      channelWithoutConfig: true,
+      sessionTool: 'claude-code',
+      sessionPermissionMode: 'default',
+      sessionPresetId: 'preset-claude',
+      materialized: claudeConfig,
+    });
+
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    // The user default's mode differs; a preset-backed Session would reject it.
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'default' });
+  });
+
+  it('authorizes before resolving or touching a mismatched mapped session', async () => {
+    const channel = {
+      ...slackChannel,
+      agentic_config: { agent: 'codex' },
+    } as unknown as GatewayChannel;
+    const { service, sessionsPatch, promptCreate } = makeGatewayHarness({
+      channel,
+      existingMapping: makeMapping(),
+      mappedSession: { agentic_tool: 'claude-code' },
+      promptAuthority: { allowed: false, source: 'denied', denial_reason: 'not_owner' } as never,
+      connector: { sendMessage: vi.fn(async () => '104.000000') },
+    });
+
+    const result = await service.create({
+      channel_key: channel.channel_key,
+      thread_id: 'C123-100.000000',
+      text: 'follow up',
+      metadata: {
+        channel: 'C123',
+        channel_type: 'channel',
+        slack_has_mention: true,
+        slack_message_ts: '103.000000',
+        slack_thread_ts: '100.000000',
+      },
+    });
+
+    expect(result).toMatchObject({ success: false });
+    expect(materializeAgenticToolConfiguration).not.toHaveBeenCalled();
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    expect(promptCreate).not.toHaveBeenCalled();
   });
 });
 
