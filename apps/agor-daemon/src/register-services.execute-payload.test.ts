@@ -37,7 +37,7 @@ const baseSession = {
   sdk_home_scope: 'execution_home',
 } as Session;
 
-async function launchPrompt(session: Session) {
+function createLaunch(session: Session) {
   mocks.session = session;
   mocks.spawnExecutor.mockReset();
   const ctx = {
@@ -62,9 +62,15 @@ async function launchPrompt(session: Session) {
     sessionTokenService as never,
     tasksService as never
   );
-  await runWithTenantContext('tenant-1', () =>
-    execute('session-1', { taskId: 'task-1', prompt: 'hello' }, {})
-  );
+  const launch = () =>
+    runWithTenantContext('tenant-1', () =>
+      execute('session-1', { taskId: 'task-1', prompt: 'hello' }, {})
+    );
+  return { launch, sessionTokenService };
+}
+
+async function launchPrompt(session: Session) {
+  await createLaunch(session).launch();
   expect(mocks.spawnExecutor).toHaveBeenCalledOnce();
   return mocks.spawnExecutor.mock.calls[0][0].params as Record<string, unknown>;
 }
@@ -89,4 +95,24 @@ describe('execute handler prompt payload', () => {
     expect('model' in withoutConfig).toBe(false);
     expect('model' in withoutModel).toBe(false);
   });
+
+  it.each([
+    ['codex', 'claude-opus-5-5', 'claude-code'],
+    ['claude-code', 'gpt-6-astra', 'codex'],
+  ] as const)(
+    'refuses to launch a %s session persisted with another runtime model (%s)',
+    async (tool, model, owner) => {
+      const { launch, sessionTokenService } = createLaunch({
+        ...baseSession,
+        agentic_tool: tool,
+        model_config: { mode: 'exact', model },
+      } as Session);
+
+      await expect(launch()).rejects.toThrow(
+        `Model "${model}" is a ${owner} model and cannot run on a ${tool}`
+      );
+      expect(sessionTokenService.generateToken).not.toHaveBeenCalled();
+      expect(mocks.spawnExecutor).not.toHaveBeenCalled();
+    }
+  );
 });

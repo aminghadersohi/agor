@@ -55,6 +55,7 @@ import { isMCPServerNotUsableError } from '@agor/core/mcp';
 import {
   formatModelToolMismatchWarning,
   getCodexModelSelectionError,
+  getCrossAgenticToolModelError,
   isInvalidModelConfigError,
   isResolvedModelConfig,
   lintModelToolMatch,
@@ -478,7 +479,12 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     agenticTool: Session['agentic_tool'],
     modelConfig: Session['model_config'] | undefined
   ): void {
-    if (agenticTool !== 'codex' || !modelConfig) return;
+    if (!modelConfig) return;
+    // A curated model of another runtime can never run here; reject it on
+    // every write instead of letting the SDK fail the next turn.
+    const crossToolError = getCrossAgenticToolModelError(agenticTool, modelConfig);
+    if (crossToolError) throw new BadRequest(crossToolError);
+    if (agenticTool !== 'codex') return;
     const modelError = getCodexModelSelectionError(modelConfig);
     if (modelError) throw new BadRequest(modelError);
   }
