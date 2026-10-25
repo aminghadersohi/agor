@@ -384,6 +384,7 @@ function makeGatewayHarness(args: {
       status: SessionStatus.IDLE,
       sdk_home_scope: args.sessionSdkHomeScope ?? 'execution_home',
       agentic_tool: 'claude-code',
+      custom_context: { gateway_source: { channel_id: channel.id } },
       ...args.mappedSession,
     })),
   };
@@ -2102,6 +2103,10 @@ describe('GatewayService mapped-session runtime reconciliation', () => {
     sessionTool: 'claude-code' | 'codex';
     sessionPermissionMode: string;
     sessionPresetId?: string;
+    /** Omit to model a Session this channel created; `null` for none. */
+    sessionGatewaySource?: Record<string, unknown> | null;
+    /** Model a channel with no explicit agentic_config (user default). */
+    channelWithoutConfig?: boolean;
     materialized: typeof codexConfig | typeof claudeConfig;
   }) {
     vi.mocked(materializeAgenticToolConfiguration).mockResolvedValueOnce(
@@ -2109,10 +2114,12 @@ describe('GatewayService mapped-session runtime reconciliation', () => {
     );
     const channel = {
       ...slackChannel,
-      agentic_config: {
-        agent: args.channelAgent,
-        ...(args.channelPresetId ? { presetId: args.channelPresetId } : {}),
-      },
+      agentic_config: args.channelWithoutConfig
+        ? null
+        : {
+            agent: args.channelAgent,
+            ...(args.channelPresetId ? { presetId: args.channelPresetId } : {}),
+          },
     } as unknown as GatewayChannel;
     const harness = makeGatewayHarness({
       channel,
@@ -2121,6 +2128,13 @@ describe('GatewayService mapped-session runtime reconciliation', () => {
         agentic_tool: args.sessionTool,
         agentic_tool_preset_id: (args.sessionPresetId ?? null) as never,
         permission_config: { mode: args.sessionPermissionMode } as never,
+        ...(args.sessionGatewaySource !== undefined
+          ? {
+              custom_context: args.sessionGatewaySource
+                ? { gateway_source: args.sessionGatewaySource }
+                : {},
+            }
+          : {}),
       },
       connector: {
         fetchThreadHistory: vi.fn(async () => ({ has_more: false, messages: [] })),
@@ -2213,6 +2227,52 @@ describe('GatewayService mapped-session runtime reconciliation', () => {
     expect(sessionsPatch).toHaveBeenCalledExactlyOnceWith('sess-1', {
       agentic_tool_preset_id: 'preset-claude',
     });
+  });
+
+  it('does not overwrite a same-runtime session the channel did not create (outbound seed)', async () => {
+    // A Claude Code Session messaged out through the gateway owns its own
+    // model and effort; a reply in that thread must not adopt the channel's.
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'claude-code',
+      sessionTool: 'claude-code',
+      sessionPermissionMode: 'bypassPermissions',
+      sessionGatewaySource: null,
+      materialized: {
+        ...claudeConfig,
+        model_config: { mode: 'exact', model: 'claude-sonnet-5-5', effort: 'low' },
+      },
+    });
+
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'bypassPermissions' });
+  });
+
+  it('does not overwrite a same-runtime session another channel created', async () => {
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'claude-code',
+      sessionTool: 'claude-code',
+      sessionPermissionMode: 'acceptEdits',
+      sessionGatewaySource: { channel_id: 'other-channel', channel_type: 'slack' },
+      materialized: claudeConfig,
+    });
+
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'acceptEdits' });
+  });
+
+  it('uses the session mode when a channel without config has nothing to refresh', async () => {
+    const { sessionsPatch, promptCreate } = await followUp({
+      channelAgent: 'claude-code',
+      channelWithoutConfig: true,
+      sessionTool: 'claude-code',
+      sessionPermissionMode: 'default',
+      sessionPresetId: 'preset-claude',
+      materialized: claudeConfig,
+    });
+
+    expect(sessionsPatch).not.toHaveBeenCalled();
+    // The user default's mode differs; a preset-backed Session would reject it.
+    expect(promptCreate.mock.calls[0][0]).toMatchObject({ permissionMode: 'default' });
   });
 
   it('authorizes before resolving or touching a mismatched mapped session', async () => {

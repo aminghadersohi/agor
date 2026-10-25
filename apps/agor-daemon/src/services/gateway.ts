@@ -6567,14 +6567,24 @@ export class GatewayService {
       // it: that persisted e.g. a Codex model on a Claude Code Session. Only
       // refresh configuration when the runtimes match; otherwise keep the
       // Session's own config, including its permission mode for this prompt.
+      //
+      // The channel's configuration also only governs Sessions the channel
+      // created. A thread can be mapped to a Session that came from elsewhere
+      // (a Session that sent a proactive outbound message, or one adopted
+      // into the thread); its model, effort and permissions belong to that
+      // Session and a reply must never overwrite them.
       const mappedSession =
         authorizedMappedSession?.session_id === sessionId
           ? authorizedMappedSession
           : await this.sessionRepo.findById(sessionId);
       if (!mappedSession) throw new Error(`Gateway mapped session not found: ${sessionId}`);
-      if (mappedSession.agentic_tool !== agenticTool) {
+      const mappedGatewaySource = mappedSession.custom_context?.gateway_source as
+        | Partial<GatewaySource>
+        | undefined;
+      const channelOwnsMappedSession = mappedGatewaySource?.channel_id === channel.id;
+      if (mappedSession.agentic_tool !== agenticTool || !channelOwnsMappedSession) {
         console.warn(
-          `[gateway] Keeping ${mappedSession.agentic_tool} config on mapped session ${shortId(sessionId)}; channel ${shortId(channel.id)} runs ${agenticTool}`
+          `[gateway] Keeping ${mappedSession.agentic_tool} config on mapped session ${shortId(sessionId)}; channel ${shortId(channel.id)} runs ${agenticTool}${channelOwnsMappedSession ? '' : ' and did not create it'}`
         );
         permissionMode = mappedSession.permission_config?.mode;
       } else if (resolvedPresetId) {
@@ -6587,6 +6597,9 @@ export class GatewayService {
           model_config: gatewayModelConfig,
           permission_config: gatewayPermissionConfig,
         });
+      } else {
+        // No channel configuration to refresh: the Session's own mode applies.
+        permissionMode = mappedSession.permission_config?.mode;
       }
 
       // Touch timestamps
