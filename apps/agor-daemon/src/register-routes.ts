@@ -1,7 +1,11 @@
 import { resolveClaudeOAuthCapability } from '@agor/core/config';
 import { getPostgresSqlState, isPostgresDatabaseHandle } from '@agor/core/db';
-import { BRANCH_WORKSPACE_NOTIFICATION_DISMISS_SERVICE } from '@agor/core/types';
+import {
+  BRANCH_WORKSPACE_NOTIFICATION_DISMISS_SERVICE,
+  PRODUCT_ANALYTICS_SERVICE,
+} from '@agor/core/types';
 import { BranchWorkspaceNotificationService } from './services/branch-workspace-notification';
+import { ProductAnalyticsService } from './services/product-analytics.js';
 import { projectListSyncResult, stripListSyncQuery } from './utils/list-sync.js';
 import { sandboxManagedCredentialIsolationAvailable } from './utils/sandbox-wrap.js';
 /**
@@ -1717,6 +1721,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           accessTokenTtl: ACCESS_TOKEN_TTL,
           refreshTokenTtl: REFRESH_TOKEN_TTL,
           tenantClaim: tenantTokenClaim,
+          staticTenantId:
+            multiTenancy.mode === 'static' ? multiTenancy.static_tenant_id : undefined,
           debug: authEventDebug,
         }),
       ],
@@ -1884,6 +1890,14 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       create: [requireAuth],
     },
   });
+
+  registerAuthenticatedRoute(
+    app,
+    PRODUCT_ANALYTICS_SERVICE,
+    new ProductAnalyticsService(),
+    { create: { role: ROLES.VIEWER, action: 'record product analytics' } },
+    requireAuth
+  );
 
   // ============================================================================
   // Message streaming routes

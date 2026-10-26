@@ -101,6 +101,7 @@ import {
   CLI_LOGIN_ROUTE_PATHS,
   KNOWLEDGE_ROUTE_PATHS,
   MCP_CONNECT_ROUTE_PATHS,
+  MCP_OAUTH_RETURN_ROUTE_PATHS,
   MCP_RECOVERY_ROUTE_PATHS,
   RBAC_POLICY_PROTOTYPE_ROUTE_PATH,
 } from './surfaces/surfaceRegistry';
@@ -210,6 +211,11 @@ const loadMcpConnectPage = cacheRouteLoader(
   () => import('./pages/MCPOAuthConnectPage'),
   (module) => ({ default: module.MCPOAuthConnectPage })
 );
+const loadMcpOAuthReturnPage = cacheRouteLoader(
+  'mcp-oauth-return',
+  () => import('./pages/MCPOAuthReturnPage'),
+  (module) => ({ default: module.MCPOAuthReturnPage })
+);
 const loadCliLoginPage = cacheRouteLoader(
   'cli-login',
   () => import('./pages/CLILoginPage'),
@@ -260,6 +266,7 @@ const KnowledgePage = lazy(loadKnowledgePage);
 const ArtifactFullscreenPage = lazy(loadArtifactFullscreenPage);
 const MCPSlackRecoveryPage = lazy(loadMcpRecoveryPage);
 const MCPOAuthConnectPage = lazy(loadMcpConnectPage);
+const MCPOAuthReturnPage = lazy(loadMcpOAuthReturnPage);
 const CLILoginPage = lazy(loadCliLoginPage);
 const MobileApp = lazy(loadMobileApp);
 const StreamdownDemoPage = lazy(loadStreamdownDemoPage);
@@ -270,6 +277,7 @@ const routeModuleLoaders = {
   'artifact-fullscreen': loadArtifactFullscreenPage,
   'mcp-recovery': loadMcpRecoveryPage,
   'mcp-connect': loadMcpConnectPage,
+  'mcp-oauth-return': loadMcpOAuthReturnPage,
   'cli-login': loadCliLoginPage,
   demo: loadStreamdownDemoPage,
   mobile: loadMobileApp,
@@ -1954,6 +1962,8 @@ function AppContent() {
 
   const mcpConnectElement = <MCPOAuthConnectPage client={client} />;
 
+  const mcpOAuthReturnElement = <MCPOAuthReturnPage client={client} />;
+
   const cliLoginElement = (
     <CLILoginPage
       client={client}
@@ -2238,6 +2248,10 @@ function AppContent() {
 
             {MCP_CONNECT_ROUTE_PATHS.map((path) => (
               <Route key={path} path={path} element={mcpConnectElement} />
+            ))}
+
+            {MCP_OAUTH_RETURN_ROUTE_PATHS.map((path) => (
+              <Route key={path} path={path} element={mcpOAuthReturnElement} />
             ))}
 
             {CLI_LOGIN_ROUTE_PATHS.map((path) => (

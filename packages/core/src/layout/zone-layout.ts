@@ -3,6 +3,7 @@ import type {
   BoardObjectType,
   BoardPosition,
   LayoutDensityPolicy,
+  ZoneLayout,
   ZoneLayoutBinding,
   ZoneLayoutPolicy,
   ZoneLayoutPreset,
@@ -226,9 +227,10 @@ export function zoneLayoutBinding(
 
 /** Resolve a zone through the same normalizer used by UI, daemon, and MCP. */
 export function resolveZoneLayoutPolicy(
-  zone: { layout?: Partial<ZoneLayoutPolicy>; layout_binding?: ZoneLayoutBinding },
+  zone: { layout?: Partial<ZoneLayoutPolicy> | ZoneLayout; layout_binding?: ZoneLayoutBinding },
   boardDefaults?: Partial<ZoneLayoutPolicy>
 ): NormalizedZoneLayoutPolicy {
+  if (typeof zone.layout === 'string') return normalizeZoneLayoutPolicy(undefined);
   return normalizeZoneLayoutPolicy(
     zoneLayoutBinding(zone) === 'inherit' ? boardDefaults : zone.layout
   );
@@ -527,8 +529,9 @@ const isOneOf = <T extends string>(value: unknown, values: readonly T[]): value 
   typeof value === 'string' && values.includes(value as T);
 
 export function normalizeZoneLayoutPolicy(
-  policy: Partial<ZoneLayoutPolicy> | undefined
+  policy: Partial<ZoneLayoutPolicy> | ZoneLayout | undefined
 ): NormalizedZoneLayoutPolicy {
+  if (typeof policy === 'string') policy = undefined;
   const preset: ZoneLayoutPreset = isOneOf(policy?.preset, ZONE_LAYOUT_PRESETS)
     ? policy.preset
     : DEFAULT_ZONE_LAYOUT_POLICY.preset;
@@ -603,7 +606,7 @@ export function normalizeZoneLayoutPolicy(
  * transition so an enable action cannot acquire surface-specific defaults.
  */
 export function setZoneLayoutMode(
-  policy: Partial<ZoneLayoutPolicy> | undefined,
+  policy: Partial<ZoneLayoutPolicy> | ZoneLayout | undefined,
   mode: ZoneLayoutPolicy['mode']
 ): NormalizedZoneLayoutPolicy {
   const current = normalizeZoneLayoutPolicy(policy);

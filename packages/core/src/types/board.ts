@@ -308,6 +308,12 @@ export interface ZoneLayoutPolicy {
 }
 
 /**
+ * How a zone places its pinned branches and cards. `free` keeps stored
+ * positions; `row`, `column` and `grid` arrange them in display-only slots.
+ */
+export type ZoneLayout = 'free' | 'row' | 'column' | 'grid';
+
+/**
  * Zone rectangle object (for organizing sessions visually)
  */
 export interface ZoneBoardObject {
@@ -329,7 +335,7 @@ export interface ZoneBoardObject {
   /** Trigger configuration for sessions dropped into this zone */
   trigger?: ZoneTrigger;
   /** Optional persisted sorting and automatic layout policy. */
-  layout?: ZoneLayoutPolicy;
+  layout?: ZoneLayoutPolicy | ZoneLayout;
   /**
    * Board-default inheritance state. Missing means `override` so every zone
    * created before board defaults existed keeps its historical behaviour.
@@ -339,6 +345,9 @@ export interface ZoneBoardObject {
   fontSize?: number;
   /** Explicit stacking order. Falls back to the per-type default when unset. */
   zIndex?: number;
+  /** Placement of pinned entities. Missing means `free`. */
+  /** Pinned branch and card node ids in the order an arranged layout shows them. */
+  order?: string[];
 }
 
 /**

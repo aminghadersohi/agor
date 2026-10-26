@@ -116,13 +116,20 @@ import {
   completionCallbackTaskId,
 } from '../utils/durable-task-id.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
+import type { ExecutorCleanupCommandResult } from '../utils/executor-cleanup-command.js';
 import {
   type ExecutorHeartbeatCallbackPayload,
   ExecutorHeartbeatCallbackRunner,
 } from '../utils/executor-heartbeat-callback.js';
 import { ensureRepoOriginAlignedById } from '../utils/realign-repo-origin';
+import { taskFailureAnalytics } from '../utils/task-failure-analytics.js';
 import { deferWithTenantContext, withFreshTenantWrite } from '../utils/tenant-db-scope.js';
 import type { SessionParams, SessionsService } from './sessions';
+
+/** Internal settlement input; cleanup evidence is not persisted or accepted in Task patches. */
+export type TaskTerminationSettlementInput = TerminationSettlementInput & {
+  cleanupResult?: ExecutorCleanupCommandResult;
+};
 
 export interface TaskExecutorCredentialRevoker {
   revokeTaskTokens(taskId: string): Promise<number>;
@@ -586,7 +593,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
     );
   }
 
-  private trackTaskCompleted(task: Task): void {
+  private trackTaskCompleted(task: Task, cleanupResult?: ExecutorCleanupCommandResult): void {
     recordTaskSettlement(getDaemonMetrics(this.app), task);
     const normalized = task.normalized_sdk_response;
     analyticsLogger.track(
@@ -602,6 +609,7 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         context_window_limit: normalized?.contextWindowLimit ?? null,
         context_window_percentage: normalized?.contextUsageSnapshot?.percentage ?? null,
         has_error: Boolean(task.error_message),
+        ...taskFailureAnalytics(task, cleanupResult),
       },
       { userId: task.created_by }
     );
@@ -722,10 +730,11 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
   }
 
   async settleTermination(
-    input: TerminationSettlementInput,
+    input: TaskTerminationSettlementInput,
     params?: TaskParams
   ): Promise<TerminationSettlementResult> {
-    const result = await this.taskRepo.settleTermination(input);
+    const { cleanupResult, ...settlementInput } = input;
+    const result = await this.taskRepo.settleTermination(settlementInput);
     // Repository settlement is used by cooperative stop, watchdog, startup
     // reconciliation, and force-fail paths. It must retire the same exact Task
     // lease as a normal executor terminal patch.
@@ -758,9 +767,25 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         id: result.task.task_id,
         params,
       });
-      if (result.outcome === 'unverified') return;
+      if (result.outcome === 'unverified') {
+        // Failure to contain is not completion: the task is still stopping.
+        // Emit only after the winning fenced write and tenant-bound publication.
+        analyticsLogger.track(
+          'task.termination_unverified',
+          {
+            ...this.baseTaskAnalyticsProperties(result.task),
+            succeeded: false,
+            failure_reason: 'termination_unverified',
+          },
+          { userId: result.task.created_by }
+        );
+        return;
+      }
 
-      this.trackTaskCompleted(result.task);
+      this.trackTaskCompleted(
+        result.task,
+        input.outcome === 'verified_absent' ? cleanupResult : undefined
+      );
       const internalParams = { ...(params ?? {}), provider: undefined } as TaskParams;
       const isStop = result.task.status === TaskStatus.STOPPED;
       const isInterruptStop = isStop && (result.task.metadata?.interruptions?.length ?? 0) > 0;

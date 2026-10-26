@@ -1764,7 +1764,7 @@ describe('base URL resolution', () => {
   it('returns AGOR_BASE_URL env when set', async () => {
     process.env.AGOR_BASE_URL = 'https://agor.example.com';
     await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('https://agor.example.com');
-    await expect(getDaemonBaseUrl()).resolves.toBe('https://agor.example.com');
+    await expect(getDaemonBaseUrl(UNTOUCHED_DB)).resolves.toBe('https://agor.example.com');
     await expect(requirePublicBaseUrl()).resolves.toBe('https://agor.example.com');
   });
 
@@ -1778,7 +1778,7 @@ describe('base URL resolution', () => {
     );
 
     await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('https://agor.sandbox.example.com');
-    await expect(getDaemonBaseUrl()).resolves.toBe('https://agor.sandbox.example.com');
+    await expect(getDaemonBaseUrl(UNTOUCHED_DB)).resolves.toBe('https://agor.sandbox.example.com');
     await expect(requirePublicBaseUrl()).resolves.toBe('https://agor.sandbox.example.com');
   });
 
@@ -1813,7 +1813,9 @@ describe('base URL resolution', () => {
     );
 
     await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('https://agor-ui.sandbox.example.com');
-    await expect(getDaemonBaseUrl()).resolves.toBe('https://agor-ui.sandbox.example.com');
+    await expect(getDaemonBaseUrl(UNTOUCHED_DB)).resolves.toBe(
+      'https://agor-ui.sandbox.example.com'
+    );
     await expect(requirePublicBaseUrl()).resolves.toBe('https://agor-ui.sandbox.example.com');
   });
 
@@ -1830,13 +1832,13 @@ describe('base URL resolution', () => {
     );
 
     await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('http://localhost:5173');
-    await expect(getDaemonBaseUrl()).resolves.toBe('http://[::1]:3030');
+    await expect(getDaemonBaseUrl(UNTOUCHED_DB)).resolves.toBe('http://[::1]:3030');
     await expect(requirePublicBaseUrl()).resolves.toBe('http://[::1]:3030');
   });
 
   it('throws PublicBaseUrlNotConfiguredError when neither env nor config is set', async () => {
     await expect(getBaseUrl(UNTOUCHED_DB)).resolves.toBe('http://localhost:3030');
-    await expect(getDaemonBaseUrl()).resolves.toBe('http://localhost:3030');
+    await expect(getDaemonBaseUrl(UNTOUCHED_DB)).resolves.toBe('http://localhost:3030');
     await expect(requirePublicBaseUrl()).rejects.toBeInstanceOf(PublicBaseUrlNotConfiguredError);
   });
 

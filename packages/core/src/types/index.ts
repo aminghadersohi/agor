@@ -36,6 +36,7 @@ export * from './opencode-native-state';
 export * from './opencode-ollama';
 export * from './power-management';
 export * from './presence';
+export * from './product-analytics.js';
 export * from './profile-image';
 export * from './provider-oauth';
 export * from './realtime';

@@ -527,6 +527,12 @@ asserts containment (including suppression of delayed launches/retries). On exit
 error message with the shared `executorOutOfMemoryMessage` text; any malformed or
 unknown result means no cause, never "not contained".
 
+Confirmed helper evidence is passed to post-commit task analytics, not persisted
+or replayed. Analytics reports the recorded outcome without parsing error prose
+or changing task status. Unverified containment is a separate nonterminal event;
+losing/stale settlements emit nothing. Existing tenant attribution and operator
+analytics enablement/exclusions apply.
+
 `TaskRepository.beginCleanupAttempt` records one attempt under the existing
 coordination token before external effects. The marker survives cause changes,
 lease expiry and daemon restart: replacement coordinators settle an uncertain

@@ -206,8 +206,8 @@ describe('board patch custom actions', () => {
 
     // applyLayout adds one complete layout event plus the board/object
     // compatibility events; each must retain the authorized request params.
-    expect(patchHook.match(/params: context\.params/g)).toHaveLength(9);
-    expect(patchHook.match(/emitServiceEvent\(app/g)).toHaveLength(9);
+    expect(patchHook.match(/params: context\.params/g)).toHaveLength(10);
+    expect(patchHook.match(/emitServiceEvent\(app/g)).toHaveLength(10);
     const noOpGuard = patchHook.indexOf('if (result.changed === false)');
     const firstLayoutEvent = patchHook.indexOf('event: BOARD_LAYOUT_APPLIED_EVENT');
     expect(patchHook).toContain('context.event = null');

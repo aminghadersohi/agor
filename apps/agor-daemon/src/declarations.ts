@@ -15,7 +15,6 @@ import type {
   TaskTerminationCoordinationClaimResult,
   TerminationClaimInput,
   TerminationClaimResult,
-  TerminationSettlementInput,
   TerminationSettlementResult,
 } from '@agor/core/db';
 import type { ExpressApplication, Service } from '@agor/core/feathers';
@@ -60,6 +59,7 @@ import type {
   SessionReparentInput,
   SessionRetargetCallbackInput,
 } from './services/sessions.js';
+import type { TaskTerminationSettlementInput } from './services/tasks.js';
 
 // Re-export core types for convenience
 export type AuthenticatedUser = CoreAuthenticatedUser;
@@ -283,7 +283,7 @@ export interface TasksServiceImpl extends Service<Task, Partial<Task>, FeathersP
     params?: FeathersParams
   ): Promise<Task | null>;
   settleTermination(
-    input: TerminationSettlementInput,
+    input: TaskTerminationSettlementInput,
     params?: FeathersParams
   ): Promise<TerminationSettlementResult>;
 }
@@ -387,6 +387,13 @@ export interface BoardsServiceImpl extends Service<Board, Partial<Board>, Feathe
     patches: Record<string, unknown>,
     params?: FeathersParams
   ): Promise<Board>;
+  placeZoneEntities(
+    boardId: string,
+    zoneId: string,
+    size: { width: number; height: number },
+    positions: Record<string, { x: number; y: number }>,
+    params?: FeathersParams
+  ): Promise<{ board: Board; moved: import('@agor/core/types').BoardEntityObject[] }>;
   deleteZone(
     boardId: string,
     zoneId: string,

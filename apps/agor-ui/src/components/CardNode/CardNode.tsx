@@ -52,6 +52,8 @@ export interface CardNodeData {
   onToggleCompact?: (cardId: string, compact: boolean) => void;
   /** Keep a called-out card's rolling Auto Zone deferral alive. */
   onAutoZoneInteraction?: (cardId: string) => void;
+  /** Width of the arranged-zone slot to fill instead of the standard width. */
+  slotWidth?: number;
 }
 
 const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
@@ -105,7 +107,7 @@ const CardNodeComponent = ({ data }: { data: CardNodeData }) => {
       onPointerDownCapture={() => onAutoZoneInteraction?.(card.card_id)}
       onFocusCapture={() => onAutoZoneInteraction?.(card.card_id)}
       style={{
-        width: GENERIC_BOARD_CARD_LAYOUT.width,
+        width: data.slotWidth ?? GENERIC_BOARD_CARD_LAYOUT.width,
         background: token.colorBgContainer,
         // Per-edge longhands, not `border` + `borderLeft`. React applies only
         // the style keys that changed between renders, so a shorthand that

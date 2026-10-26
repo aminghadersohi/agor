@@ -1550,6 +1550,29 @@ describe('BoardRepository zone layout defaults', () => {
     }
   );
 
+  dbTest('preserves upstream arrangement when inherited board policy changes', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const board = await repo.create(
+      createBoardData({
+        objects: {
+          zone: {
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 600,
+            height: 400,
+            label: 'Slots',
+            layout: 'grid',
+            layout_binding: 'inherit',
+          },
+        },
+      })
+    );
+    const result = await repo.setZoneLayoutDefaults(board.board_id, { mode: 'auto' });
+    expect(result.changed_zone_ids).toEqual([]);
+    expect(result.board.objects?.zone).toMatchObject({ layout: 'grid' });
+  });
+
   dbTest(
     'returns a zero-write result and rejects a stale two-tab source snapshot',
     async ({ db }) => {
@@ -1587,7 +1610,10 @@ describe('BoardRepository zone layout defaults', () => {
       const expected = {
         defaults: board.zone_layout_defaults!,
         zones: {
-          zone: { binding: 'inherit' as const, layout: zoneObject.layout! },
+          zone: {
+            binding: 'inherit' as const,
+            layout: normalizeZoneLayoutPolicy(zoneObject.layout),
+          },
         },
       };
 
@@ -1602,7 +1628,7 @@ describe('BoardRepository zone layout defaults', () => {
       await repo.upsertBoardObject(board.board_id, 'zone', {
         ...zoneObject,
         layout_binding: 'override',
-        layout: { ...zoneObject.layout!, gap: 40 },
+        layout: { ...normalizeZoneLayoutPolicy(zoneObject.layout), gap: 40 },
       });
       await expect(
         repo.setZoneLayoutDefaults(board.board_id, { gap: 4 }, { expected })
@@ -2815,4 +2841,40 @@ describe('BoardRepository normalized permission boundary', () => {
       expect(otherAccess.capabilities).toEqual([]);
     }
   );
+});
+
+describe('BoardRepository.batchUpsertBoardObjects zone arrangement', () => {
+  dbTest('keeps a zone layout and order the write leaves out', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const board = await repo.create(
+      createBoardData({
+        objects: {
+          'zone-1': {
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            label: 'A',
+            layout: 'grid',
+            order: ['b', 'a'],
+          },
+        },
+      })
+    );
+
+    const renamed = await repo.batchUpsertBoardObjects(board.board_id, {
+      'zone-1': { type: 'zone', x: 0, y: 0, width: 1, height: 1, label: 'Renamed' },
+    });
+    expect(renamed.objects?.['zone-1']).toMatchObject({
+      label: 'Renamed',
+      layout: 'grid',
+      order: ['b', 'a'],
+    });
+
+    const freed = await repo.batchUpsertBoardObjects(board.board_id, {
+      'zone-1': { type: 'zone', x: 0, y: 0, width: 1, height: 1, label: 'Renamed', layout: 'free' },
+    });
+    expect(freed.objects?.['zone-1']).toMatchObject({ layout: 'free' });
+  });
 });

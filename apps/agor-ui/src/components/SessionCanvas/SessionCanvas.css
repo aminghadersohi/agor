@@ -342,9 +342,19 @@
   transition: none;
 }
 
+/* Cards in arranged zones glide to a new slot; never while something is being dragged. */
+.zone-grid-animate .react-flow__node.zone-grid-child {
+  transition: transform 200ms ease;
+}
+
+.canvas-dragging.zone-grid-animate .react-flow__node.zone-grid-child {
+  transition: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .react-flow.agor-dealing .react-flow__node,
-  .react-flow.agor-dealing .react-flow__node-zone {
+  .react-flow.agor-dealing .react-flow__node-zone,
+  .zone-grid-animate .react-flow__node.zone-grid-child {
     transition: none;
   }
 }

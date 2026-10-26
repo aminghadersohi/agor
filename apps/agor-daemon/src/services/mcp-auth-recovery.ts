@@ -47,6 +47,9 @@ export class MCPLinkAdmissionError extends Forbidden {}
 /** A hosted-callback (customer-owned app) flow needs the user's bound Agor Cloud account. */
 export class MCPCloudIdentityRequiredError extends Forbidden {}
 
+/** The workspace UI address that finishes a direct-callback sign-in is not known. */
+export class MCPOAuthWorkspaceUrlUnavailableError extends PublicBaseUrlNotConfiguredError {}
+
 function target(mcpServerId?: string) {
   return {
     ...(mcpServerId ? { mcp_server_id: mcpServerId as MCPServerID } : {}),
@@ -71,7 +74,8 @@ type TrustedRecoveryErrorConstructor =
   | typeof BadRequest
   | typeof OAuthDCRFailure
   | typeof OAuthConfigurationError
-  | typeof PublicBaseUrlNotConfiguredError;
+  | typeof PublicBaseUrlNotConfiguredError
+  | typeof MCPOAuthWorkspaceUrlUnavailableError;
 
 function safeInstanceOf(error: unknown, errorClass: TrustedRecoveryErrorConstructor) {
   try {
@@ -300,6 +304,16 @@ export function classifyMCPAuthRecovery(
           message:
             'OAuth metadata could not be discovered. Verify the MCP URL or save explicit authorization and token endpoints on this MCP server, then retry.',
         };
+  }
+
+  if (safeInstanceOf(error, MCPOAuthWorkspaceUrlUnavailableError)) {
+    return {
+      ...common,
+      category: 'configuration_required',
+      action: 'retry',
+      message:
+        "Agor can't finish this sign-in because this workspace's address isn't known yet. Open the workspace through Agor Cloud, then connect again.",
+    };
   }
 
   if (safeInstanceOf(error, PublicBaseUrlNotConfiguredError)) {

@@ -26,6 +26,7 @@ import type {
   BoardLayoutBatch,
   BoardLayoutContext,
   BoardLayoutSettings,
+  ZoneLayout,
 } from '@agor/core/types';
 import type {
   AgorClient,
@@ -428,6 +429,12 @@ interface UseBoardObjectsProps {
    * store's board (and again after the reconnect, when the reply was lost).
    */
   onWriteFailed?: (error: unknown) => void;
+  /** Switch a zone between free, row, column and grid (see `ZoneNodeData.onLayoutChange`). */
+  onZoneLayoutChange?: (
+    objectId: string,
+    layout: ZoneLayout,
+    ticket: BoardWriteTicket | null
+  ) => Promise<boolean>;
 }
 
 type ZoneEntry = [string, Extract<BoardObject, { type: 'zone' }>];
@@ -537,6 +544,7 @@ export const useBoardObjects = ({
   onZoneDraftLost,
   guard,
   onWriteFailed,
+  onZoneLayoutChange,
 }: UseBoardObjectsProps) => {
   // Use ref to avoid recreating callbacks when board changes
   const boardRef = useRef(board);
@@ -545,6 +553,8 @@ export const useBoardObjects = ({
   nodesRef.current = nodes;
   const guardRef = useRef(guard);
   guardRef.current = guard;
+  const onZoneLayoutChangeRef = useRef(onZoneLayoutChange);
+  onZoneLayoutChangeRef.current = onZoneLayoutChange;
   const canEdit = guard.canMutate;
   // Artifact lifecycle authorization is creator/admin based rather than
   // board.edit based, but its board object is still board data: it needs the
@@ -1046,6 +1056,17 @@ export const useBoardObjects = ({
     [client, showError]
   );
 
+  // An arranged zone first saves its cards where they are shown, so they stay put once it is gone.
+  const keepZoneCardsInPlace = useCallback(
+    async (objectId: string, ticket: BoardWriteTicket | null) => {
+      const saved = (await onZoneLayoutChangeRef.current?.(objectId, 'free', ticket)) ?? true;
+      if (saved && guardRef.current.isCurrent(ticket)) return true;
+      if (saved) guardRef.current.warnDropped();
+      return false;
+    },
+    []
+  );
+
   /**
    * Delete a zone (branch-centric: zones can pin branches)
    */
@@ -1060,6 +1081,8 @@ export const useBoardObjects = ({
         guardRef.current.warnDropped();
         return;
       }
+
+      if (!(await keepZoneCardsInPlace(objectId, ticket))) return;
 
       // Mark as deleted to prevent re-appearance during WebSocket updates
       deletedObjectsRef.current.add(objectId);
@@ -1085,7 +1108,7 @@ export const useBoardObjects = ({
         onWriteFailedRef.current?.(error);
       }
     },
-    [client, setNodes, deletedObjectsRef, showError]
+    [client, setNodes, deletedObjectsRef, showError, keepZoneCardsInPlace]
   );
 
   /**
@@ -1107,6 +1130,7 @@ export const useBoardObjects = ({
           : type === 'markdown'
             ? 'delete the note'
             : 'delete the artifact';
+      if (type === 'zone' && !(await keepZoneCardsInPlace(objectId, ticket))) return;
       // Mark as deleted to prevent re-appearance during WebSocket updates
       deletedObjectsRef.current.add(objectId);
 
@@ -1130,7 +1154,7 @@ export const useBoardObjects = ({
         onWriteFailedRef.current?.(error);
       }
     },
-    [client, setNodes, deletedObjectsRef, showError]
+    [client, setNodes, deletedObjectsRef, showError, keepZoneCardsInPlace]
   );
 
   /**
@@ -1678,7 +1702,7 @@ export const useBoardObjects = ({
         zoneId,
         width: nextZoneWidth,
         height: nextZoneHeight,
-        layout: zone.layout,
+        layout: normalizeZoneLayoutPolicy(zone.layout),
         children: children.flatMap(({ node }) => {
           const arrangedNode = reflowedById.get(node.id) ?? changedById.get(node.id);
           const arranged = placementById.get(node.id);
@@ -2254,7 +2278,7 @@ export const useBoardObjects = ({
               fontSize: object.fontSize,
               fontScale: object.fontScale,
               status: object.status,
-              layout: object.layout,
+              layout: normalizeZoneLayoutPolicy(object.layout),
               resizable: true,
               minWidth: persistedZone?.type === 'zone' ? persistedZone.width : object.width,
               minHeight: persistedZone?.type === 'zone' ? persistedZone.height : object.height,
@@ -2513,7 +2537,7 @@ export const useBoardObjects = ({
             zoneId: arrangedZone.id,
             width: arrangedZone.width,
             height: arrangedZone.height,
-            layout: zoneObject.layout,
+            layout: normalizeZoneLayoutPolicy(zoneObject.layout),
             children: arrangedZone.items.flatMap((item) => {
               const sourceNode = currentNodes.find((node) => node.id === item.id);
               if (!sourceNode) return [];
@@ -2844,7 +2868,7 @@ export const useBoardObjects = ({
       zoneId,
       width: zone.width,
       height: zone.height,
-      layout: zone.layout,
+      layout: normalizeZoneLayoutPolicy(zone.layout),
       children: nodes
         .filter((node) => {
           if (node.parentId === zoneId && (node.type === 'branchNode' || node.type === 'cardNode'))
@@ -3068,6 +3092,8 @@ export const useBoardObjects = ({
           layout: objectData.type === 'zone' ? objectData.layout : undefined,
           layout_binding: objectData.type === 'zone' ? objectData.layout_binding : undefined,
           boardZoneLayoutDefaults: board?.zone_layout_defaults,
+          order: objectData.type === 'zone' ? objectData.order : undefined,
+          onLayoutChange: onZoneLayoutChange,
           pinnedItemCount,
           positionableItemCount,
           densityExpandableItemCount,
@@ -3117,6 +3143,7 @@ export const useBoardObjects = ({
       onEditMarkdown,
       onZoneDraftLost,
       board?.zone_layout_defaults,
+      onZoneLayoutChange,
       canEdit,
       guard.capture,
       artifactGuard.capture,

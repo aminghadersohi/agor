@@ -513,3 +513,14 @@ describe('zone resize policy', () => {
     expect(normalizeZoneLayoutPolicy(once)).toEqual(once);
   });
 });
+
+describe('upstream slot arrangement coexistence', () => {
+  it.each(['free', 'row', 'column', 'grid'] as const)(
+    'does not also run the fork policy engine for %s, even with stale inheritance',
+    (layout) => {
+      expect(
+        resolveZoneLayoutPolicy({ layout, layout_binding: 'inherit' }, { mode: 'auto' }).mode
+      ).toBe('manual');
+    }
+  );
+});

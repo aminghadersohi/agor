@@ -21,6 +21,7 @@ import {
 } from '@agor/core/types';
 import type { TasksServiceImpl } from './declarations.js';
 import {
+  type ContainmentResult,
   containExecutorProcess,
   DEFAULT_EXECUTOR_KILL_GRACE_MS,
   DEFAULT_EXECUTOR_TERM_GRACE_MS,
@@ -30,6 +31,7 @@ import {
 
 import {
   DEFAULT_CLEANUP_TIMEOUT_MS,
+  type ExecutorCleanupCommandResult,
   runExecutorCleanupCommand,
 } from './utils/executor-cleanup-command.js';
 
@@ -223,6 +225,7 @@ async function containRemoteExecution(input: TerminationInput, task: Task, waite
   return {
     status: 'verified_absent' as const,
     helperConfirmed: true as const,
+    cleanupResult: result,
     // The helper's optional result explains why the executor stopped.
     errorMessage:
       result.cause === 'oom_killed'
@@ -336,7 +339,11 @@ async function runContainment(
   // Remote containment is proven by scoped cooperative quiescence or the
   // trusted cleanup helper. Local mode additionally verifies PGID absence.
   const remoteMode = current.executor_mode === 'templated';
-  const containment = input.absenceVerified
+  const containment: ContainmentResult & {
+    helperConfirmed?: boolean;
+    cleanupResult?: ExecutorCleanupCommandResult;
+    errorMessage?: string;
+  } = input.absenceVerified
     ? ({ status: 'verified_absent' } as const)
     : remoteMode
       ? executorQuiesced
@@ -359,7 +366,7 @@ async function runContainment(
   }
   if (!coordinationToken) return { status: 'condition_changed', task: current };
   // Hosted OpenCode runs inside the executor's own Job, so its acknowledged quiescence covers the server.
-  const helperConfirmed = 'helperConfirmed' in containment && containment.helperConfirmed;
+  const helperConfirmed = containment.helperConfirmed;
   const hostedOpenCodeQuiesced =
     remoteMode &&
     (executorQuiesced || helperConfirmed) &&
@@ -430,11 +437,9 @@ async function runContainment(
       {
         taskId: current.task_id,
         outcome: 'verified_absent',
-        errorMessage:
-          'errorMessage' in containment && typeof containment.errorMessage === 'string'
-            ? containment.errorMessage
-            : input.errorMessage,
+        errorMessage: containment.errorMessage ?? input.errorMessage,
         coordinationToken,
+        cleanupResult: containment.cleanupResult,
       },
       { ...internalParams(input.params), suppressTerminalQueueProcessing: true } as Params
     )
