@@ -1412,3 +1412,80 @@ describe('materializeScheduleAgenticToolConfig', () => {
     }
   );
 });
+
+describe('scheduler execution policy admission', () => {
+  dbTest(
+    'freezes skill opt-out through crash recovery and later schedule edits',
+    async ({ db }) => {
+      const { creator, schedule } = await seedRunnableSchedule(
+        db,
+        { email: `skill-policy-${generateId()}@example.com`, name: 'Creator' },
+        { agentic_tool: 'claude-code' }
+      );
+      await new ScheduleRepository(db).update(schedule.schedule_id, { skills_enabled: false });
+      const { app } = createSchedulerApp(db);
+      const killed = new SchedulerService(db, app, {
+        testHooks: {
+          afterSessionAdmission: () => {
+            throw new Error('simulated process death');
+          },
+        },
+      });
+      await expect(
+        killed.executeScheduleNow({
+          scheduleId: schedule.schedule_id,
+          triggeredBy: creator.user_id,
+        })
+      ).rejects.toThrow('simulated process death');
+      await new ScheduleRepository(db).update(schedule.schedule_id, { skills_enabled: true });
+      const recovered = await new SchedulerService(db, app).executeScheduleNow({
+        scheduleId: schedule.schedule_id,
+        triggeredBy: creator.user_id,
+      });
+      expect(
+        recovered.custom_context?.scheduled_run?.schedule_config_snapshot?.skills_enabled
+      ).toBe(false);
+      expect(await new SessionRepository(db).findByScheduleId(schedule.schedule_id)).toHaveLength(
+        1
+      );
+    }
+  );
+
+  dbTest('a pause winning the admission lock fences a stale cron candidate', async ({ db }) => {
+    const { schedule } = await seedRunnableSchedule(
+      db,
+      { email: `pause-race-${generateId()}@example.com`, name: 'Creator' },
+      { agentic_tool: 'claude-code' }
+    );
+    const { app, prompt } = createSchedulerApp(db);
+    const lock = ScheduleRepository.prototype.lockForRunAdmission;
+    const pause = vi
+      .spyOn(ScheduleRepository.prototype, 'lockForRunAdmission')
+      .mockImplementationOnce(async function (this: ScheduleRepository, id) {
+        await lock.call(this, id);
+        await this.update(id, { enabled: false });
+      });
+    try {
+      const scheduler = new SchedulerService(db, app);
+      await (
+        scheduler as unknown as {
+          spawnScheduledSession(
+            schedule: Schedule,
+            scheduledRunAt: number,
+            now: number,
+            options: { source: 'cron' }
+          ): Promise<Session | null>;
+        }
+      ).spawnScheduledSession(schedule, NOW, NOW, { source: 'cron' });
+      expect(prompt).not.toHaveBeenCalled();
+      expect(await new SessionRepository(db).findByScheduleId(schedule.schedule_id)).toHaveLength(
+        0
+      );
+      expect((await new ScheduleRepository(db).findById(schedule.schedule_id))?.enabled).toBe(
+        false
+      );
+    } finally {
+      pause.mockRestore();
+    }
+  });
+});

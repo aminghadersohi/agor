@@ -149,6 +149,8 @@ interface ScheduleFormValues extends AgenticFormValues {
   timezone?: string;
   agenticTool?: AgenticToolName;
   enabled?: boolean;
+  skills_enabled?: boolean;
+  failure_threshold?: number;
   retention?: number;
   allow_concurrent_runs?: boolean;
 }
@@ -222,6 +224,8 @@ export const ScheduleForm: React.FC<ScheduleFormProps> = ({
         schedule?.agentic_tool_config?.preset_id ??
         INLINE_AGENTIC_CONFIGURATION,
       enabled: schedule?.enabled ?? true,
+      skills_enabled: schedule?.skills_enabled ?? true,
+      failure_threshold: schedule?.failure_threshold ?? 3,
       retention: schedule?.retention ?? 5,
       allow_concurrent_runs: schedule?.allow_concurrent_runs ?? false,
       ...configValues,
@@ -352,6 +356,8 @@ export const ScheduleForm: React.FC<ScheduleFormProps> = ({
                   ),
         mcp_server_ids: all.mcpServerIds ?? [],
         enabled: all.enabled ?? true,
+        skills_enabled: all.skills_enabled ?? true,
+        failure_threshold: all.failure_threshold ?? 3,
         retention: all.retention ?? 5,
         allow_concurrent_runs: all.allow_concurrent_runs ?? false,
       };
@@ -531,6 +537,21 @@ export const ScheduleForm: React.FC<ScheduleFormProps> = ({
               label: <Typography.Text strong>Schedule Settings</Typography.Text>,
               children: (
                 <>
+                  <Form.Item
+                    name="skills_enabled"
+                    label="Load skills and slash commands"
+                    valuePropName="checked"
+                    extra="Turn off for script-runner schedules (Claude Code or Gemini). Existing permissions and context files still apply."
+                  >
+                    <Switch />
+                  </Form.Item>
+                  <Form.Item
+                    name="failure_threshold"
+                    label="Pause after consecutive failures"
+                    extra="Default 3. Set 0 to disable. Only the initial cron Task counts; later continuations do not."
+                  >
+                    <InputNumber min={0} max={1000} precision={0} />
+                  </Form.Item>
                   <Form.Item name="retention" label="Retention (sessions to keep; 0 = keep all)">
                     <InputNumber min={0} />
                   </Form.Item>

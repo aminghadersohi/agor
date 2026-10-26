@@ -1902,6 +1902,8 @@ export function createExecuteHandler(
         messageSource: data.messageSource,
         promptOrigin: data.promptOrigin,
         ...(skillsIndex ? { skillsIndex } : {}),
+        skillsEnabled:
+          session.custom_context?.scheduled_run?.schedule_config_snapshot?.skills_enabled ?? true,
         // Authoritative sandbox mount inputs (consumed in spawn-executor →
         // buildSandboxWrap). Undefined when the sandbox / per_user home is off.
         sandboxBaseRepoPath,

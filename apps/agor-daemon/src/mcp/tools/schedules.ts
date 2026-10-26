@@ -216,6 +216,19 @@ export function registerScheduleTools(server: McpServer, ctx: McpContext): void 
             .optional()
             .describe('MCP servers to attach to spawned sessions.'),
           enabled: z.boolean().optional().describe('Whether to fire (default: true)'),
+          skills_enabled: z
+            .boolean()
+            .optional()
+            .describe(
+              'Load skills and slash commands (default true); false selects script-runner mode.'
+            ),
+          failure_threshold: z
+            .number()
+            .int()
+            .min(0)
+            .max(1000)
+            .optional()
+            .describe('Pause after N consecutive failed cron executions (default 3); 0 disables.'),
           allow_concurrent_runs: z
             .boolean()
             .optional()
@@ -273,6 +286,8 @@ export function registerScheduleTools(server: McpServer, ctx: McpContext): void 
         agentic_tool_config: args.agentic_tool_config as ScheduleAgenticToolConfig,
         mcp_server_ids: args.mcp_server_ids,
         enabled: args.enabled,
+        skills_enabled: args.skills_enabled,
+        failure_threshold: args.failure_threshold,
         allow_concurrent_runs: args.allow_concurrent_runs,
         retention: args.retention,
       };
@@ -298,6 +313,8 @@ export function registerScheduleTools(server: McpServer, ctx: McpContext): void 
         agentic_tool_config: agenticToolConfigSchema.optional(),
         mcp_server_ids: z.array(mcpRequiredId('mcp_server_ids[]', 'MCP server')).optional(),
         enabled: z.boolean().optional(),
+        skills_enabled: z.boolean().optional(),
+        failure_threshold: z.number().int().min(0).max(1000).optional(),
         allow_concurrent_runs: z.boolean().optional(),
         retention: mcpOptionalNonNegativeInt(
           'retention',

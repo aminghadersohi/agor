@@ -141,8 +141,15 @@ describe('HomeSchedulesSection', () => {
       </App>
     );
     await screen.findByText('Daily review');
-    listeners.get('patched')?.({ ...first, name: 'Daily shipping review' });
+    listeners.get('patched')?.({
+      ...first,
+      name: 'Daily shipping review',
+      enabled: false,
+      pause_reason: 'repeated_failures',
+      attention_required: true,
+    });
     expect(await screen.findByText('Daily shipping review')).toBeVisible();
+    expect((await screen.findAllByText(/Paused: repeated failures/)).length).toBeGreaterThan(0);
   });
 
   it('refetches after a socket reconnect and ignores the call lost in the drop', async () => {

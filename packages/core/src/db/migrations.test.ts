@@ -1843,6 +1843,13 @@ describe('front desk / profile image watermark reconciliation', () => {
       // And the restored session attention (SQLite cannot ADD COLUMN conditionally).
       await executeRaw(db, sql`DROP TABLE session_attention_states`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
+      // Restore the pre-policy schema along with the rewound ledger, not a
+      // current schema that would replay SQLite's unconditional ADD COLUMN.
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN skills_enabled`);
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN failure_threshold`);
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN consecutive_failures`);
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN pause_reason`);
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN attention_required`);
       // And upstream's Teams gateway HA and failed-deletion discovery objects.
       await dropTeamsAndDeletionDiscoveryObjects(db);
       await runMigrations(db, { allowOfflineCutover: true });
@@ -1863,6 +1870,13 @@ describe('front desk / profile image watermark reconciliation', () => {
       // And the restored session attention (SQLite cannot ADD COLUMN conditionally).
       await executeRaw(db, sql`DROP TABLE session_attention_states`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
+      // Restore the pre-policy schema along with the rewound ledger, not a
+      // current schema that would replay SQLite's unconditional ADD COLUMN.
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN skills_enabled`);
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN failure_threshold`);
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN consecutive_failures`);
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN pause_reason`);
+      await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN attention_required`);
       // And upstream's Teams gateway HA and failed-deletion discovery objects.
       await dropTeamsAndDeletionDiscoveryObjects(db);
       await runMigrations(db, { allowOfflineCutover: true });

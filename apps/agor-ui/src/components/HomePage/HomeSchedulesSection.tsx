@@ -48,6 +48,8 @@ function scheduleSort(a: Schedule, b: Schedule): number {
 }
 
 function nextRunLabel(schedule: Schedule): string {
+  if (schedule.pause_reason === 'repeated_failures')
+    return 'Paused: repeated failures — needs attention';
   if (!schedule.enabled) return 'Paused';
   if (!schedule.next_run_at) return 'Not scheduled';
   return formatRelativeTime(new Date(schedule.next_run_at).toISOString());
@@ -245,8 +247,20 @@ export function HomeSchedulesSection({
                       {schedule.name}
                     </Typography.Text>
                     <Badge
-                      status={schedule.enabled ? 'processing' : 'default'}
-                      text={schedule.enabled ? 'Active' : 'Paused'}
+                      status={
+                        schedule.attention_required
+                          ? 'warning'
+                          : schedule.enabled
+                            ? 'processing'
+                            : 'default'
+                      }
+                      text={
+                        schedule.pause_reason === 'repeated_failures'
+                          ? 'Paused: repeated failures — needs attention'
+                          : schedule.enabled
+                            ? 'Active'
+                            : 'Paused'
+                      }
                     />
                   </Flex>
                   <Flex

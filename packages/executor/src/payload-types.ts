@@ -204,6 +204,7 @@ export const PromptPayloadSchema = BasePayloadSchema.extend({
      * harness. Older executors drop it because this schema is non-strict.
      */
     skillsIndex: z.string().max(16_000).optional(),
+    skillsEnabled: z.boolean().optional(),
   }),
 });
 

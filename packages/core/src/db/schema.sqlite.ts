@@ -1197,6 +1197,11 @@ export const schedules = sqliteTable(
     mcp_server_ids: t.json<string[]>('mcp_server_ids'),
 
     enabled: t.bool('enabled').notNull().default(true),
+    skills_enabled: t.bool('skills_enabled').notNull().default(true),
+    failure_threshold: integer('failure_threshold').notNull().default(3),
+    consecutive_failures: integer('consecutive_failures').notNull().default(0),
+    pause_reason: text('pause_reason'),
+    attention_required: t.bool('attention_required').notNull().default(false),
     allow_concurrent_runs: t.bool('allow_concurrent_runs').notNull().default(false),
     retention: integer('retention').notNull().default(5), // 0 = keep all
 

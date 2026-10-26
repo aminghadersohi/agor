@@ -135,6 +135,19 @@ export function createMigrationImpactRegistry(
 }
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
+  [
+    '9033_schedule_execution_policy',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Adds defaulted schedule skill policy and failure-guard state. Older binaries ignore the columns; failure accounting requires the new daemon.',
+      }),
+    },
+  ],
   // SQLite and PostgreSQL number the same Teams migration differently.
   ...['0117_teams_gateway_ha', '0118_teams_gateway_ha'].map(
     (name) =>

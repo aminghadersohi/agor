@@ -79,6 +79,7 @@ import {
 } from '../database-wrapper';
 import {
   type SessionRow,
+  schedules,
   sessionMcpServers,
   sessionReminders,
   sessions,
@@ -104,6 +105,7 @@ import { ExecutorSessionTokenAuthorityRepository } from './executor-session-toke
 import { deepMerge } from './merge-utils';
 import { acceptOpenCodeCheckpoint, assertNoOpenOpenCodeCheckpoint } from './opencode-checkpoints';
 import { countRecordedTools } from './recorded-tool-count';
+import { recordScheduledTaskOutcome } from './schedule-outcomes';
 
 export const MAX_COMPACTED_PROMPT_BYTES = 32 * 1024;
 export const MAX_EDITABLE_QUEUED_PROMPT_BYTES = 32 * 1024;
@@ -809,7 +811,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
   }
 
   /**
-   * Lock a Task together with its owning Session, always Session first.
+   * Lock a Task together with its owning Session (Session before Task).
+   * Scheduled outcome settlement adds an outer Schedule lock for FK ordering.
    *
    * Session-first ordering is the cross-daemon turn mutex. It serializes
    * claims for different Tasks in the same Session, whereas a Task-only lock
@@ -824,7 +827,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       sessionRow: SessionRow,
       fullId: string
     ) => Promise<T>,
-    admission = false
+    admission = false,
+    scheduleOutcome = false
   ): Promise<T> {
     const fullId = await this.resolveId(id);
     const routing = await select(this.db, { session_id: tasks.session_id })
@@ -832,11 +836,31 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       .where(eq(tasks.task_id, fullId))
       .one();
     if (!routing) throw new EntityNotFoundError('Task', id);
+    const outcomeSession = scheduleOutcome
+      ? await select(this.db)
+          .from(sessions)
+          .where(eq(sessions.session_id, routing.session_id))
+          .one()
+      : null;
+    const outcomeScheduleId = outcomeSession?.scheduled_from_branch
+      ? outcomeSession.schedule_id
+      : null;
 
     return this.runTaskMutation(() =>
       runDatabaseTransaction(
         this.db,
         async (txDb) => {
+          // Scheduled outcome writes use Schedule -> Session -> Task order.
+          // Scheduler metadata holds Schedule before its last-run Session FK;
+          // taking Schedule after Session here could deadlock that finalization.
+          if (outcomeScheduleId) {
+            await lockRowForUpdate(
+              txDb,
+              this.db,
+              schedules,
+              eq(schedules.schedule_id, outcomeScheduleId)
+            );
+          }
           if (admission) await lockSessionBranchForAdmission(txDb, routing.session_id);
           await lockRowForUpdate(
             txDb,
@@ -2356,9 +2380,17 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
     });
   }
 
+  /** Schedule is an outer lock only for outcome settlement; turn claims stay Session-first. */
+  private mutateTaskOutcome<T>(
+    id: string,
+    mutation: (txDb: Database, task: TaskRow, session: SessionRow, fullId: string) => Promise<T>
+  ): Promise<T> {
+    return this.mutateLockedSessionTask(id, mutation, false, true);
+  }
+
   /** Atomically record containment evidence and, when safe, terminalize the task. */
   async settleTermination(input: TerminationSettlementInput): Promise<TerminationSettlementResult> {
-    return this.mutateLockedSessionTask(input.taskId, async (txDb, row, sessionRow, fullId) => {
+    return this.mutateTaskOutcome(input.taskId, async (txDb, row, sessionRow, fullId) => {
       const current = this.rowToTask(row);
       if (isTerminalTaskStatus(current.status)) return { outcome: 'terminal', task: current };
       const restartRelease = input.outcome === 'restart_unverified';
@@ -2504,6 +2536,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         })
         .where(eq(tasks.task_id, fullId))
         .run();
+
+      await recordScheduledTaskOutcome(txDb, sessionRow, fullId, finalStatus);
 
       // Task terminality is authoritative. Project the promptability fields
       // in the same short transaction, after the Task write, so a coordinator
@@ -2700,6 +2734,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           if (!sessionRow) {
             throw new RepositoryError('Terminal task transition requires the owning Session lock');
           }
+          await recordScheduledTaskOutcome(txDb, sessionRow, fullId, merged.status);
           const latestTaskId = sessionRow.data.tasks.at(-1);
           const shouldProjectSession =
             latestTaskId === undefined ||
@@ -2725,7 +2760,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
       };
 
       if (isTerminalTaskStatus(updates.status)) {
-        return await this.mutateLockedSessionTask(id, (txDb, currentRow, sessionRow, fullId) =>
+        return await this.mutateTaskOutcome(id, (txDb, currentRow, sessionRow, fullId) =>
           applyUpdate(txDb, currentRow, fullId, sessionRow)
         );
       }

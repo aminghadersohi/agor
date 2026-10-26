@@ -132,7 +132,7 @@ import {
   userEnvBearerInstall,
 } from '../../../test/helpers/real-mcp-scoping.js';
 import { expectSignalQuiescence } from '../../../test/helpers/signal-quiescence.js';
-import { setAgorSkillsIndex } from '../../agor-skills-index.js';
+import { setAgorSkillsIndex, setSkillLoadingEnabled } from '../../agor-skills-index.js';
 import { GeminiPromptService, resolveGeminiInvocationModel } from './prompt-service.js';
 import { findGeminiRecording } from './runtime.js';
 import { Gemini } from './sdk.js';
@@ -256,6 +256,16 @@ describe('Gemini prompt boundary', () => {
       usage: { input_tokens: 4, output_tokens: 2 },
     });
     expect(state.dispose).toHaveBeenCalledOnce();
+  });
+  it('disables native skill discovery for script-runner mode', async () => {
+    state.events = [[event('content', 'answer'), event('finished', {})]];
+    setSkillLoadingEnabled(false);
+    try {
+      await collect();
+      expect(state.config.mock.calls.at(-1)![0]).toMatchObject({ skillsSupport: false });
+    } finally {
+      setSkillLoadingEnabled(true);
+    }
   });
   it('appends the team skills index to userMemory', async () => {
     state.events = [[event('content', 'answer'), event('finished', {})]];

@@ -30,10 +30,11 @@ import {
   AUTHORIZATION_REVOKED_TERMINATION_MESSAGE,
   EXECUTOR_UNCAUGHT_EXCEPTION_PREFIX,
   EXECUTOR_UNHANDLED_REJECTION_PREFIX,
+  SCHEDULE_SKILL_SCOPING_TOOLS,
   TaskStatus,
 } from '@agor/core/types';
 import { patchConsole } from '@agor/core/utils/logger';
-import { setAgorSkillsIndex } from './agor-skills-index.js';
+import { setAgorSkillsIndex, setSkillLoadingEnabled } from './agor-skills-index.js';
 import { type ExecutorHeartbeatHandle, startExecutorHeartbeat } from './executor-heartbeat.js';
 import { requestMCPRuntimeRefresh } from './mcp-runtime-refresh.js';
 import type { ResolvedConfigSlice } from './payload-types.js';
@@ -84,6 +85,7 @@ export interface ExecutorConfig {
   promptOrigin?: PromptOrigin;
   /** Daemon-resolved team skills index, appended to the Agor system prompt. */
   skillsIndex?: string;
+  skillsEnabled?: boolean;
   /** Opaque, daemon-authorized context interpreted by the selected integration. */
   agenticToolContext?: Record<string, unknown>;
   /** Daemon-resolved config slice. See payload-types.ResolvedConfigSliceSchema. */
@@ -108,6 +110,7 @@ export class AgorExecutor {
 
   constructor(private config: ExecutorConfig) {
     this.abortController = new AbortController();
+    setSkillLoadingEnabled(config.skillsEnabled ?? true);
     setAgorSkillsIndex(config.skillsIndex);
   }
 
@@ -158,6 +161,13 @@ export class AgorExecutor {
         .service('tasks')
         .connectExecutor({ task_id: this.config.taskId });
       this.handleTaskLifecycleUpdate(connectedTask, 'connect_claim');
+
+      if (
+        this.config.skillsEnabled === false &&
+        !SCHEDULE_SKILL_SCOPING_TOOLS.includes(this.config.tool)
+      ) {
+        throw new Error('This runtime cannot disable native skills and slash commands.');
+      }
 
       // Execute the task
       if (!this.terminationRequest) {

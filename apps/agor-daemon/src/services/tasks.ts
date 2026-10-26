@@ -920,6 +920,27 @@ export class TasksService extends DrizzleService<Task, Partial<Task>, TaskParams
         .service('sessions')
         .get(task.session_id, { tenant: params?.tenant } as TaskParams);
 
+      if (
+        session.schedule_id &&
+        session.custom_context?.scheduled_run?.initial_task_id === task.task_id
+      ) {
+        const schedule = await this.app
+          .service('schedules')
+          .get(session.schedule_id, { tenant: params?.tenant } as TaskParams)
+          .catch((error: unknown) => {
+            if ((error as { code?: number }).code === 404) return null;
+            throw error;
+          });
+        if (schedule)
+          emitServiceEvent(this.app, {
+            path: 'schedules',
+            event: 'patched',
+            data: schedule,
+            id: schedule.schedule_id,
+            params,
+          });
+      }
+
       if (session.branch_id) {
         // Preserve fire-and-forget behavior, but never let Git orchestration
         // inherit a live (or already committed) completion transaction.

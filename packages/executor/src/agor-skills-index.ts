@@ -12,9 +12,19 @@
 export const MAX_SKILLS_INDEX_CHARS = 16_000;
 
 let skillsIndex: string | undefined;
+let skillsEnabled = true;
+
+export function setSkillLoadingEnabled(enabled: boolean): void {
+  skillsEnabled = enabled;
+  if (!enabled) skillsIndex = undefined;
+}
+
+export function isSkillLoadingEnabled(): boolean {
+  return skillsEnabled;
+}
 
 export function setAgorSkillsIndex(text: string | undefined): void {
-  const trimmed = text?.trim();
+  const trimmed = skillsEnabled ? text?.trim() : undefined;
   skillsIndex = trimmed ? trimmed.slice(0, MAX_SKILLS_INDEX_CHARS) : undefined;
 }
 

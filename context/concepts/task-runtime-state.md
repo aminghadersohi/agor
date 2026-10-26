@@ -579,3 +579,17 @@ OpenCode's descriptor exemption requires cooperative quiescence, successful
 helper containment, or the explicit pre-launch refusal contract—not bare
 launcher absence. The operator guide documents sequential reconciliation
 latency and the pre-connect startup-warning-only exclusion.
+
+### Schedule execution outcomes
+
+The initial cron Task's terminal transition also updates its Schedule's durable
+failure streak in the same tenant transaction (`repositories/schedule-outcomes.ts`).
+It matches `scheduled_run.initial_task_id`, the persisted schedule FK, branch and
+creator, not the Session's projected status. Later continuations/manual runs are
+excluded. Failed/timed-out executions increment; successful executions reset;
+stops do neither. Concurrent outcomes serialize on the Schedule in commit order.
+At the configured threshold an enabled Schedule is disabled with a visible reason
+and attention flag, without cancellation, notification, retry or prompt replay.
+Human pauses are preserved. Explicit re-enable acknowledges the guard and resets
+the streak; the normal schedule hook computes the next future fire. Admission
+rechecks enabled state under the Schedule lock before admitting new cron work.

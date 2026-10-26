@@ -215,6 +215,31 @@ describe('renderSkillsIndex against hostile metadata', () => {
 });
 
 describe('resolveSkillsDelivery', () => {
+  dbTest(
+    'a schedule opt-out takes precedence over teammate release and receipt',
+    async ({ db }) => {
+      const { fixture, owner } = await seedRelease(db);
+      const delivered = await resolve(fixture, owner);
+      if (!('receipt' in delivered)) throw new Error('Expected ordinary skills');
+      expect(
+        await resolve(fixture, owner, {
+          custom_context: {
+            skills_receipt: delivered.receipt,
+            scheduled_run: {
+              rendered_prompt: 'Run',
+              run_index: 1,
+              schedule_config_snapshot: {
+                cron: '* * * * *',
+                timezone: 'UTC',
+                retention: 0,
+                skills_enabled: false,
+              },
+            },
+          },
+        })
+      ).toEqual({ skipped: 'opted_out' });
+    }
+  );
   dbTest('delivers the latest release and a receipt of the exact pins', async ({ db }) => {
     const { fixture, owner, ns, sets, namespace } = await seedRelease(db);
     const result = await resolve(fixture, owner, { harness: 'gemini' });
@@ -455,6 +480,37 @@ describe('resolveSkillsDelivery trust and bounds', () => {
 });
 
 describe('deliverSkillsSafely', () => {
+  dbTest('script-runner mode does not load actor params or persist a receipt', async ({ db }) => {
+    const { fixture, owner } = await seedRelease(db);
+    const params = vi.fn(async () => userParams(owner) as AuthenticatedParams);
+    const saveReceipt = vi.fn();
+    expect(
+      await deliverSkillsSafely({
+        app: fixture.app,
+        params,
+        saveReceipt,
+        branch: frinkBranch(),
+        session: {
+          session_id: 'script-runner' as SessionID,
+          agentic_tool: 'claude-code',
+          custom_context: {
+            scheduled_run: {
+              rendered_prompt: 'Run',
+              run_index: 1,
+              schedule_config_snapshot: {
+                cron: '* * * * *',
+                timezone: 'UTC',
+                retention: 0,
+                skills_enabled: false,
+              },
+            },
+          },
+        },
+      })
+    ).toBeUndefined();
+    expect(params).not.toHaveBeenCalled();
+    expect(saveReceipt).not.toHaveBeenCalled();
+  });
   dbTest('a receipt that cannot be saved does not block the launch', async ({ db }) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { fixture, owner } = await seedRelease(db);

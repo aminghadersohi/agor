@@ -96,6 +96,67 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('scheduler HA (PostgreSQL)'
     await (db as Database & { $client: { end: () => Promise<void> } }).$client.end();
   });
 
+  it('serializes schedule failure counts and refuses cross-tenant Task settlement', async () => {
+    const tenantA = await seedTenant(db, `failure-a-${generateId()}`);
+    const tenantB = await seedTenant(db, `failure-b-${generateId()}`);
+    const createRun = async (seed: TenantSeed) =>
+      runWithTenantDatabaseScope(db, seed.tenantId, async (scoped) => {
+        const taskId = generateId() as TaskID;
+        const session = await new SessionRepository(scoped).create({
+          branch_id: seed.branchId,
+          created_by: seed.userId,
+          agentic_tool: 'claude-code',
+          schedule_id: seed.scheduleId,
+          scheduled_from_branch: true,
+          scheduled_run_at: Date.now(),
+          custom_context: {
+            scheduled_run: { rendered_prompt: 'Run', run_index: 1, initial_task_id: taskId },
+          },
+        });
+        return new TaskRepository(scoped).create({
+          task_id: taskId,
+          session_id: session.session_id,
+          created_by: seed.userId,
+          full_prompt: 'Run',
+          status: TaskStatus.RUNNING,
+        });
+      });
+    const first = await createRun(tenantA);
+    const second = await createRun(tenantA);
+    const third = await createRun(tenantA);
+    const foreign = await createRun(tenantB);
+    await expect(
+      runWithTenantDatabaseScope(db, tenantA.tenantId, async (scoped) =>
+        new TaskRepository(scoped).update(foreign.task_id, { status: TaskStatus.FAILED })
+      )
+    ).rejects.toThrow();
+    await Promise.all(
+      [first, second, third, first].map((task) =>
+        runWithTenantDatabaseScope(db, tenantA.tenantId, async (scoped) =>
+          new TaskRepository(scoped).update(task.task_id, { status: TaskStatus.FAILED })
+        )
+      )
+    );
+    await runWithTenantDatabaseScope(db, tenantA.tenantId, async (scoped) => {
+      expect(await new ScheduleRepository(scoped).findById(tenantA.scheduleId)).toMatchObject({
+        enabled: false,
+        consecutive_failures: 3,
+        attention_required: true,
+      });
+      expect(await new ScheduleRepository(scoped).findById(tenantB.scheduleId)).toBeNull();
+    });
+    await runWithTenantDatabaseScope(db, tenantB.tenantId, async (scoped) => {
+      expect(await new ScheduleRepository(scoped).findById(tenantB.scheduleId)).toMatchObject({
+        enabled: true,
+        consecutive_failures: 0,
+        attention_required: false,
+      });
+      expect((await new TaskRepository(scoped).findById(foreign.task_id))?.status).toBe(
+        TaskStatus.RUNNING
+      );
+    });
+  });
+
   it('serializes five occurrence admissions to one durable Session', async () => {
     const seed = await seedTenant(db, `scheduler-five-${generateId()}`);
     const scheduledRunAt = Date.now();

@@ -1133,6 +1133,8 @@ export interface ScheduledRunMetadata {
     retention: number;
     /** Concurrency policy at run time (applies to both cron and manual paths) */
     allow_concurrent_runs?: boolean;
+    /** Skill policy frozen at admission, including later continuations. */
+    skills_enabled?: boolean;
     /** Effective MCP attachment snapshot used by crash recovery. */
     mcp_server_ids?: string[];
   };

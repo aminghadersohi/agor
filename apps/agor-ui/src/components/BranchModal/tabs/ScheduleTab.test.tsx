@@ -127,6 +127,19 @@ describe('ScheduleTab compact list', () => {
     vi.clearAllMocks();
   });
 
+  it('shows the automatic pause reason without requiring a hover', async () => {
+    renderScheduleTab({
+      schedules: [
+        makeSchedule({
+          enabled: false,
+          pause_reason: 'repeated_failures',
+          attention_required: true,
+        }),
+      ],
+    });
+    expect(await screen.findByText('Paused: repeated failures — needs attention')).toBeVisible();
+  });
+
   it('keeps secondary schedule details out of full-width columns', async () => {
     renderScheduleTab();
 
