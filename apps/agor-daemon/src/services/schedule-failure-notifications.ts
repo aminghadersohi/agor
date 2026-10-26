@@ -28,6 +28,7 @@ export function scheduleFailureAlertText(
   row: ScheduleFailureNotification,
   baseUrl: string
 ): string {
+  if (baseUrl.length > 1024) throw new Error('base_url_unavailable');
   const base = new URL(baseUrl);
   if (
     !['https:', 'http:'].includes(base.protocol) ||
@@ -38,12 +39,13 @@ export function scheduleFailureAlertText(
   ) {
     throw new Error('base_url_unavailable');
   }
-  return (
+  const text =
     `Scheduled execution failed.\n` +
     `Failed Task ${row.task_id}: <${getSessionUrl(row.session_id, base.toString())}|Open run>\n` +
     `Schedule ${row.schedule_id}: <${getBranchUrl(row.branch_id, base.toString())}|Open branch>\n` +
-    `Occurrence: ${new Date(row.scheduled_run_at).toISOString()}. The schedule was not paused and no job was replayed.`
-  );
+    `Occurrence: ${new Date(row.scheduled_run_at).toISOString()}. The schedule was not paused and no job was replayed.`;
+  if (Buffer.byteLength(text, 'utf8') > 4096) throw new Error('summary_too_large');
+  return text;
 }
 
 /** Read-only, admin-gated operational status; never accepts delivery/retry writes. */

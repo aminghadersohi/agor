@@ -354,5 +354,14 @@ describe('schedule failure notifications (offline gateway)', () => {
     const row = (await f.read(task.task_id))!;
     expect(() => scheduleFailureAlertText(row, 'https://user:password@example.invalid')).toThrow();
     expect(() => scheduleFailureAlertText(row, 'javascript:alert(1)')).toThrow();
+    expect(() =>
+      scheduleFailureAlertText(row, `https://example.invalid/${'x'.repeat(1024)}`)
+    ).toThrow();
+    expect(() =>
+      scheduleFailureAlertText(
+        { ...row, task_id: 'x'.repeat(4096) as typeof row.task_id },
+        'https://example.invalid'
+      )
+    ).toThrow();
   });
 });
