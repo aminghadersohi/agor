@@ -68,7 +68,7 @@ export function getCrossAgenticToolModelError(
   if (!owner) return undefined;
   // Exact IDs are intentionally provider-specific. Selection/launch preparation
   // cannot know the next Task's provider (especially on a shared Session).
-  // Defer to task-scoped credential resolution, never the Session creator.
+  // Defer to SDK consumption with task-scoped credentials, never the Session creator.
   if (modelConfig?.mode === 'exact') {
     if (!provider) return undefined;
     const connection = provider.connection;

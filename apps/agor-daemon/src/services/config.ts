@@ -21,14 +21,12 @@ import {
   type TenantScopeAwareDatabase,
 } from '@agor/core/db';
 import { type Application, BadRequest, Forbidden, NotAuthenticated } from '@agor/core/feathers';
-import { findCrossAgenticToolModelOwner, getCrossAgenticToolModelError } from '@agor/core/models';
 import type {
   AgenticToolName,
   AuthenticatedParams,
   DeepReadonly,
   Params,
   ProviderResolutionPolicy,
-  Session,
   TaskID,
   UserID,
 } from '@agor/core/types';
@@ -171,8 +169,6 @@ export class ConfigService {
       throw new Forbidden('Executor token task scope could not be verified');
     }
 
-    let executorModelConfig: Session['model_config'];
-
     // Executor runtime calls are narrowly scoped to the SDK for this session.
     // Do not let a compromised executor token ask for another tool's bucket or
     // an unrelated credential name.
@@ -193,7 +189,6 @@ export class ConfigService {
         throw new Forbidden('Executor token tool scope could not be verified');
       }
       const session = await sessionsService.get(verifiedSessionId, internalParams);
-      executorModelConfig = session.model_config;
       if (
         session?.agentic_tool !== tool ||
         (executorScope.branchId && executorScope.branchId !== session.branch_id)
@@ -202,14 +197,9 @@ export class ConfigService {
       }
     }
 
-    // A foreign registry ID in exact mode may be valid on the Task actor's
-    // compatible endpoint. Verify the full task/tenant authority before resolving
-    // that actor's connection; never borrow the shared Session owner's endpoint.
-    if (
-      tool &&
-      executorModelConfig?.mode === 'exact' &&
-      findCrossAgenticToolModelOwner(executorModelConfig.model, tool)
-    ) {
+    // Provider context belongs to the live Task principal, regardless of a mutable
+    // Session model selection. The executor validates the model it actually reads.
+    if (tool && executorScope) {
       const authority = authenticatedTaskExecutorRuntimeAuthority(params);
       if (!authority || authority.userId !== userId || authority.sessionId !== sessionId) {
         throw new Forbidden('A live task executor is required to validate this provider model.');
@@ -229,10 +219,6 @@ export class ConfigService {
       internalParams.tenant?.tenant_id,
       (tenantDb) => resolveApiKey(keyName, { userId, db: tenantDb, tool })
     );
-    if (tool && executorScope) {
-      const modelError = getCrossAgenticToolModelError(tool, executorModelConfig, result);
-      if (modelError) throw new BadRequest(modelError);
-    }
     if (result.managedOAuth) {
       const authority = authenticatedTaskExecutorRuntimeAuthority(params);
       if (
