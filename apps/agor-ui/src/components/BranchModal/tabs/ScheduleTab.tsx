@@ -104,12 +104,6 @@ const ScheduleDetails: React.FC<{
 }> = ({ schedule, humanizedCron, userById, currentUser }) => (
   <Space direction="vertical" size={2} style={{ maxWidth: 360 }}>
     <Text strong>{schedule.name || 'Untitled schedule'}</Text>
-    {schedule.attention_required && schedule.pause_reason === 'repeated_failures' ? (
-      <Text type="warning" role="status">
-        Paused: repeated failures. Needs attention. Review the runs, then enable to resume future
-        runs.
-      </Text>
-    ) : null}
     {schedule.description ? <Text>{schedule.description}</Text> : null}
     <Text>
       <Text strong>Schedule:</Text> {humanizedCron}
@@ -308,11 +302,6 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
             <CompactTooltipText title={tooltip} ariaLabel={`Schedule title: ${s.name}`}>
               {s.name || 'Untitled schedule'}
             </CompactTooltipText>
-            {s.pause_reason === 'repeated_failures' ? (
-              <Text type="warning" role="status">
-                Paused: repeated failures — needs attention
-              </Text>
-            ) : null}
             {s.description ? (
               <CompactTooltipText title={tooltip} type="secondary">
                 {s.description}

@@ -222,15 +222,6 @@ export interface Schedule {
    */
   enabled: boolean;
 
-  /** Load skills and slash commands. False is a minimal script-runner session. */
-  skills_enabled?: boolean;
-  /** Consecutive cron execution failures before pausing; 0 disables, default 3. */
-  failure_threshold?: number;
-  /** Runtime-owned, durable outcome state (completion order for overlapping runs). */
-  consecutive_failures?: number;
-  pause_reason?: 'repeated_failures';
-  attention_required?: boolean;
-
   /**
    * When `false` (default), the scheduler skips a fire if this schedule
    * already has an active run (cron = silent skip; manual `run_now` =
@@ -306,8 +297,6 @@ interface ScheduleCreateBaseData {
   agentic_tool_config: ScheduleAgenticToolConfig;
   mcp_server_ids?: string[];
   enabled?: boolean;
-  skills_enabled?: boolean;
-  failure_threshold?: number;
   retention?: number;
   allow_concurrent_runs?: boolean;
 }
@@ -334,8 +323,6 @@ export interface SchedulePatchData {
   agentic_tool_config?: ScheduleAgenticToolConfig;
   mcp_server_ids?: string[];
   enabled?: boolean;
-  skills_enabled?: boolean;
-  failure_threshold?: number;
   retention?: number;
   allow_concurrent_runs?: boolean;
 }
@@ -354,8 +341,6 @@ const SCHEDULE_CREATE_WRITE_FIELD_VALUES = [
   'agentic_tool_config',
   'mcp_server_ids',
   'enabled',
-  'skills_enabled',
-  'failure_threshold',
   'retention',
   'allow_concurrent_runs',
 ] as const;
@@ -376,8 +361,6 @@ const SCHEDULE_PATCH_WRITE_FIELD_VALUES = [
   'agentic_tool_config',
   'mcp_server_ids',
   'enabled',
-  'skills_enabled',
-  'failure_threshold',
   'retention',
   'allow_concurrent_runs',
 ] as const;
@@ -387,6 +370,3 @@ export const SCHEDULE_PATCH_WRITE_FIELDS: ExhaustiveWriteFields<
   SchedulePatchData,
   typeof SCHEDULE_PATCH_WRITE_FIELD_VALUES
 > = SCHEDULE_PATCH_WRITE_FIELD_VALUES;
-
-/** Runtimes with a native, per-process switch that disables skill loading. */
-export const SCHEDULE_SKILL_SCOPING_TOOLS: readonly AgenticToolName[] = ['claude-code', 'gemini'];

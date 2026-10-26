@@ -30,12 +30,7 @@
 import type { ScheduleRepository } from '@agor/core/db';
 import { BadRequest, Forbidden, NotAuthenticated } from '@agor/core/feathers';
 import type { HookContext, Schedule } from '@agor/core/types';
-import {
-  hasMinimumRole,
-  isTimezoneMode,
-  ROLES,
-  SCHEDULE_SKILL_SCOPING_TOOLS,
-} from '@agor/core/types';
+import { hasMinimumRole, isTimezoneMode, ROLES } from '@agor/core/types';
 
 /**
  * Lazy-load the current schedule into `context.params.schedule` on
@@ -82,35 +77,11 @@ export function validateScheduleConfig() {
       throw new BadRequest("timezone must be omitted when timezone_mode='utc'.");
     }
 
-    if (rawData.skills_enabled !== undefined && typeof rawData.skills_enabled !== 'boolean') {
-      throw new BadRequest('Schedule skills_enabled must be a boolean.');
-    }
-    if (
-      rawData.failure_threshold !== undefined &&
-      (typeof rawData.failure_threshold !== 'number' ||
-        !Number.isSafeInteger(rawData.failure_threshold) ||
-        rawData.failure_threshold < 0 ||
-        rawData.failure_threshold > 1000)
-    ) {
-      throw new BadRequest('Schedule failure_threshold must be an integer from 0 to 1000.');
-    }
     const data = rawData as Partial<Schedule>;
 
     const current =
       context.method === 'patch' ? (context.params.schedule as Schedule | undefined) : undefined;
     const merged = { ...(current ?? {}), ...data } as Partial<Schedule>;
-
-    if (
-      merged.skills_enabled === false &&
-      merged.agentic_tool_config &&
-      !SCHEDULE_SKILL_SCOPING_TOOLS.includes(
-        merged.agentic_tool_config.agentic_tool as import('@agor/core/types').AgenticToolName
-      )
-    ) {
-      throw new BadRequest(
-        'Script-runner skill scoping is supported by Claude Code and Gemini only.'
-      );
-    }
 
     // Use the dialect-agnostic cron helper. We pass the schedule's
     // effective tz so DST-sensitive crons get validated against the

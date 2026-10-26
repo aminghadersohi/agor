@@ -183,6 +183,7 @@ import {
   loadSession,
   loadSessionBranch,
   protectGatewaySourceMetadata,
+  protectScheduledSessionBranch,
   resolveSessionContext,
   scopeFindToAccessibleBoardsSql,
   scopeFindToAccessibleBranchesSql,
@@ -537,6 +538,7 @@ export const AUTHENTICATED_RBAC_SERVICE_PATHS = [
  * Register all FeathersJS service hooks.
  */
 export const TENANT_OWNED_SERVICE_PATHS = [
+  'schedule-failure-notifications',
   BRANCH_DELETION_REPORT_SERVICE,
   BRANCH_CLEANUP_REPORT_SERVICE,
   ENVIRONMENT_COMMAND_REPORT_SERVICE,
@@ -3486,6 +3488,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     ensureSessionImmutability(),
     resolveSessionContext(),
     loadSession(sessionsRepository),
+    protectScheduledSessionBranch,
     loadBranchFromSession(branchRepository),
     (context: HookContext) => {
       if (isPromptFlowPatchOnly(context.data)) {

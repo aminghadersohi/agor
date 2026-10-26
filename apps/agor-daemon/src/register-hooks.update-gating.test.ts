@@ -739,6 +739,7 @@ describe('registered Session scheduler provenance boundary', () => {
     branch_id: branchId,
     created_by: owner,
     sdk_home_scope: 'branch',
+    scheduled_from_branch: true,
     custom_context: { project: 'original', scheduled_run: scheduledRun },
   };
   const branch = { branch_id: branchId, created_by: owner, others_can: 'all' };
@@ -795,7 +796,7 @@ describe('registered Session scheduler provenance boundary', () => {
     return { run };
   }
   for (const actor of ['owner', 'other-manager', 'shared-caller'] as const) {
-    for (const provider of ['rest', 'socketio']) {
+    for (const provider of ['rest', 'socketio', 'mcp']) {
       for (const method of ['create', 'patch', 'update'] as const) {
         it(`rejects ${actor} ${provider} ${method} provenance/policy forgery`, async () => {
           const { run } = setup(actor);
@@ -815,11 +816,16 @@ describe('registered Session scheduler provenance boundary', () => {
             { scheduled_from_branch: false },
             { scheduled_run_at: 0 },
             { scheduler_init_retry_at: null },
+            { scheduler_init_completed_at: null },
           ])
             await expect(run(method, provider, data)).rejects.toThrow('is server-managed');
           await expect(run(method, provider, { custom_context: null })).rejects.toThrow(
             'must be an object'
           );
+          if (method !== 'create')
+            await expect(run(method, provider, { branch_id: 'another-branch' })).rejects.toThrow(
+              'scheduled Session branch_id is immutable'
+            );
           expect(session.custom_context.scheduled_run).toEqual(scheduledRun);
         });
       }

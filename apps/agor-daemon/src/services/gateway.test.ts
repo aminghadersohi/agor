@@ -6336,6 +6336,81 @@ describe('GatewayService outbound emit session branch binding', () => {
     };
   }
 
+  it('rechecks schedule notification target binding before any provider send', async () => {
+    const { service, sendSlackMessage, outboundRepo } = makeEmitHarness({});
+    await expect(
+      service.emitMessage(emitData({ purpose: 'schedule_failure', target: 'channel:C999' }))
+    ).rejects.toThrow('Schedule failure notification target binding changed');
+    expect(sendSlackMessage).not.toHaveBeenCalled();
+    expect(outboundRepo.recordSend).not.toHaveBeenCalled();
+  });
+
+  for (const scenario of [
+    'authorized',
+    'access-revoked',
+    'user-missing',
+    'already-delivered',
+    'role-revoked',
+  ] as const) {
+    it(`checks current scheduled-failure authority before dispatch: ${scenario}`, async () => {
+      const { service, sendSlackMessage, branchRepo } = makeEmitHarness({});
+      const internals = service as unknown as {
+        channelRepo: unknown;
+        scheduleFailureRepo: unknown;
+        usersRepo: unknown;
+      };
+      internals.channelRepo = {
+        updateLastMessage: vi.fn(async () => undefined),
+        findById: vi.fn(async () => ({
+          ...outboundChannel,
+          config: { ...outboundChannel.config, schedule_failure_alert_target: 'channel:C123' },
+        })),
+      };
+      internals.scheduleFailureRepo = {
+        findById: vi.fn(async () => ({
+          status: scenario === 'already-delivered' ? 'delivered' : 'sending',
+          gateway_channel_id: outboundChannel.id,
+          target: 'channel:C123',
+          schedule_id: 'schedule-1',
+          branch_id: 'branch-2',
+        })),
+      };
+      internals.usersRepo = {
+        findById: vi.fn(async () =>
+          scenario === 'user-missing'
+            ? null
+            : {
+                ...user,
+                role: scenario === 'role-revoked' ? 'member' : 'admin',
+              }
+        ),
+      };
+      if (scenario === 'access-revoked') {
+        branchRepo.findById.mockResolvedValue({ branch_id: 'branch-2', others_can: 'none' });
+        branchRepo.resolveUserPermission.mockResolvedValue('none');
+      }
+      const send = service.emitMessage(
+        emitData({
+          purpose: 'schedule_failure',
+          target: 'channel:C123',
+          emittedByTaskId: 'task-1',
+          emittedByScheduleId: 'schedule-1',
+        })
+      );
+      if (scenario === 'authorized') {
+        await expect(send).resolves.toMatchObject({ delivered: true });
+        expect(sendSlackMessage).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(send).rejects.toThrow(
+          scenario === 'role-revoked'
+            ? 'Insufficient branch permission'
+            : 'Schedule failure notification authority changed'
+        );
+        expect(sendSlackMessage).not.toHaveBeenCalled();
+      }
+    });
+  }
+
   it('allows a same-branch session emit and keeps session attribution on the audit row', async () => {
     const { service, sendSlackMessage, outboundRepo } = makeEmitHarness({
       session: { session_id: 'sess-1', branch_id: 'branch-1' },

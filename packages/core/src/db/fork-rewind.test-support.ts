@@ -85,6 +85,7 @@ export async function dropTeamsAndDeletionDiscoveryObjectsPostgres(db: Database)
 
 /** Restore the pre-policy schema when a disposable fixture rewinds below 9033. */
 export async function dropScheduleExecutionPolicyColumns(db: Database): Promise<void> {
+  await executeRaw(db, sql`DROP TABLE schedule_failure_notifications`);
   await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN skills_enabled`);
   await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN failure_threshold`);
   await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN consecutive_failures`);

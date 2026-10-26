@@ -89,3 +89,5 @@ export type * from './schema.sqlite';
 export const kbImportReceipts = schema.kbImportReceipts;
 export const branchFrontDeskSessions = schema.branchFrontDeskSessions;
 export const opencodeCheckpointAttempts = schema.opencodeCheckpointAttempts;
+
+export const scheduleFailureNotifications = schema.scheduleFailureNotifications;

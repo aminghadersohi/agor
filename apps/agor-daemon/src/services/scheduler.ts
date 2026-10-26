@@ -1005,8 +1005,7 @@ export class SchedulerService {
 
     type Admission =
       | { outcome: 'created' | 'existing'; session: Session }
-      | { outcome: 'busy'; session: null }
-      | { outcome: 'paused'; session: null };
+      | { outcome: 'busy'; session: null };
 
     let admission: Admission;
     try {
@@ -1022,10 +1021,6 @@ export class SchedulerService {
             scheduledRunAt
           );
           if (existing) return { outcome: 'existing', session: existing } as const;
-          const currentSchedule = await this.scheduleRepo.findById(schedule.schedule_id);
-          if (!currentSchedule?.enabled) {
-            return { outcome: 'paused', session: null } as const;
-          }
 
           if (
             !schedule.allow_concurrent_runs &&
@@ -1091,7 +1086,6 @@ export class SchedulerService {
                   retention: schedule.retention,
                   allow_concurrent_runs: schedule.allow_concurrent_runs,
                   mcp_server_ids: effectiveMcpIds,
-                  skills_enabled: currentSchedule.skills_enabled ?? true,
                 },
               },
             },
@@ -1135,14 +1129,6 @@ export class SchedulerService {
       );
     }
 
-    if (admission.outcome === 'paused') {
-      if (manual)
-        throw new ScheduleNotReadyError(
-          'schedule_disabled',
-          'Schedule is disabled. Enable it before running manually.'
-        );
-      return null;
-    }
     if (admission.outcome === 'busy') {
       this.logWorkEvent('info', 'occurrence_skipped_busy', {
         schedule_id: schedule.schedule_id,

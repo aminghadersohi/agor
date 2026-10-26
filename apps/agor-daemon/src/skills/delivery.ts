@@ -301,11 +301,6 @@ export async function resolveSkillsDelivery(input: {
   deadline?: SkillsDeliveryDeadline;
   now?: Date;
 }): Promise<SkillsDelivery | { skipped: SkillsDeliverySkip }> {
-  if (
-    input.session.custom_context?.scheduled_run?.schedule_config_snapshot?.skills_enabled === false
-  ) {
-    return { skipped: 'opted_out' };
-  }
   const deadline = input.deadline ?? new SkillsDeliveryDeadline(SKILLS_DELIVERY_TIMEOUT_MS);
   const teammate = skillTeammateOf(input.branch);
   if (!teammate) return { skipped: 'not_teammate' };
@@ -397,11 +392,6 @@ export async function deliverSkillsSafely(input: {
   saveReceipt?: (receipt: SessionSkillsReceipt) => Promise<void>;
   timeoutMs?: number;
 }): Promise<string | undefined> {
-  if (
-    input.session.custom_context?.scheduled_run?.schedule_config_snapshot?.skills_enabled === false
-  ) {
-    return undefined;
-  }
   const sessionRef = `session_id=${input.session.session_id}`;
   if (!input.branch || !isTeammate(input.branch)) return undefined;
   const deadline = new SkillsDeliveryDeadline(input.timeoutMs ?? SKILLS_DELIVERY_TIMEOUT_MS);

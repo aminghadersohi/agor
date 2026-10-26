@@ -40,7 +40,7 @@ import {
   resolveScopedMCPAuthHeaders,
   sanitizeMCPExternalError,
 } from '@agor/core/mcp';
-import { isSkillLoadingEnabled, withAgorSkillsIndex } from '../../agor-skills-index.js';
+import { withAgorSkillsIndex } from '../../agor-skills-index.js';
 import { getDaemonUrl } from '../../config.js';
 import type {
   BranchRepository,
@@ -272,7 +272,6 @@ export async function setupQuery(
       preset: 'claude_code',
       append: `${withAgorSkillsIndex(agorSystemPrompt)}\n\n${renderAgorSessionIdentity(sessionId)}`,
     },
-    ...(!isSkillLoadingEnabled() ? { extraArgs: { 'disable-slash-commands': null } } : {}),
     settingSources: ['user', 'project', 'local'], // Load user + project + local permissions, auto-loads CLAUDE.md
     // SDK 0.3.233+ omits task-list tools on newer model families unless the
     // embedding application opts in. Agor reads their calls for the sticky

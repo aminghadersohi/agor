@@ -97,6 +97,45 @@ Because MCP is just JSON-RPC, you can bring any service into the loop: Agor’s 
 - Use retention to keep noise down; the daemon automatically deletes older runs beyond your limit.
 - Need to rerun immediately? Manually spawn a session, or adjust/save the cron for a new next run.
 
+## Failure notifications
+
+A failed or timed-out **initial execution Task** creates a durable notification intent.
+Each failed occurrence has its own Task ID: settling the same Task again does not create
+another notification. This includes an initial execution admitted with Run now. A later
+ordinary continuation in the same Session is not a new scheduled occurrence. A successful
+execution, user Stop, or unverified containment is not reported as a failed execution.
+
+An administrator can bind exactly one existing Slack gateway in the tenant by setting its
+non-secret `config.schedule_failure_alert_target` to `channel:<SLACK_CHANNEL_ID>`. This is
+an explicit binding, not an inferred default target. The gateway must be enabled, have
+outbound enabled, and allow the destination under its existing channel allowlist. Its
+creator must retain access to the failed branch and authority to emit through the gateway.
+No new credentials or broader permissions are granted by this setting.
+
+Notifications contain only a fixed failure summary, occurrence time, and authenticated
+links to the run Session and Schedule’s branch, labelled with the exact Task/Schedule IDs. They do not include prompts, schedule names, provider logs, or error
+text. Sending an alert never pauses or disables a schedule, changes its cadence, resumes a
+human pause, or replays a failed job. Retaining or deleting run history does not erase the
+notification intent.
+
+Administrators can inspect delivery state through the read-only
+`/schedule-failure-notifications` service (`find`, with bounded `$skip`/`$limit`, and `get`
+by exact Task ID):
+
+- `pending`: awaiting an authorized target or a dispatch attempt; `last_error_code`
+  identifies configuration/access problems without retaining provider error text.
+- `sending`: a durable dispatch fence has been acquired.
+- `delivered`: a provider message receipt was returned.
+- `uncertain`: the provider effect cannot be confirmed (for example, a crash or lost
+  receipt after dispatch began). This requires operator attention and is **not** blindly
+  resent, because Slack may already have accepted the message. This mechanism guarantees
+  one durable intent and at most one dispatch attempt, not exactly-once delivery across
+  ambiguous provider/network failures.
+
+The worker retries pending configuration checks independently of schedule execution.
+It never retries the scheduled job. No messages are sent until an authorized gateway
+binding is configured.
+
 ## Best Practices
 
 - **Stay idempotent.** Assume runs might retry; avoid prompts that double-post or delete blindly.
@@ -119,37 +158,3 @@ Because MCP is just JSON-RPC, you can bring any service into the loop: Agor’s 
 - [Branches](/guide/branches): The container a schedule attaches to.
 - [Agor MCP Server](/guide/internal-mcp): What scheduled agents can reach out to (boards, sessions, users, etc.).
 - [SDK Comparison](/guide/sdk-comparison): Choose the right agent for scheduled tasks.
-
-## Skills and script-runner schedules
-
-Schedules load skills and slash commands by default. Set `skills_enabled: false`
-with `agor_schedules_create` or `agor_schedules_patch` (or turn off **Load skills and
-slash commands** in Schedule Settings) for a script-runner schedule. This omits the
-Knowledge skills index and disables native skill/command loading. It does not remove
-context files, repository instructions, permissions, MCP selection, or model budgets.
-The policy is frozen on each run and applies to its later continuations; changing the
-schedule affects future runs only.
-
-Native suppression currently supports Claude Code and Gemini. Other runtimes reject
-script-runner mode rather than silently loading skills. Normal schedules keep their
-existing behavior on every runtime. This option reduces loaded context, not filesystem
-or tool authority: a prompt can still explicitly read a file it is allowed to access.
-
-## Repeated execution failures
-
-By default, three consecutive failed cron executions pause a schedule. Set
-`failure_threshold` to an integer from 1 to 1000 to change the limit, or 0 to disable
-the guard. The schedule shows **Paused: repeated failures** and **Needs attention**;
-no external notification is sent.
-
-Only the occurrence's initial Task counts: `failed` and `timed_out` increment the
-streak, and `completed` resets it. Manual runs, user stops, initialization retries,
-and later ordinary continuation Tasks neither increment nor reset it. Overlapping
-runs are counted in terminal-commit order. Counters and pause state survive daemon
-restart and session retention; existing historical failures are not counted retroactively.
-
-A human-disabled schedule stays disabled without acquiring an automatic pause reason.
-Review the failed runs and resolve the cause, then enable the schedule to clear the
-attention flag and streak. Resuming calculates the next future fire using the existing
-cadence. It does not replay failed jobs. Already admitted work is not cancelled by a
-pause, and the guard never changes permissions, budgets, or concurrency policy.

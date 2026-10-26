@@ -69,7 +69,7 @@ import {
   shippedAsanaInstall,
   userEnvBearerInstall,
 } from '../../../test/helpers/real-mcp-scoping.js';
-import { setAgorSkillsIndex, setSkillLoadingEnabled } from '../../agor-skills-index.js';
+import { setAgorSkillsIndex } from '../../agor-skills-index.js';
 import { AgorSetupError } from './claude-error.js';
 import { CLAUDE_CODE_DISALLOWED_TOOLS, CLAUDE_CODE_TODO_TOOLS } from './constants.js';
 import { formatListForLog, type QuerySetupDeps, setupQuery } from './query-builder.js';
@@ -658,19 +658,6 @@ describe('setupQuery - Local Settings Support', () => {
       permissionLocks: new Map(),
     };
   }
-
-  it('disables native skills and commands without dropping permission settings', async () => {
-    setSkillLoadingEnabled(false);
-    try {
-      await setupQuery('test-session' as SessionID, 'Run script', createMockDeps());
-      const options = claudeQuery.mock.calls.at(-1)![0].options;
-      expect(options.extraArgs).toMatchObject({ 'disable-slash-commands': null });
-      expect(options.settingSources).toEqual(['user', 'project', 'local']);
-      expect(options.systemPrompt).not.toContain('Team skills');
-    } finally {
-      setSkillLoadingEnabled(true);
-    }
-  });
 
   it('includes "local" in the SDK settingSources', async () => {
     const deps = createMockDeps();

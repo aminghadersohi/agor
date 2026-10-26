@@ -30,6 +30,7 @@ const UPSTREAM_TAIL = [
   '0118_teams_gateway_ha',
   '0119_branch_deletion_failed_discovery',
   '9033_schedule_execution_policy',
+  '9034_schedule_failure_notifications',
 ];
 
 // Fork main journalled front desk at 1790129000214 and profile images at

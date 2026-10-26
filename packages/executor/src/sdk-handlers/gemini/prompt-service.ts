@@ -22,7 +22,7 @@ import { writeLogLine } from '@agor/core/utils/logger';
 import { GEMINI_MANUAL_MESSAGE, isGeminiManualMode } from '@agor/core/utils/permission-mode-mapper';
 import type * as GeminiTypes from '@google/gemini-cli-core';
 import type { Part } from '@google/genai';
-import { isSkillLoadingEnabled, withAgorSkillsIndex } from '../../agor-skills-index.js';
+import { withAgorSkillsIndex } from '../../agor-skills-index.js';
 import { getDaemonUrl } from '../../config.js';
 import type {
   BranchRepository,
@@ -624,7 +624,6 @@ export class GeminiPromptService {
       enableHooks: false,
       enableHooksUI: false,
       extensionsEnabled: false,
-      ...(!isSkillLoadingEnabled() ? { skillsSupport: false } : {}),
       enableEnvironmentVariableRedaction: false,
       enableAgents: true,
       agents: { overrides: { browser: { enabled: false } } },

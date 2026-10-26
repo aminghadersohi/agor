@@ -136,6 +136,19 @@ export function createMigrationImpactRegistry(
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   [
+    '9034_schedule_failure_notifications',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'required',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Adds a content-free failure notification outbox. Configure one authorized Slack gateway alert target to deliver; ambiguous sends are never blindly retried. Older binaries ignore the table.',
+      }),
+    },
+  ],
+  [
     '9033_schedule_execution_policy',
     {
       requiresOfflineCutover: false,
@@ -144,7 +157,7 @@ const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
         userAction: 'none',
         rollbackCompatibility: 'compatible',
         summary:
-          'Adds defaulted schedule skill policy and failure-guard state. Older binaries ignore the columns; failure accounting requires the new daemon.',
+          'Retains unused schedule-policy columns for compatibility. This release does not read them, disable schedules, or change skill loading.',
       }),
     },
   ],

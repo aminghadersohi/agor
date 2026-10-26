@@ -3,7 +3,6 @@ import {
   getAgorSkillsIndex,
   MAX_SKILLS_INDEX_CHARS,
   setAgorSkillsIndex,
-  setSkillLoadingEnabled,
   withAgorSkillsIndex,
 } from './agor-skills-index.js';
 import { PromptPayloadSchema } from './payload-types.js';
@@ -52,17 +51,4 @@ describe('agor skills index', () => {
       })
     ).toThrow();
   });
-});
-
-it('script-runner mode drops even a supplied skills index; ordinary mode remains the default', () => {
-  setSkillLoadingEnabled(false);
-  try {
-    setAgorSkillsIndex('Must not be delivered');
-    expect(withAgorSkillsIndex('System')).toBe('System');
-  } finally {
-    setSkillLoadingEnabled(true);
-  }
-  setAgorSkillsIndex('Ordinary skills');
-  expect(withAgorSkillsIndex('System')).toContain('Ordinary skills');
-  setAgorSkillsIndex(undefined);
 });

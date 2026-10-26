@@ -918,6 +918,7 @@ const SERVER_MANAGED_SCHEDULER_FIELDS = [
   'schedule_id',
   'scheduled_from_branch',
   'scheduled_run_at',
+  'scheduler_init_completed_at',
   'scheduler_init_failure_code',
   'scheduler_init_failure_stage',
   'scheduler_init_attempt_count',
@@ -956,6 +957,20 @@ export function protectGatewaySourceMetadata(context: HookContext): HookContext 
     }
   }
 
+  return context;
+}
+
+/** A scheduled occurrence cannot be reparented to change its notification authority. */
+export function protectScheduledSessionBranch(context: HookContext): HookContext {
+  if (!context.params.provider || !context.params.session?.scheduled_from_branch) return context;
+  const data = context.data as Partial<Session> | undefined;
+  if (
+    data &&
+    Object.hasOwn(data, 'branch_id') &&
+    data.branch_id !== context.params.session.branch_id
+  ) {
+    throw new Forbidden('A scheduled Session branch_id is immutable');
+  }
   return context;
 }
 

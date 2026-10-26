@@ -299,7 +299,6 @@ async function handlePromptPayload(
     messageSource: payload.params.messageSource,
     promptOrigin: payload.params.promptOrigin,
     skillsIndex: payload.params.skillsIndex,
-    skillsEnabled: payload.params.skillsEnabled,
     agenticToolContext: payload.agenticToolContext,
     resolvedConfig: payload.resolvedConfig,
   });

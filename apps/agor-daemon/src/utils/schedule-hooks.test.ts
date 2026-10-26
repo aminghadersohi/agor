@@ -439,29 +439,3 @@ describe('recomputeNextRunAt', () => {
     expect((ctx.data as Partial<Schedule>).next_run_at).toBeUndefined();
   });
 });
-
-describe('schedule execution policy validation', () => {
-  for (const value of [-1, 1.5, 1001, NaN, '3', null]) {
-    it(`rejects failure_threshold=${String(value)}`, async () => {
-      const context = makeContext({ method: 'patch', cachedSchedule: makeSchedule(), data: {} });
-      context.data = { failure_threshold: value };
-      await expect(validateScheduleConfig()(context)).rejects.toThrow('failure_threshold');
-    });
-  }
-  it('permits opt-out and disabled guard independently of configuration source', async () => {
-    const context = makeContext({
-      method: 'patch',
-      cachedSchedule: makeSchedule(),
-      data: { skills_enabled: false, failure_threshold: 0 },
-    });
-    await expect(validateScheduleConfig()(context)).resolves.toBe(context);
-  });
-  it('fails closed for a runtime with no native skill suppression switch', async () => {
-    const context = makeContext({
-      method: 'patch',
-      cachedSchedule: makeSchedule({ skills_enabled: false }),
-      data: { agentic_tool_config: { agentic_tool: 'codex' } },
-    });
-    await expect(validateScheduleConfig()(context)).rejects.toThrow('Claude Code and Gemini');
-  });
-});

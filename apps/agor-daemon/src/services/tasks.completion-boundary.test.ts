@@ -31,8 +31,6 @@ it.each([false, true])(
     const session = {
       session_id: task.session_id,
       branch_id: 'fixture-branch',
-      schedule_id: 'fixture-schedule',
-      custom_context: { scheduled_run: { initial_task_id: task.task_id } },
       fork_origin: 'btw',
       tasks: [task.task_id],
     };
@@ -42,17 +40,6 @@ it.each([false, true])(
       await executeRaw(db, sql`INSERT INTO completion_fixture VALUES ('archive')`);
     });
     const patchSession = vi.fn();
-    const scheduleEmit = vi.fn();
-    const guardedSchedule = {
-      schedule_id: 'fixture-schedule',
-      enabled: false,
-      pause_reason: 'repeated_failures',
-      attention_required: true,
-    };
-    const scheduleGet = vi.fn(async () => {
-      expect(getCurrentTenantId()).toBe('tenant-completion');
-      return guardedSchedule;
-    });
     let injectionVerified = false;
     let originVerified = false;
     const inject = vi.fn(async () => {
@@ -98,11 +85,9 @@ it.each([false, true])(
     );
     Reflect.set(service, 'app', {
       service: (name: string) =>
-        name === 'schedules'
-          ? { get: scheduleGet, emit: scheduleEmit }
-          : name === 'branches'
-            ? { get: async () => ({ repo_id: 'fixture-repo' }) }
-            : { get: async () => session, patch: patchSession, archiveBtwSession: archive },
+        name === 'branches'
+          ? { get: async () => ({ repo_id: 'fixture-repo' }) }
+          : { get: async () => session, patch: patchSession, archiveBtwSession: archive },
     });
     try {
       await executeRaw(raw, sql`CREATE TABLE completion_fixture (id TEXT PRIMARY KEY)`);
@@ -117,7 +102,6 @@ it.each([false, true])(
         expect(patchSession).not.toHaveBeenCalled();
         expect(inject).not.toHaveBeenCalled();
         expect(origin).not.toHaveBeenCalled();
-        expect(scheduleEmit).not.toHaveBeenCalled();
         if (rollback) throw new Error('fixture rollback');
       });
       if (rollback) await expect(completion).rejects.toThrow('fixture rollback');
@@ -127,18 +111,6 @@ it.each([false, true])(
       expect(origin).toHaveBeenCalledTimes(rollback ? 0 : 1);
       expect(injectionVerified).toBe(!rollback);
       expect(originVerified).toBe(!rollback);
-      expect(scheduleEmit).toHaveBeenCalledTimes(rollback ? 0 : 1);
-      if (!rollback)
-        expect(scheduleEmit).toHaveBeenCalledWith(
-          'patched',
-          guardedSchedule,
-          expect.objectContaining({
-            path: 'schedules',
-            params: expect.objectContaining({
-              tenant: { tenant_id: 'tenant-completion', source: 'explicit' },
-            }),
-          })
-        );
       if (rollback)
         expect(rawRows(await executeRaw(raw, sql`SELECT id FROM completion_fixture`))).toEqual([]);
     } finally {

@@ -4,6 +4,7 @@ import {
 } from '@agor/core/types';
 import { BranchCleanupStepsService } from './services/branch-cleanup-steps.js';
 import type { MCPOAuthCallbackHandler } from './services/mcp-oauth-callback-route.js';
+import { ScheduleFailureNotificationsService } from './services/schedule-failure-notifications.js';
 /**
  * Service Registration
  *
@@ -878,6 +879,19 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   app.use('/repos', createReposService(db, app), {
     methods: ['find', 'get', 'create', 'update', 'patch', 'remove'],
   });
+
+  app.use('/schedule-failure-notifications', new ScheduleFailureNotificationsService(db), {
+    methods: ['find', 'get'],
+  });
+  app.service('schedule-failure-notifications').hooks({
+    before: {
+      all: [
+        ctx.requireAuth,
+        requireMinimumRole(ROLES.ADMIN, 'read schedule failure delivery status'),
+      ],
+    },
+  });
+  app.service('schedule-failure-notifications').publish(() => []);
 
   // First-class schedules. RBAC hooks wired in register-hooks.ts.
   app.use('/schedules', createSchedulesService(db), {
@@ -1902,8 +1916,6 @@ export function createExecuteHandler(
         messageSource: data.messageSource,
         promptOrigin: data.promptOrigin,
         ...(skillsIndex ? { skillsIndex } : {}),
-        skillsEnabled:
-          session.custom_context?.scheduled_run?.schedule_config_snapshot?.skills_enabled ?? true,
         // Authoritative sandbox mount inputs (consumed in spawn-executor →
         // buildSandboxWrap). Undefined when the sandbox / per_user home is off.
         sandboxBaseRepoPath,

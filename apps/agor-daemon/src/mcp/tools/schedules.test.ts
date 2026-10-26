@@ -34,18 +34,6 @@ describe('schedule MCP input schemas', () => {
 
     const createSchema = configs.get('agor_schedules_create')!.inputSchema;
     const patchSchema = configs.get('agor_schedules_patch')!.inputSchema;
-    expect(
-      patchSchema.safeParse({
-        scheduleId: 'schedule-1',
-        skills_enabled: false,
-        failure_threshold: 0,
-      }).data
-    ).toMatchObject({ skills_enabled: false, failure_threshold: 0 });
-    for (const failure_threshold of [-1, 1.5, 1001, '3', null]) {
-      expect(patchSchema.safeParse({ scheduleId: 'schedule-1', failure_threshold }).success).toBe(
-        false
-      );
-    }
     for (const codex_include_plugins of [false, true]) {
       const parsed = patchSchema.safeParse({
         scheduleId: 'schedule-1',
@@ -247,8 +235,6 @@ describe('schedule MCP input schemas', () => {
     });
 
     const createArgs = configs.get('agor_schedules_create')?.inputSchema.parse({
-      skills_enabled: false,
-      failure_threshold: 4,
       branchId: 'branch-1',
       name: 'Heartbeat',
       cron_expression: '0 9 * * *',
@@ -260,26 +246,19 @@ describe('schedule MCP input schemas', () => {
       },
     }) as Record<string, unknown>;
     await handlers.get('agor_schedules_create')?.(createArgs);
-    expect(create.mock.calls[0][0]).toMatchObject({ skills_enabled: false, failure_threshold: 4 });
     expect(create.mock.calls[0][0].agentic_tool_config).toEqual({
       agentic_tool: 'codex',
       configuration_reference: '__user_default__',
     });
 
     const patchArgs = configs.get('agor_schedules_patch')?.inputSchema.parse({
-      skills_enabled: true,
-      failure_threshold: 0,
       scheduleId: 'schedule-1',
       agentic_tool_config: { agentic_tool: 'codex', preset_id: 'preset-1' },
     }) as Record<string, unknown>;
     await handlers.get('agor_schedules_patch')?.(patchArgs);
     expect(patch).toHaveBeenCalledWith(
       'schedule-1',
-      {
-        skills_enabled: true,
-        failure_threshold: 0,
-        agentic_tool_config: { agentic_tool: 'codex', preset_id: 'preset-1' },
-      },
+      { agentic_tool_config: { agentic_tool: 'codex', preset_id: 'preset-1' } },
       {}
     );
   });

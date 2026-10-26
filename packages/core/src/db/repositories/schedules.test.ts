@@ -13,7 +13,6 @@ import {
   type AgenticToolPresetID,
   type BranchID,
   type PersistedScheduleAgenticToolConfig,
-  type Schedule,
   TaskStatus,
   USER_DEFAULT_AGENTIC_CONFIGURATION,
   type UserID,
@@ -30,6 +29,7 @@ import { dbTest } from '../test-helpers';
 import { AgenticToolPresetRepository } from './agentic-tool-presets';
 import { BranchRepository } from './branches';
 import { RepoRepository } from './repos';
+import { ScheduleFailureNotificationRepository } from './schedule-failure-notifications';
 import { ScheduleRepository } from './schedules';
 import { SessionRepository } from './sessions';
 import { TaskRepository } from './tasks';
@@ -468,257 +468,187 @@ describe('ScheduleRepository.delete', () => {
   });
 });
 
-async function createOccurrence(db: Database, schedule: Schedule, manual = false) {
-  const taskId = generateId();
-  const session = await new SessionRepository(db).create({
-    branch_id: schedule.branch_id,
-    created_by: schedule.created_by,
-    agentic_tool: 'claude-code',
-    schedule_id: schedule.schedule_id,
-    scheduled_from_branch: true,
-    scheduled_run_at: Date.now(),
-    custom_context: {
-      scheduled_run: {
-        rendered_prompt: 'Run once',
-        run_index: 1,
-        initial_task_id: taskId,
-        triggered_manually: manual,
-      },
-    },
-  });
-  return new TaskRepository(db).create({
-    task_id: taskId,
-    session_id: session.session_id,
-    created_by: schedule.created_by,
-    full_prompt: 'Run once',
-    status: TaskStatus.RUNNING,
-  });
-}
-
-async function guardedSchedule(db: Database, overrides: Partial<Schedule> = {}) {
+async function failureFixture(db: Database) {
   const ctx = await setupContext(db);
-  return ctx.scheduleRepo.create({
+  const schedule = await ctx.scheduleRepo.create({
     ...scheduleData(),
     branch_id: ctx.branchId,
     created_by: ctx.userId,
-    ...overrides,
   });
+  const occurrence = async (manual = false) => {
+    const taskId = generateId();
+    const session = await new SessionRepository(db).create({
+      branch_id: schedule.branch_id,
+      created_by: schedule.created_by,
+      agentic_tool: 'claude-code',
+      schedule_id: schedule.schedule_id,
+      scheduled_from_branch: true,
+      scheduled_run_at: Date.now(),
+      custom_context: {
+        scheduled_run: {
+          run_index: 1,
+          rendered_prompt: 'SECRET PROMPT MUST NOT ENTER OUTBOX',
+          initial_task_id: taskId,
+          triggered_manually: manual,
+        },
+      },
+    });
+    return new TaskRepository(db).create({
+      task_id: taskId,
+      session_id: session.session_id,
+      created_by: schedule.created_by,
+      full_prompt: 'SECRET PROMPT MUST NOT ENTER OUTBOX',
+      status: TaskStatus.RUNNING,
+    });
+  };
+  return {
+    schedule,
+    occurrence,
+    tasks: new TaskRepository(db),
+    notices: new ScheduleFailureNotificationRepository(db),
+  };
 }
 
-describe('durable schedule execution failure guard', () => {
-  dbTest('a new database connection observes and continues the durable streak', async ({ db }) => {
-    const schedule = await guardedSchedule(db, { failure_threshold: 2 });
-    const first = await createOccurrence(db, schedule);
-    await new TaskRepository(db).update(first.task_id, { status: TaskStatus.FAILED });
-    const files = (await executeRaw(db, sql`PRAGMA database_list`)).rows as Array<{
-      name: string;
-      file: string;
-    }>;
-    const file = files.find((entry) => entry.name === 'main')?.file;
-    if (!file) throw new Error('Expected a file-backed test database');
-    const replacement = createDatabase({ url: `file:${file}` });
-    const second = await createOccurrence(replacement, schedule);
-    await new TaskRepository(replacement).update(second.task_id, { status: TaskStatus.FAILED });
-    expect(await new ScheduleRepository(replacement).findById(schedule.schedule_id)).toMatchObject({
-      enabled: false,
-      consecutive_failures: 2,
-      attention_required: true,
-    });
+describe('authentic scheduled failure outbox', () => {
+  dbTest(
+    'distinct initial failures each enqueue once; no failure count or automatic pause',
+    async ({ db }) => {
+      const { schedule, occurrence, tasks, notices } = await failureFixture(db);
+      for (let i = 0; i < 4; i++) {
+        const task = await occurrence(i === 3); // Run-now is also a genuine scheduled occurrence.
+        const status = i === 2 ? TaskStatus.TIMED_OUT : TaskStatus.FAILED;
+        await tasks.update(task.task_id, { status, error_message: 'SECRET PROVIDER LOG' });
+        await tasks.update(task.task_id, { status });
+      }
+      expect(await notices.findAll()).toHaveLength(4);
+      expect(JSON.stringify(await notices.findAll())).not.toContain('SECRET');
+      expect((await new ScheduleRepository(db).findById(schedule.schedule_id))?.enabled).toBe(true);
+      await new ScheduleRepository(db).update(schedule.schedule_id, { enabled: false });
+      const afterHumanPause = await occurrence();
+      await tasks.update(afterHumanPause.task_id, { status: TaskStatus.FAILED });
+      expect(await notices.findAll()).toHaveLength(5);
+      expect((await new ScheduleRepository(db).findById(schedule.schedule_id))?.enabled).toBe(
+        false
+      );
+    }
+  );
+
+  dbTest(
+    'ordinary continuations, success and user Stop do not manufacture schedule failures',
+    async ({ db }) => {
+      const { occurrence, tasks, notices } = await failureFixture(db);
+      const initial = await occurrence();
+      await tasks.update(initial.task_id, { status: TaskStatus.COMPLETED });
+      const later = await tasks.create({
+        session_id: initial.session_id,
+        created_by: initial.created_by,
+        full_prompt: 'Later continuation',
+        status: TaskStatus.RUNNING,
+      });
+      await tasks.update(later.task_id, { status: TaskStatus.FAILED });
+      const stopped = await occurrence();
+      await tasks.update(stopped.task_id, { status: TaskStatus.STOPPED });
+      expect(await notices.findAll()).toHaveLength(0);
+    }
+  );
+
+  dbTest(
+    'restart/concurrent delivery CAS never sends twice, and retention does not erase intent',
+    async ({ db }) => {
+      const { schedule, occurrence, tasks, notices } = await failureFixture(db);
+      const task = await occurrence();
+      await tasks.update(task.task_id, { status: TaskStatus.FAILED });
+      const rows = (await executeRaw(db, sql`PRAGMA database_list`)).rows as Array<{
+        name: string;
+        file: string;
+      }>;
+      const file = rows.find((row) => row.name === 'main')?.file;
+      if (!file) throw new Error('Expected file-backed test DB');
+      const replacement = new ScheduleFailureNotificationRepository(
+        createDatabase({ url: `file:${file}` })
+      );
+      expect(
+        (
+          await Promise.all([
+            notices.beginSend(task.task_id, generateId(), 'channel:C123'),
+            replacement.beginSend(task.task_id, generateId(), 'channel:C123'),
+          ])
+        ).filter(Boolean)
+      ).toHaveLength(1);
+      await replacement.finish(task.task_id, 'provider-message');
+      expect(await notices.beginSend(task.task_id, generateId(), 'channel:C123')).toBe(false);
+      await new SessionRepository(db).delete(task.session_id);
+      await new ScheduleRepository(db).delete(schedule.schedule_id);
+      expect(await replacement.findById(task.task_id)).toMatchObject({
+        status: 'delivered',
+        platform_message_id: 'provider-message',
+      });
+    }
+  );
+
+  dbTest('failure settlement rolls back if its outbox intent cannot commit', async ({ db }) => {
+    const { occurrence, tasks, notices } = await failureFixture(db);
+    const task = await occurrence();
+    await executeRaw(
+      db,
+      sql`CREATE TRIGGER reject_alert BEFORE INSERT ON schedule_failure_notifications BEGIN SELECT RAISE(ABORT, 'fixture failure'); END`
+    );
+    await expect(tasks.update(task.task_id, { status: TaskStatus.FAILED })).rejects.toThrow();
+    expect((await tasks.findById(task.task_id))?.status).toBe(TaskStatus.RUNNING);
+    expect(await notices.findAll()).toHaveLength(0);
   });
 
-  dbTest(
-    'defaults on, survives replacement repositories, counts each initial Task only once',
-    async ({ db }) => {
-      const schedule = await guardedSchedule(db);
-      expect(schedule).toMatchObject({
-        skills_enabled: true,
-        failure_threshold: 3,
-        consecutive_failures: 0,
-        attention_required: false,
-      });
-      for (let i = 0; i < 3; i++) {
-        const task = await createOccurrence(db, schedule);
-        // A restarted daemon uses the same durable rows, not process-local counters.
-        await new TaskRepository(db).update(task.task_id, { status: TaskStatus.FAILED });
-        await new TaskRepository(db).update(task.task_id, { status: TaskStatus.FAILED });
-        expect(
-          (await new ScheduleRepository(db).findById(schedule.schedule_id))?.consecutive_failures
-        ).toBe(i + 1);
-      }
-      expect(await new ScheduleRepository(db).findById(schedule.schedule_id)).toMatchObject({
-        enabled: false,
-        pause_reason: 'repeated_failures',
-        attention_required: true,
-        cron_expression: schedule.cron_expression,
-        next_run_at: schedule.next_run_at,
-        agentic_tool_config: schedule.agentic_tool_config,
-      });
-      expect(await new ScheduleRepository(db).findDue()).toHaveLength(0);
-      const resumed = await new ScheduleRepository(db).update(schedule.schedule_id, {
-        enabled: true,
-      });
-      expect(resumed).toMatchObject({
-        enabled: true,
-        consecutive_failures: 0,
-        attention_required: false,
-      });
-      expect(resumed.pause_reason).toBeUndefined();
-      // No Task is re-created or replayed by acknowledging the guard.
-      expect(await new SessionRepository(db).countByScheduleId(schedule.schedule_id)).toBe(3);
-    }
-  );
-
-  dbTest(
-    'ignores later continuations and manual runs; success resets only the cron execution streak',
-    async ({ db }) => {
-      const schedule = await guardedSchedule(db);
-      const tasks = new TaskRepository(db);
-      const first = await createOccurrence(db, schedule);
-      await tasks.update(first.task_id, { status: TaskStatus.FAILED });
-      const later = await tasks.create({
-        session_id: first.session_id,
-        created_by: schedule.created_by,
-        full_prompt: 'Ordinary continuation',
-        status: TaskStatus.RUNNING,
-      });
-      await tasks.update(later.task_id, { status: TaskStatus.COMPLETED });
-      const manual = await createOccurrence(db, schedule, true);
-      await tasks.update(manual.task_id, { status: TaskStatus.FAILED });
-      expect(
-        (await new ScheduleRepository(db).findById(schedule.schedule_id))?.consecutive_failures
-      ).toBe(1);
-      const success = await createOccurrence(db, schedule);
-      await tasks.update(success.task_id, { status: TaskStatus.COMPLETED });
-      const failedContinuation = await tasks.create({
-        session_id: success.session_id,
-        created_by: schedule.created_by,
-        full_prompt: 'Later failure',
-        status: TaskStatus.RUNNING,
-      });
-      await tasks.update(failedContinuation.task_id, { status: TaskStatus.FAILED });
-      expect(await new ScheduleRepository(db).findById(schedule.schedule_id)).toMatchObject({
-        enabled: true,
-        consecutive_failures: 0,
-      });
-    }
-  );
-
-  dbTest(
-    'serializes overlapping failures and duplicate settlement without lost counts',
-    async ({ db }) => {
-      const schedule = await guardedSchedule(db, {
-        allow_concurrent_runs: true,
-        failure_threshold: 2,
-      });
-      const first = await createOccurrence(db, schedule);
-      const second = await createOccurrence(db, schedule);
-      await Promise.all([
-        new TaskRepository(db).update(first.task_id, { status: TaskStatus.FAILED }),
-        new TaskRepository(db).update(second.task_id, { status: TaskStatus.TIMED_OUT }),
-        new TaskRepository(db).update(first.task_id, { status: TaskStatus.FAILED }),
-      ]);
-      expect(await new ScheduleRepository(db).findById(schedule.schedule_id)).toMatchObject({
-        enabled: false,
-        consecutive_failures: 2,
-        attention_required: true,
-      });
-    }
-  );
-
-  dbTest(
-    'preserves human pauses, opt-out, unrelated schedules and cancellation boundaries',
-    async ({ db }) => {
-      const human = await guardedSchedule(db, { enabled: false, failure_threshold: 1 });
-      const optedOut = await guardedSchedule(db, { failure_threshold: 0 });
-      const sibling = await new ScheduleRepository(db).create({
-        ...human,
-        schedule_id: generateId(),
-        name: 'Sibling',
-        enabled: true,
-      });
-      const tasks = new TaskRepository(db);
-      for (const schedule of [human, optedOut]) {
-        const failed = await createOccurrence(db, schedule);
-        await tasks.update(failed.task_id, { status: TaskStatus.FAILED });
-      }
-      const stopped = await createOccurrence(db, sibling);
-      await tasks.update(stopped.task_id, { status: TaskStatus.STOPPED });
-      expect(await new ScheduleRepository(db).findById(human.schedule_id)).toMatchObject({
-        enabled: false,
-        attention_required: false,
-      });
-      expect(await new ScheduleRepository(db).findById(optedOut.schedule_id)).toMatchObject({
-        enabled: true,
-        attention_required: false,
-      });
-      expect(await new ScheduleRepository(db).findById(sibling.schedule_id)).toMatchObject({
-        enabled: true,
-        consecutive_failures: 0,
-      });
-    }
-  );
-
-  dbTest(
-    'counts verified containment failure once, never unverified containment or user Stop',
-    async ({ db }) => {
-      const schedule = await guardedSchedule(db, { failure_threshold: 1 });
-      const task = await createOccurrence(db, schedule);
-      const tasks = new TaskRepository(db);
-      await tasks.claimTermination({
-        taskId: task.task_id,
-        cause: 'heartbeat_lost',
-        errorMessage: 'Connection lost',
-        sdkFailure: {
-          reason: 'heartbeat_lost',
-          detected_at: new Date().toISOString(),
-          tool: 'claude-code',
-          termination: 'requested',
-        },
-      });
-      await tasks.claimTerminationCoordination({
-        taskId: task.task_id,
-        claimToken: 'test-claim',
-        leaseDurationMs: 30_000,
-        instanceId: 'test-instance',
-        bootId: 'test-boot',
-      });
-      await tasks.settleTermination({
-        taskId: task.task_id,
-        outcome: 'unverified',
-        coordinationToken: 'test-claim',
-        errorMessage: 'Not verified',
-      });
-      expect(
-        (await new ScheduleRepository(db).findById(schedule.schedule_id))?.consecutive_failures
-      ).toBe(0);
-      // A replacement coordinator may settle only after new authoritative evidence.
-      const request = (await tasks.findById(task.task_id))!.termination_request!;
-      await tasks.retryTermination(
-        task.task_id,
-        request.requested_at,
-        request.recovery_revision ?? request.requested_at
-      );
-      await tasks.claimTerminationCoordination({
-        taskId: task.task_id,
-        claimToken: 'test-claim-2',
-        leaseDurationMs: 30_000,
-        instanceId: 'test-instance-2',
-        bootId: 'test-boot-2',
-      });
-      await tasks.settleTermination({
-        taskId: task.task_id,
-        outcome: 'verified_absent',
-        coordinationToken: 'test-claim-2',
-      });
-      await tasks.settleTermination({
-        taskId: task.task_id,
-        outcome: 'verified_absent',
-        coordinationToken: 'test-claim-2',
-      });
-      expect(await new ScheduleRepository(db).findById(schedule.schedule_id)).toMatchObject({
-        enabled: false,
-        consecutive_failures: 1,
-      });
-    }
-  );
+  dbTest('verified containment enqueues once; unverified containment does not', async ({ db }) => {
+    const { occurrence, tasks, notices } = await failureFixture(db);
+    const task = await occurrence();
+    await tasks.claimTermination({
+      taskId: task.task_id,
+      cause: 'heartbeat_lost',
+      errorMessage: 'Lost',
+      sdkFailure: {
+        reason: 'heartbeat_lost',
+        tool: 'claude-code',
+        detected_at: new Date().toISOString(),
+        termination: 'requested',
+      },
+    });
+    await tasks.claimTerminationCoordination({
+      taskId: task.task_id,
+      claimToken: 'claim',
+      instanceId: 'daemon',
+      bootId: 'boot',
+      leaseDurationMs: 30000,
+    });
+    await tasks.settleTermination({
+      taskId: task.task_id,
+      outcome: 'unverified',
+      coordinationToken: 'claim',
+      errorMessage: 'Unverified',
+    });
+    expect(await notices.findAll()).toHaveLength(0);
+    const request = (await tasks.findById(task.task_id))!.termination_request!;
+    await tasks.retryTermination(
+      task.task_id,
+      request.requested_at,
+      request.recovery_revision ?? request.requested_at
+    );
+    await tasks.claimTerminationCoordination({
+      taskId: task.task_id,
+      claimToken: 'recovered',
+      instanceId: 'daemon',
+      bootId: 'boot',
+      leaseDurationMs: 30000,
+    });
+    await tasks.settleTermination({
+      taskId: task.task_id,
+      outcome: 'verified_absent',
+      coordinationToken: 'recovered',
+    });
+    await tasks.settleTermination({
+      taskId: task.task_id,
+      outcome: 'verified_absent',
+      coordinationToken: 'recovered',
+    });
+    expect(await notices.findAll()).toHaveLength(1);
+  });
 });

@@ -79,11 +79,6 @@ export class ScheduleRepository implements BaseRepository<Schedule, Partial<Sche
         agentic_tool_config: config,
         mcp_server_ids: row.mcp_server_ids ?? undefined,
         enabled: Boolean(row.enabled),
-        skills_enabled: Boolean(row.skills_enabled),
-        failure_threshold: row.failure_threshold,
-        consecutive_failures: row.consecutive_failures,
-        pause_reason: row.pause_reason === 'repeated_failures' ? row.pause_reason : undefined,
-        attention_required: Boolean(row.attention_required),
         allow_concurrent_runs: Boolean(row.allow_concurrent_runs),
         retention: row.retention,
         last_run_at: row.last_run_at ?? undefined,
@@ -132,11 +127,6 @@ export class ScheduleRepository implements BaseRepository<Schedule, Partial<Sche
       agentic_tool_preset_id: storesDefaultReference ? null : (preset_id ?? null),
       mcp_server_ids: s.mcp_server_ids ?? null,
       enabled: s.enabled ?? true,
-      skills_enabled: s.skills_enabled ?? true,
-      failure_threshold: s.failure_threshold ?? 3,
-      consecutive_failures: s.consecutive_failures ?? 0,
-      pause_reason: s.pause_reason ?? null,
-      attention_required: s.attention_required ?? false,
       allow_concurrent_runs: s.allow_concurrent_runs ?? false,
       retention: s.retention ?? 5,
       last_run_at: s.last_run_at ?? null,
@@ -371,13 +361,6 @@ export class ScheduleRepository implements BaseRepository<Schedule, Partial<Sche
         merged.agentic_tool_config = updates.agentic_tool_config;
       }
 
-      // An explicit resume acknowledges the guard without replaying old work.
-      // Ordinary metadata/config writes cannot clear a human or guard pause.
-      if (updates.enabled === true && !current.enabled) {
-        merged.consecutive_failures = 0;
-        merged.pause_reason = undefined;
-        merged.attention_required = false;
-      }
       const insertData = this.scheduleToInsert(merged);
       insertData.updated_at = new Date();
 

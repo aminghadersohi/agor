@@ -196,6 +196,7 @@ describe('retired fork-main front desk / profile image order', () => {
     '0117_teams_gateway_ha',
     '0118_branch_deletion_failed_discovery',
     '9033_schedule_execution_policy',
+    '9034_schedule_failure_notifications',
   ];
   const dropUpstreamTail = async (db: ReturnType<typeof createDatabase>) => {
     await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
