@@ -88,6 +88,25 @@ describe('assertRealtimePublishPolicyCoverage', () => {
     expect(realtimePublishPolicyFor(servicePath)?.audience).toBe('none');
   });
 
+  it('allows startup with private read-only schedule failure status and publishes no events', () => {
+    const app = feathers();
+    app.use(
+      'schedule-failure-notifications',
+      {
+        async find() {
+          return [];
+        },
+        async get() {
+          return {};
+        },
+      },
+      { methods: ['find', 'get'] }
+    );
+    expect(() => assertRealtimePublishPolicyCoverage(app)).not.toThrow();
+    expect(realtimePublishPolicyFor('schedule-failure-notifications')?.audience).toBe('none');
+    expect(isRealtimePublishAllowed('schedule-failure-notifications')).toBe(false);
+  });
+
   it('accepts an app whose services are all declared', () => {
     const app = { services: { sessions: {}, 'mcp-catalog/connect': {}, '/branches': {} } };
     expect(() => assertRealtimePublishPolicyCoverage(app)).not.toThrow();
