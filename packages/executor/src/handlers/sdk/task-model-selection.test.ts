@@ -16,13 +16,19 @@ function fixture(model = 'gpt-6-astra', endpoint?: string) {
 }
 
 describe('actual SDK model selection', () => {
-  it('rejects an asynchronous model edit before SDK consumption and on every reread', async () => {
+  it('binds the Task selection while keeping subsequent metadata fresh', async () => {
     const { session, sessions } = fixture();
     const first = await sessions.findById(sessionId);
     await Promise.resolve();
     session.model_config!.model = 'claude-opus-5-5';
     expect(first?.model_config?.model).toBe('gpt-6-astra');
-    await expect(sessions.findById(sessionId)).rejects.toThrow('cannot run on a codex');
+    session.sdk_session_id = 'new-sdk-id';
+    await expect(sessions.findById(sessionId)).resolves.toMatchObject({
+      model_config: { model: 'gpt-6-astra' },
+      sdk_session_id: 'new-sdk-id',
+    });
+    first!.model_config!.model = 'locally-mutated';
+    expect((await sessions.findById(sessionId))?.model_config?.model).toBe('gpt-6-astra');
   });
   it('accepts a corrected selection rather than rejecting an earlier stale model', async () => {
     const { session, sessions } = fixture('claude-opus-5-5');

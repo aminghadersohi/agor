@@ -1,16 +1,26 @@
 import { generateId, SAFE_ZERO_TURN_PROVIDER_RESULT_MESSAGE } from '@agor/core';
 import type { SDKMessage, SDKResultMessage, SDKSystemMessage } from '@agor/core/sdk';
-import type { Message, SessionID, TaskID } from '@agor/core/types';
+import type { Message, Session, SessionID, TaskID } from '@agor/core/types';
 import { MessageRole, withProviderDetail } from '@agor/core/types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { guardTaskModelSelection } from '../../handlers/sdk/task-model-selection.js';
 import type { MessagesService } from '../base/index.js';
 import { type ProcessedEvent, SDKMessageProcessor } from './message-processor.js';
 
-const promptState = vi.hoisted(() => ({ events: [] as unknown[] }));
+const promptState = vi.hoisted(() => ({
+  events: [] as unknown[],
+  onSelected: undefined as ((model?: string) => void) | undefined,
+}));
 
 vi.mock('./prompt-service.js', () => ({
   ClaudePromptService: class {
-    async *promptSessionStreaming(): AsyncGenerator<ProcessedEvent> {
+    constructor(
+      _messages: unknown,
+      private sessions: { findById(id: SessionID): Promise<Session | null> }
+    ) {}
+    async *promptSessionStreaming(id: SessionID): AsyncGenerator<ProcessedEvent> {
+      if (promptState.onSelected)
+        promptState.onSelected((await this.sessions.findById(id))?.model_config?.model);
       for (const event of promptState.events) {
         yield event as ProcessedEvent;
       }
@@ -407,6 +417,94 @@ describe('Claude diagnosis propagation', () => {
         harness.outgoing.some((message) => message.metadata?.is_missing_credential_failure)
       ).toBe(false);
       expect(JSON.stringify({ result, outgoing: harness.outgoing })).not.toContain('SECRET');
+    }
+  );
+});
+
+describe('ClaudeTool task-bound model selection', () => {
+  it.each(['streaming', 'non-streaming'] as const)(
+    'preserves active %s output and SDK metadata after a next-prompt edit',
+    async (mode) => {
+      const id = generateId() as SessionID;
+      const current = {
+        session_id: id,
+        model_config: { mode: 'exact', model: 'claude-opus-5-5', updated_at: '' },
+      } as Session;
+      const outgoing: Partial<Message>[] = [];
+      const messages = {
+        create: vi.fn(async (data: Partial<Message>) => {
+          outgoing.push(data);
+          return data as Message;
+        }),
+      };
+      const messagesRepo = {
+        findInitialUserMessagesByTaskId: vi.fn(async () => []),
+        getNextIndexBySessionId: vi.fn(async () => 0),
+      };
+      const makeTask = () => {
+        const repo = {
+          findById: async (_id: SessionID) => current,
+          update: vi.fn(async (_id: SessionID, data: Partial<Session>) => {
+            Object.assign(current, data);
+            return current;
+          }),
+        };
+        guardTaskModelSelection(repo, id, 'claude-code', {
+          apiKey: 'synthetic-key',
+          source: 'user',
+          useNativeAuth: false,
+          connection: {},
+        });
+        return {
+          repo,
+          tool: new ClaudeTool(
+            messagesRepo as never,
+            repo as never,
+            'synthetic-key',
+            messages as never
+          ),
+        };
+      };
+      const invoke = (tool: ClaudeTool) =>
+        mode === 'streaming'
+          ? tool.executePromptWithStreaming(id, 'hello', generateId() as TaskID)
+          : tool.executePrompt(id, 'hello', generateId() as TaskID);
+      const selected = vi.fn((model?: string) => {
+        expect(model).toBe('claude-opus-5-5');
+        current.model_config!.model = 'gpt-6-astra';
+      });
+      promptState.onSelected = selected;
+      promptState.events = [
+        {
+          type: 'complete',
+          role: MessageRole.ASSISTANT,
+          agentSessionId: 'sdk-existing-turn',
+          resolvedModel: 'claude-opus-5-5',
+          content: [{ type: 'text', text: 'valid existing turn output' }],
+        },
+        resultEvent(rawResult('success')),
+      ];
+      try {
+        const task = makeTask();
+        await expect(invoke(task.tool)).resolves.toMatchObject({ hadError: false });
+        expect(selected).toHaveBeenCalledOnce();
+        expect(outgoing.some((m) => m.role === MessageRole.ASSISTANT)).toBe(true);
+        expect(task.repo.update).toHaveBeenCalledWith(id, { sdk_session_id: 'sdk-existing-turn' });
+        expect((await task.repo.findById(id)).sdk_session_id).toBe('sdk-existing-turn');
+        const previous = [...outgoing];
+        const assistantCount = outgoing.filter((m) => m.role === MessageRole.ASSISTANT).length;
+        // A subsequent Task gets a new repository/guard and must reject the edited
+        // selection before its provider starts, without deleting the prior output.
+        await expect(invoke(makeTask().tool)).rejects.toThrow('cannot run on a claude-code');
+        expect(selected).toHaveBeenCalledOnce();
+        expect(outgoing.slice(0, previous.length)).toEqual(previous);
+        expect(outgoing.filter((m) => m.role === MessageRole.ASSISTANT)).toHaveLength(
+          assistantCount
+        );
+      } finally {
+        promptState.onSelected = undefined;
+        promptState.events = [];
+      }
     }
   );
 });
