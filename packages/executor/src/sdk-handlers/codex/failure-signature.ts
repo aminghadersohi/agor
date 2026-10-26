@@ -1,3 +1,18 @@
+const NATIVE_FAILURE_MESSAGES = {
+  rate_limit_exhausted:
+    'Codex exhausted its retries after HTTP 429 (Too Many Requests). Wait before trying again; review any output and tool activity before retrying. This does not establish an authentication or billing problem.',
+  model_capacity:
+    'Codex reported that the selected model is at capacity. Wait before trying again; review any output and tool activity before retrying.',
+} as const;
+
+/** Provider-local evidence; never credential remediation or replay authority. */
+export class CodexNativeFailureError extends Error {
+  constructor(readonly failureCode: keyof typeof NATIVE_FAILURE_MESSAGES) {
+    super(NATIVE_FAILURE_MESSAGES[failureCode]);
+    this.name = 'CodexNativeFailureError';
+  }
+}
+
 /**
  * Codex exec 0.160.0 drops codexErrorInfo from its JSONL ThreadError. These
  * exact native Display strings are a narrow compatibility bridge, not general

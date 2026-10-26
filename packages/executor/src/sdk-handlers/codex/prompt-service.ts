@@ -83,7 +83,7 @@ import type { PermissionMode, SessionID, TaskID, UserID } from '../../types.js';
 import { resolveContextUserId } from '../base/context-user.js';
 import type { TasksService } from '../base/index.js';
 import { forkCodexThreadViaAppServer } from './app-server-client.js';
-import { codexFailureSignature } from './failure-signature.js';
+import { CodexNativeFailureError, codexFailureSignature } from './failure-signature.js';
 import { applyAgorCodexLaunchPolicy } from './launch-policy.js';
 import { findLatestRolloutRecord } from './rollout-tail.js';
 import {
@@ -193,9 +193,13 @@ class CodexLifecycleError extends Error {
 
 function isKnownCodexBoundaryError(
   error: unknown
-): error is CodexLifecycleError | MCPExternalError {
+): error is CodexLifecycleError | CodexNativeFailureError | MCPExternalError {
   try {
-    return error instanceof CodexLifecycleError || error instanceof MCPExternalError;
+    return (
+      error instanceof CodexLifecycleError ||
+      error instanceof CodexNativeFailureError ||
+      error instanceof MCPExternalError
+    );
   } catch {
     return false;
   }
@@ -1788,10 +1792,10 @@ export class CodexPromptService {
               event.error,
               missingAuthentication ? 'configuration_required' : undefined
             );
+            const signature = codexFailureSignature(event.error);
+            if (!missingAuthentication && signature) throw new CodexNativeFailureError(signature);
             throw new CodexLifecycleError(
-              missingAuthentication
-                ? 'authentication_required'
-                : (codexFailureSignature(event.error) ?? 'turn_failed')
+              missingAuthentication ? 'authentication_required' : 'turn_failed'
             );
           }
 

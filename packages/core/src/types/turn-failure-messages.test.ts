@@ -32,8 +32,6 @@ describe('isMissingCredentialMessage', () => {
 
   it('rejects other failures and an empty template fill', () => {
     expect(isMissingCredentialMessage(CODEX_LIFECYCLE_MESSAGES.turn_failed)).toBe(false);
-    expect(isMissingCredentialMessage(CODEX_LIFECYCLE_MESSAGES.rate_limit_exhausted)).toBe(false);
-    expect(isMissingCredentialMessage(CODEX_LIFECYCLE_MESSAGES.model_capacity)).toBe(false);
     expect(isMissingCredentialMessage(missingScopedCredentialMessage(''))).toBe(false);
     expect(isMissingCredentialMessage('No scoped credential configured.')).toBe(false);
   });
