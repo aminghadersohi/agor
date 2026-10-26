@@ -480,8 +480,8 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
     modelConfig: Session['model_config'] | undefined
   ): void {
     if (!modelConfig) return;
-    // A curated model of another runtime can never run here; reject it on
-    // every write instead of letting the SDK fail the next turn.
+    // Reject cross-runtime aliases here. Exact provider-specific IDs are
+    // validated against the actual Task actor's connection before SDK use.
     const crossToolError = getCrossAgenticToolModelError(agenticTool, modelConfig);
     if (crossToolError) throw new BadRequest(crossToolError);
     if (agenticTool !== 'codex') return;

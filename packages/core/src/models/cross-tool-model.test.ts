@@ -67,3 +67,68 @@ describe('getCrossAgenticToolModelError', () => {
     expect(getCrossAgenticToolModelError('codex', null)).toBeUndefined();
   });
 });
+
+describe('exact provider-specific IDs', () => {
+  const selection = { mode: 'exact' as const, model: 'claude-opus-5-5' };
+  it('defers exact selection until the task provider is known', () => {
+    expect(getCrossAgenticToolModelError('codex', selection)).toBeUndefined();
+  });
+  it('rejects an exact foreign model on the native provider', () => {
+    expect(getCrossAgenticToolModelError('codex', selection, { useNativeAuth: true })).toContain(
+      'cannot run on a codex'
+    );
+    expect(getCrossAgenticToolModelError('codex', selection, { useNativeAuth: false })).toContain(
+      'cannot run on a codex'
+    );
+  });
+  it.each(['https://compatible.example/v1', 'http://localhost:8123/v1'])(
+    'allows an intentional exact ID on compatible endpoint %s',
+    (OPENAI_BASE_URL) => {
+      expect(
+        getCrossAgenticToolModelError('codex', selection, {
+          useNativeAuth: false,
+          connection: { OPENAI_BASE_URL },
+        })
+      ).toBeUndefined();
+    }
+  );
+  it.each([' ', 'not a url', 'file:///tmp/provider', 'https://api.openai.com/v1'])(
+    'does not use %s as a custom endpoint escape hatch',
+    (OPENAI_BASE_URL) => {
+      expect(
+        getCrossAgenticToolModelError('codex', selection, {
+          useNativeAuth: false,
+          connection: { OPENAI_BASE_URL },
+        })
+      ).toContain('cannot run on a codex');
+    }
+  );
+  it('requires exact mode and the matching tool endpoint, not another bucket', () => {
+    expect(
+      getCrossAgenticToolModelError(
+        'codex',
+        { ...selection, mode: 'alias' },
+        {
+          useNativeAuth: false,
+          connection: { OPENAI_BASE_URL: 'https://compatible.example' },
+        }
+      )
+    ).toContain('cannot run on a codex');
+    expect(
+      getCrossAgenticToolModelError('codex', selection, {
+        useNativeAuth: false,
+        connection: { ANTHROPIC_BASE_URL: 'https://compatible.example' },
+      })
+    ).toContain('cannot run on a codex');
+  });
+  it('supports the explicit Claude-compatible endpoint without exempting native auth', () => {
+    const model = { mode: 'exact' as const, model: 'gpt-6-astra' };
+    const connection = { ANTHROPIC_BASE_URL: 'https://compatible.example' };
+    expect(
+      getCrossAgenticToolModelError('claude-code', model, { connection, useNativeAuth: false })
+    ).toBeUndefined();
+    expect(
+      getCrossAgenticToolModelError('claude-code', model, { connection, useNativeAuth: true })
+    ).toContain('cannot run on a claude-code');
+  });
+});

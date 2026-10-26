@@ -464,6 +464,117 @@ describe('ConfigService.resolveApiKey', () => {
     expect(configMocks.resolveApiKey).not.toHaveBeenCalled();
   });
 
+  describe('persisted exact models use the shared Task actor provider', () => {
+    const request = {
+      taskId: 'task-1' as TaskID,
+      keyName: 'OPENAI_API_KEY',
+      tool: 'codex' as const,
+    };
+    const params = () => ({
+      provider: 'rest',
+      tenant: { tenant_id: 'tenant-1' },
+      user: { user_id: 'actor' },
+      authentication: {
+        strategy: 'jwt',
+        accessToken: 'synthetic-task-token',
+        payload: {
+          type: 'executor-session',
+          purpose: 'executor-task',
+          sub: 'actor',
+          tenant_id: 'tenant-1',
+          task_id: 'task-1',
+          session_id: 'session-1',
+          branch_id: 'branch-1',
+        },
+      },
+    });
+    function setup(actorHasEndpoint: boolean) {
+      const service = new ConfigService({} as never);
+      service.app = {
+        service: (name: string) => ({
+          get: async () =>
+            name === 'tasks'
+              ? { created_by: 'actor', session_id: 'session-1' }
+              : {
+                  created_by: 'different-session-owner',
+                  agentic_tool: 'codex',
+                  branch_id: 'branch-1',
+                  sdk_home_scope: 'branch',
+                  model_config: { mode: 'exact', model: 'claude-opus-5-5' },
+                },
+        }),
+      } as never;
+      configMocks.resolveApiKey.mockImplementation(async (_key, options) => {
+        expect(options.userId).toBe('actor');
+        expect(options.tool).toBe('codex');
+        return {
+          source: 'user',
+          useNativeAuth: false,
+          apiKey: 'synthetic-actor-key',
+          connection: actorHasEndpoint ? { OPENAI_BASE_URL: 'https://actor.example/v1' } : {},
+        };
+      });
+      return service;
+    }
+    it('accepts the actual caller endpoint even when the Session owner uses native models', async () => {
+      const service = setup(true);
+      await expect(service.resolveApiKey(request, params() as never)).resolves.toMatchObject({
+        connection: { OPENAI_BASE_URL: 'https://actor.example/v1' },
+      });
+      expect(dbMocks.runWithTenantDatabaseScope).toHaveBeenCalledWith(
+        expect.anything(),
+        'tenant-1',
+        expect.any(Function)
+      );
+      expect(dbMocks.assertRuntimeCredentialAuthority).toHaveBeenCalledWith(
+        'task-1',
+        expect.objectContaining({
+          principal_user_id: 'actor',
+          session_id: 'session-1',
+          branch_id: 'branch-1',
+        })
+      );
+      expect(homeMocks.resolveExecutionCredentialHome).not.toHaveBeenCalled();
+    });
+    it('rejects the caller native-provider connection, without borrowing the owner endpoint or ambient env', async () => {
+      vi.stubEnv('OPENAI_BASE_URL', 'https://owner.example/v1');
+      try {
+        await expect(setup(false).resolveApiKey(request, params() as never)).rejects.toThrow(
+          'cannot run on a codex'
+        );
+        expect(configMocks.resolveApiKey).toHaveBeenCalledOnce();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+    it.each([
+      'wrong-tenant',
+      'wrong-user',
+      'wrong-task',
+      'wrong-branch',
+      'missing-bearer',
+    ] as const)(
+      'rejects %s before consulting an endpoint or returning credentials',
+      async (kind) => {
+        const service = setup(true),
+          caller = params();
+        if (kind === 'wrong-tenant') caller.authentication.payload.tenant_id = 'tenant-2';
+        if (kind === 'wrong-user') caller.authentication.payload.sub = 'different-session-owner';
+        if (kind === 'wrong-task') caller.authentication.payload.task_id = 'task-2';
+        if (kind === 'wrong-branch') caller.authentication.payload.branch_id = 'branch-2';
+        if (kind === 'missing-bearer') caller.authentication.accessToken = '';
+        await expect(service.resolveApiKey(request, caller as never)).rejects.toThrow();
+        expect(configMocks.resolveApiKey).not.toHaveBeenCalled();
+      }
+    );
+    it('refuses a revoked task before resolving the caller endpoint', async () => {
+      const service = setup(true);
+      dbMocks.assertRuntimeCredentialAuthority.mockRejectedValueOnce(new Error('revoked'));
+      await expect(service.resolveApiKey(request, params() as never)).rejects.toThrow('revoked');
+      expect(configMocks.resolveApiKey).not.toHaveBeenCalled();
+    });
+  });
+
   describe('backend Claude task-only delivery', () => {
     const request = {
       taskId: 'task-1' as TaskID,

@@ -51,7 +51,7 @@ function createLaunch(session: Session) {
     bindExecutorLaunchAuthority: vi.fn(async () => ({
       session_id: 'session-1',
       branch_id: 'branch-1',
-      principal_user_id: 'user-1',
+      principal_user_id: 'prompt-actor',
       fs_access: 'write',
     })),
   };
@@ -96,6 +96,21 @@ describe('execute handler prompt payload', () => {
     expect('model' in withoutModel).toBe(false);
   });
 
+  it('defers persisted exact IDs to provider resolution under the Task actor token', async () => {
+    const { launch, sessionTokenService } = createLaunch({
+      ...baseSession,
+      agentic_tool: 'codex',
+      model_config: { mode: 'exact', model: 'claude-opus-5-5' },
+    } as Session);
+    await launch();
+    expect(sessionTokenService.generateToken).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-actor',
+      expect.anything()
+    );
+    expect(mocks.spawnExecutor).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ['codex', 'claude-opus-5-5', 'claude-code'],
     ['claude-code', 'gpt-6-astra', 'codex'],
@@ -105,7 +120,7 @@ describe('execute handler prompt payload', () => {
       const { launch, sessionTokenService } = createLaunch({
         ...baseSession,
         agentic_tool: tool,
-        model_config: { mode: 'exact', model },
+        model_config: { mode: 'alias', model },
       } as Session);
 
       await expect(launch()).rejects.toThrow(

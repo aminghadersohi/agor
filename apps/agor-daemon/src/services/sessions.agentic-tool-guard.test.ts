@@ -792,8 +792,8 @@ describe('SessionsService cross-runtime model guard', () => {
   // A gateway channel switched runtimes and refreshed an older thread Session
   // with the new runtime's model: Codex then ran `claude-opus-5-5` (and Claude
   // Code `gpt-6-astra`) and every turn failed inside the SDK.
-  const exactModel = (model: string) => ({
-    mode: 'exact' as const,
+  const aliasModel = (model: string) => ({
+    mode: 'alias' as const,
     model,
     effort: 'medium' as const,
     updated_at: '2026-01-01T00:00:00.000Z',
@@ -809,11 +809,11 @@ describe('SessionsService cross-runtime model guard', () => {
       const branchId = await createBranch(db);
       const sessionId = await createSession(db, branchId, {
         agentic_tool: tool,
-        model_config: exactModel(own),
+        model_config: aliasModel(own),
       });
       await createTask(db, sessionId);
 
-      await expect(service.patch(sessionId, { model_config: exactModel(foreign) })).rejects.toThrow(
+      await expect(service.patch(sessionId, { model_config: aliasModel(foreign) })).rejects.toThrow(
         `Model "${foreign}" is a ${owner} model and cannot run on a ${tool}`
       );
       expect((await new SessionRepository(db).findById(sessionId))?.model_config).toMatchObject({
@@ -821,7 +821,7 @@ describe('SessionsService cross-runtime model guard', () => {
       });
 
       await expect(
-        service.patch(sessionId, { model_config: exactModel(own) })
+        service.patch(sessionId, { model_config: aliasModel(own) })
       ).resolves.toMatchObject({ agentic_tool: tool, model_config: { model: own } });
     });
 
@@ -834,21 +834,46 @@ describe('SessionsService cross-runtime model guard', () => {
           agentic_tool: tool,
           status: SessionStatus.IDLE,
           created_by: TEST_USER_ID,
-          model_config: exactModel(foreign),
+          model_config: aliasModel(foreign),
         } as never)
       ).rejects.toThrow(/cannot run on a/);
     });
   }
+
+  dbTest('preserves an intentional exact ID through create and patch', async ({ db }) => {
+    const service = new SessionsService(db, STUB_APP);
+    const branchId = await createBranch(db);
+    const model_config = {
+      mode: 'exact' as const,
+      model: 'claude-opus-5-5',
+      effort: 'medium' as const,
+    };
+    const created = await service.create({
+      branch_id: branchId,
+      agentic_tool: 'codex',
+      status: SessionStatus.IDLE,
+      created_by: TEST_USER_ID,
+      model_config,
+    } as never);
+    const sessionId = (created as Session).session_id;
+    await createTask(db, sessionId as UUID);
+    await expect(service.patch(sessionId, { model_config })).resolves.toMatchObject({
+      model_config,
+    });
+    expect((await new SessionRepository(db).findById(sessionId))?.model_config).toMatchObject(
+      model_config
+    );
+  });
 
   dbTest('keeps accepting custom model strings that no other runtime lists', async ({ db }) => {
     const service = new SessionsService(db, STUB_APP);
     const branchId = await createBranch(db);
     const sessionId = await createSession(db, branchId, {
       agentic_tool: 'claude-code',
-      model_config: exactModel('claude-opus-5-5'),
+      model_config: aliasModel('claude-opus-5-5'),
     });
     await expect(
-      service.patch(sessionId, { model_config: exactModel('gpt-byok-proxy-model') })
+      service.patch(sessionId, { model_config: aliasModel('gpt-byok-proxy-model') })
     ).resolves.toMatchObject({ model_config: { model: 'gpt-byok-proxy-model' } });
   });
 });

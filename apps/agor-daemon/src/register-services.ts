@@ -1464,8 +1464,8 @@ export function createExecuteHandler(
     ) {
       throw new Error('Preset-backed sessions cannot override permission mode per task');
     }
-    // Sessions written before cross-runtime model writes were rejected can
-    // still carry another runtime's model; fail with the cause, not an SDK error.
+    // Reject persisted cross-runtime aliases before spawn. Exact IDs await
+    // task-scoped provider resolution; the shared Session owner is not authority.
     const crossToolModelError = getCrossAgenticToolModelError(
       session.agentic_tool,
       session.model_config

@@ -1,20 +1,8 @@
-/**
- * Hard validation: is this model a curated model of a *different* agentic tool?
- *
- * `lintModelToolMatch` only warns, on purpose: users pin custom model strings
- * (BYOK proxies, fine-tunes, dated snapshots), so a family prefix alone is not
- * proof of a mistake. A model ID that Agor's own registry lists for another
- * first-party runtime is different: a Codex Session handed `claude-opus-5-5`,
- * or a Claude Code Session handed `gpt-6-astra`, can only fail at the SDK
- * (often as an opaque "turn failed"). That happens when configuration
- * materialized for one runtime is written onto a Session of another, e.g. a
- * gateway channel that switched runtimes refreshing an older thread Session.
- *
- * Only curated registry IDs are rejected, and only when the Session's own tool
- * does not also list the ID. Custom strings and proxy tools are never rejected.
- */
+/** Registry ownership is a selection hint, not a custom provider capability catalog. */
 
 import type { AgenticToolName } from '../types/agentic-tool.js';
+import type { Session } from '../types/session.js';
+import type { ProviderConnection } from '../types/tenant-agentic-tool.js';
 import { AVAILABLE_CLAUDE_MODEL_ALIASES } from './claude.js';
 import { CODEX_MODEL_REGISTRY } from './codex.js';
 import { GEMINI_MODELS } from './gemini-shared.js';
@@ -68,11 +56,40 @@ export function findCrossAgenticToolModelOwner(
  */
 export function getCrossAgenticToolModelError(
   tool: StoredAgenticToolName,
-  modelConfig: { model?: string | null } | null | undefined
+  modelConfig:
+    | (Pick<NonNullable<Session['model_config']>, 'model'> &
+        Partial<Pick<NonNullable<Session['model_config']>, 'mode'>>)
+    | null
+    | undefined,
+  provider?: { connection?: ProviderConnection; useNativeAuth: boolean }
 ): string | undefined {
   const model = modelConfig?.model;
   const owner = findCrossAgenticToolModelOwner(model, tool);
   if (!owner) return undefined;
+  // Exact IDs are intentionally provider-specific. Selection/launch preparation
+  // cannot know the next Task's provider (especially on a shared Session).
+  // Defer to task-scoped credential resolution, never the Session creator.
+  if (modelConfig?.mode === 'exact') {
+    if (!provider) return undefined;
+    const connection = provider.connection;
+    const endpoint =
+      tool === 'codex'
+        ? (connection as ProviderConnection<'codex'> | undefined)?.OPENAI_BASE_URL
+        : tool === 'claude-code'
+          ? (connection as ProviderConnection<'claude-code'> | undefined)?.ANTHROPIC_BASE_URL
+          : undefined;
+    if (!provider.useNativeAuth && endpoint?.trim()) {
+      try {
+        const url = new URL(endpoint.trim());
+        const nativeHost = tool === 'codex' ? 'api.openai.com' : 'api.anthropic.com';
+        if (['http:', 'https:'].includes(url.protocol) && url.hostname !== nativeHost) {
+          return undefined;
+        }
+      } catch {
+        /* Invalid endpoints do not establish custom-provider intent. */
+      }
+    }
+  }
   return (
     `Model "${model}" is a ${owner} model and cannot run on a ${tool} session. ` +
     `Choose a ${tool} model; a session keeps the agent it was created with.`
