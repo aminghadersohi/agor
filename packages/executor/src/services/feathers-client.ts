@@ -183,11 +183,24 @@ export async function createExecutorClient(
 
   let hasConnectedOnce = false;
   let restoreAfterReconnect: Promise<void> | null = null;
+  let restoreRequested = false;
   const restoreSocketState = (): void => {
-    if (!hooks?.onReconnected || restoreAfterReconnect) return;
-    restoreAfterReconnect = Promise.resolve(hooks.onReconnected())
-      .catch((error) => {
-        console.error('[executor] Post-reconnect recovery failed:', error);
+    if (!hooks?.onReconnected) return;
+    restoreRequested = true;
+    if (restoreAfterReconnect) return;
+    restoreAfterReconnect = Promise.resolve()
+      .then(async () => {
+        // A second connection can arrive before the first recovery RPC rejects.
+        // Serialize recoveries but do not discard that newer connection's read.
+        while (restoreRequested && client.io.connected) {
+          restoreRequested = false;
+          try {
+            await hooks.onReconnected?.();
+          } catch {
+            // No provider payload, request body, or bearer in operational logs.
+            console.error('[executor] Post-reconnect recovery failed');
+          }
+        }
       })
       .finally(() => {
         restoreAfterReconnect = null;

@@ -478,6 +478,23 @@ Preserve these invariants:
     owned standalone PostgreSQL host); queues and Session projection change only
     from authoritative Task outcomes.
 
+### Transport recovery
+
+Executor namespace reconnects authenticate the same scoped bearer again; they
+do not claim or restart a Task. Reconnect recovery returns its durable-state
+reads to one rejection boundary, so another transport loss during recovery
+cannot become an unhandled process rejection. A newer reconnect observed while
+recovery is pending requests another serialized refresh. Heartbeats remain the
+independent durable Stop/authorization observation path.
+
+Permission saves that leave the canonical policy unchanged (compared under the
+tenant authorization fence, after normal write validation) invalidate caches
+without disconnecting sockets. Real policy changes, ownership/user changes,
+unknown results, and exact token revocation keep their eviction fences. This
+does not exempt executors from authorization or replay uncertain writes:
+transcript/tool mutations with lost acknowledgements still fail explicitly,
+and durable terminal state remains first-writer-wins.
+
 ## Code map
 
 | Responsibility                                         | Primary code                                                                                   |

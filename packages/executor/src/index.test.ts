@@ -24,6 +24,7 @@ vi.mock('./mcp-runtime-refresh.js', () => ({
 import { AUTHORIZATION_REVOKED_TERMINATION_MESSAGE } from '@agor/core/types';
 import { AgorExecutor } from './index.js';
 import { globalPermissionManager } from './permissions/permission-manager.js';
+import * as executorClient from './services/feathers-client.js';
 import { markExecutorCleanupUnverified } from './termination-state.js';
 
 const evidence = {
@@ -68,6 +69,48 @@ describe('AgorExecutor watchdog handoff', () => {
     vi.clearAllMocks();
     runtime.execute.mockResolvedValue(undefined);
     runtime.refreshMcp.mockResolvedValue({});
+  });
+
+  it('returns reconnect read failures to transport recovery without failing or replaying the turn', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    let claim!: (value: unknown) => void;
+    const claimed = new Promise((resolve) => {
+      claim = resolve;
+    });
+    const get = vi.fn().mockRejectedValue(new Error('socket has been disconnected'));
+    const patch = vi.fn();
+    const client = { service: () => ({ on: vi.fn(), get, patch, connectExecutor: () => claimed }) };
+    const connect = vi
+      .spyOn(executorClient, 'createExecutorClient')
+      .mockResolvedValue(client as never);
+    const executor = new AgorExecutor({
+      sessionToken: 'token',
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      prompt: 'prompt',
+      tool: 'codex',
+      daemonUrl: 'http://daemon',
+    });
+    // The lifecycle method itself is under test; do not install real process
+    // handlers or start a provider in this fixture.
+    vi.spyOn(
+      executor as unknown as { setupShutdownHandlers(): void },
+      'setupShutdownHandlers'
+    ).mockImplementation(() => {});
+    const started = executor.start();
+    await Promise.resolve();
+    const recovery = connect.mock.calls[0]?.[2]?.onReconnected;
+    expect(recovery).toBeTypeOf('function');
+    await expect(Promise.resolve(recovery!())).rejects.toThrow('socket has been disconnected');
+    expect(get.mock.calls).toEqual([['task-1'], ['task-1']]);
+    expect(patch).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+
+    claim({ task_id: 'task-1', status: 'running' });
+    await started;
+    expect(runtime.execute).toHaveBeenCalledOnce();
+    expect(exit).toHaveBeenCalledWith(0);
   });
 
   it('starts SDK observation before invoking the tool', async () => {

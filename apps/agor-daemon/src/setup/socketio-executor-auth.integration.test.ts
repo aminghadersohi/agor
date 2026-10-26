@@ -390,6 +390,75 @@ describe('executor Socket.IO connection capability', () => {
     expect(getAuthenticatedConnectionAuthority(connection)).toBeUndefined();
   });
 
+  it('keeps pending read and terminal RPCs alive for cache-only invalidation but still evicts real authority changes', async () => {
+    const harness = await startHarness();
+    harnesses.push(harness);
+    const socketId = harness.client.io.id;
+    let entered!: () => void;
+    let release!: () => void;
+    let reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    harness.app.service('tasks' as never).hooks({
+      before: {
+        all: [
+          async (context) => {
+            if (context.params.provider) {
+              entered();
+              await gate;
+            }
+            return context;
+          },
+        ],
+      },
+    });
+
+    const read = harness.client.service('tasks').get(TASK_ID);
+    await reached;
+    harness.app.emit('realtime:authorization-invalidated', {
+      tenantId: TENANT_ID,
+      disconnectSockets: false,
+    });
+    release();
+    await expect(read).resolves.toMatchObject({ task_id: TASK_ID, tenant_id: TENANT_ID });
+    expect(harness.client.io.id).toBe(socketId);
+
+    reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tasks = harness.client.service('tasks') as unknown as {
+      methods(...names: string[]): void;
+      finish(data: { task_id: string; status: 'completed' }): Promise<unknown>;
+    };
+    tasks.methods('finish');
+    const finish = tasks.finish({ task_id: TASK_ID, status: 'completed' });
+    await reached;
+    // A foreign tenant's real invalidation must not affect this credential.
+    harness.app.emit('realtime:authorization-invalidated', { tenantId: 'foreign-tenant' });
+    harness.app.emit('realtime:authorization-invalidated', {
+      tenantId: TENANT_ID,
+      disconnectSockets: false,
+    });
+    expect(harness.client.io.id).toBe(socketId);
+    const disconnected = waitForDisconnect(harness.client);
+    release();
+    await expect(finish).resolves.toMatchObject({ accepted: true, status: 'completed' });
+    await disconnected; // exact terminal token revocation still wins
+
+    const other = await startHarness();
+    harnesses.push(other);
+    const evicted = waitForDisconnect(other.client);
+    other.app.emit('realtime:authorization-invalidated', { tenantId: TENANT_ID });
+    await evicted;
+    expect(other.client.io.connected).toBe(false);
+  });
+
   it('projects a taskless command as the initiating user without granting a task room', async () => {
     const harness = await startHarness();
     harnesses.push(harness);

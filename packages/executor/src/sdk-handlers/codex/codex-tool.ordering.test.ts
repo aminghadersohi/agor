@@ -37,6 +37,59 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe('CodexTool ordered transcript persistence', () => {
+  it('rejects a lost tool-output acknowledgement without replay or silent successful completion', async () => {
+    let providerClosed = false;
+    const create = vi.fn(async (data: Partial<Message>) => data as Message);
+    const patch = vi.fn().mockRejectedValue(new Error('socket has been disconnected'));
+    const tool = new CodexTool(
+      {
+        findInitialUserMessagesByTaskId: vi.fn().mockResolvedValue([]),
+        getNextIndexBySessionId: vi.fn().mockResolvedValue(0),
+      } as unknown as MessagesRepository,
+      { findById: vi.fn().mockResolvedValue(null) } as unknown as SessionRepository,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { create, patch }
+    );
+    const promptService = {
+      async *promptSessionStreaming(): AsyncGenerator<CodexStreamEvent> {
+        try {
+          yield { type: 'tool_start', toolUse: { id: 'tool-1', name: 'WebSearch', input: {} } };
+          yield {
+            type: 'tool_complete',
+            toolUse: {
+              id: 'tool-1',
+              name: 'WebSearch',
+              input: {},
+              output: 'Durable output required',
+              status: 'completed',
+            },
+          };
+          yield {
+            type: 'complete',
+            threadId: '',
+            content: [{ type: 'text', text: 'must not be reported as persisted' }],
+          };
+        } finally {
+          providerClosed = true;
+        }
+      },
+    };
+    (tool as unknown as { promptService: typeof promptService }).promptService = promptService;
+    await expect(
+      tool.executePromptWithStreaming(
+        '018f0000-0000-7000-8000-000000000001' as never,
+        'prompt',
+        '018f0000-0000-7000-8000-000000000002' as never
+      )
+    ).rejects.toThrow('socket has been disconnected');
+    expect(patch).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledTimes(2); // user + tool start, never a false final response
+    expect(providerClosed).toBe(true);
+  });
+
   it('awaits concurrent tool acknowledgements in provider event order before the final response', async () => {
     const order: string[] = [];
     const firstToolStartAcknowledgement = deferred<Message>();

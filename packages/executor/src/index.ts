@@ -141,10 +141,7 @@ export class AgorExecutor {
       // Connect to daemon via Feathers/WebSocket
       executorDebug('[executor] Connecting to daemon via Feathers...');
       this.client = await createExecutorClient(this.config.daemonUrl, this.config.sessionToken, {
-        onReconnected: () => {
-          void this.refreshTerminationState('reconnect');
-          void this.refreshDurableMcpRecovery();
-        },
+        onReconnected: () => this.recoverAfterReconnect(),
       });
       executorDebug('[executor] Connected to daemon');
 
@@ -342,6 +339,16 @@ export class AgorExecutor {
       .get(this.config.taskId)
       .catch(() => null)) as Task | null;
     if (task) this.requestDurableMcpRecovery(task);
+  }
+
+  private async recoverAfterReconnect(): Promise<void> {
+    // Return both reads to the transport's recovery boundary. A second
+    // disconnect can reject either RPC before its acknowledgement. Neither
+    // read reclaims the Task or restarts provider work.
+    await Promise.all([
+      this.refreshTerminationState('reconnect'),
+      this.refreshDurableMcpRecovery(),
+    ]);
   }
 
   private handleTaskLifecycleUpdate(

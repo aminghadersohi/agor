@@ -147,6 +147,7 @@ import {
   publicBoardCommentPatchInput,
   rejectPublicBoardCommentUpdate,
 } from './services/board-comments.js';
+import { isUnchangedCapabilityPolicyResult } from './services/capability-policies.js';
 import { CODEX_AUTH_DEFER_USER_REALTIME } from './services/codex-auth-shared.js';
 import type { GatewayService } from './services/gateway.js';
 import { groupMembershipsHooks, groupsHooks } from './services/groups.js';
@@ -1167,12 +1168,22 @@ export function classifyPrimaryTeammateAuthorizationInvalidation(
  * evict; other revocation-capable writes do the same.
  */
 export function classifyRealtimeAuthorizationInvalidation(
-  context: Pick<HookContext, 'path' | 'method' | 'data'>
+  context: Pick<HookContext, 'path' | 'method' | 'data'> & { result?: unknown }
 ): RealtimeAuthorizationInvalidationMode {
   if (!['create', 'update', 'patch', 'remove'].includes(context.method)) return 'none';
 
   if (context.path === 'group-memberships') {
     return 'evict';
+  }
+
+  if (
+    context.method === 'patch' &&
+    ['branches/:id/permissions', 'boards/:id/permissions'].includes(context.path) &&
+    isUnchangedCapabilityPolicyResult(context.result)
+  ) {
+    // Re-saving the same validated policy changes revisions, not authority.
+    // Keep distributed caches coherent without killing unrelated live RPCs.
+    return 'cache';
   }
 
   if (
