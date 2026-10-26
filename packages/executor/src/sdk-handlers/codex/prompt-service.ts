@@ -83,6 +83,7 @@ import type { PermissionMode, SessionID, TaskID, UserID } from '../../types.js';
 import { resolveContextUserId } from '../base/context-user.js';
 import type { TasksService } from '../base/index.js';
 import { forkCodexThreadViaAppServer } from './app-server-client.js';
+import { codexFailureSignature } from './failure-signature.js';
 import { applyAgorCodexLaunchPolicy } from './launch-policy.js';
 import { findLatestRolloutRecord } from './rollout-tail.js';
 import {
@@ -1788,7 +1789,9 @@ export class CodexPromptService {
               missingAuthentication ? 'configuration_required' : undefined
             );
             throw new CodexLifecycleError(
-              missingAuthentication ? 'authentication_required' : 'turn_failed'
+              missingAuthentication
+                ? 'authentication_required'
+                : (codexFailureSignature(event.error) ?? 'turn_failed')
             );
           }
 

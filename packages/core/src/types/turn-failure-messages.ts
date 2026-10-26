@@ -32,11 +32,17 @@ export type CodexLifecycleFailureCode =
   | 'authentication_required'
   | 'completed_without_response'
   | 'turn_failed'
+  | 'rate_limit_exhausted'
+  | 'model_capacity'
   | 'stream_start_failed'
   | 'stream_interrupted'
   | 'stream_ended_without_completion';
 
 export const CODEX_LIFECYCLE_MESSAGES: Readonly<Record<CodexLifecycleFailureCode, string>> = {
+  rate_limit_exhausted:
+    'Codex exhausted its retries after HTTP 429 (Too Many Requests). Wait before trying again; review any output and tool activity before retrying. This does not establish an authentication or billing problem.',
+  model_capacity:
+    'Codex reported that the selected model is at capacity. Wait before trying again; review any output and tool activity before retrying.',
   authentication_required:
     'Codex authentication is not configured. Review Codex authentication settings and retry the prompt.',
   completed_without_response:

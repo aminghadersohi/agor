@@ -2898,6 +2898,54 @@ describe('CodexPromptService - event_msg terminal handling (issue #1749)', () =>
   });
 
   it.each([
+    [
+      'exceeded retry limit, last status: 429 Too Many Requests',
+      'rate_limit_exhausted',
+      'HTTP 429',
+    ],
+    [
+      'Selected model is at capacity. Please try a different model.',
+      'model_capacity',
+      'at capacity',
+    ],
+  ])('preserves actionable native failures without replay: %s', async (message, code, text) => {
+    const { service } = await makeInitializedStreamingService('existing-thread-id');
+    const before = mockRunStreamedInputs.length;
+    mockStreamEvents = [
+      {
+        type: 'item.completed',
+        item: {
+          id: 'already-done',
+          type: 'command_execution',
+          command: 'example-write',
+          aggregated_output: '',
+          exit_code: 0,
+          status: 'completed',
+        },
+      },
+      { type: 'error', message },
+      { type: 'turn.failed', error: { message } },
+    ];
+    const failure = await drain(service).catch((value: unknown) => value);
+    expect(failure).toMatchObject({ failureCode: code, message: expect.stringContaining(text) });
+    expect(mockRunStreamedInputs).toHaveLength(before + 1);
+    expect(mockSessionsRepo.update).not.toHaveBeenCalled();
+  });
+
+  it('waits for completion despite a recognized nonterminal failure notice', async () => {
+    const { service } = await makeInitializedStreamingService(null);
+    mockStreamEvents = [
+      { type: 'error', message: 'exceeded retry limit, last status: 429 Too Many Requests' },
+      { type: 'item.completed', item: { id: 'answer', type: 'agent_message', text: 'OK' } },
+      {
+        type: 'turn.completed',
+        usage: { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 },
+      },
+    ];
+    await expect(drain(service)).resolves.toBeDefined();
+  });
+
+  it.each([
     '401 Unauthorized: Bearer SENTINEL_TOKEN',
     '429 Too Many Requests https://SENTINEL_URL.test/?key=secret',
     'Context window exceeded\nSENTINEL_PROMPT',

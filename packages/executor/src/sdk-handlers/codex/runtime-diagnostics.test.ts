@@ -5,6 +5,26 @@ import { CodexRuntimeDiagnostics } from './runtime-diagnostics.js';
 describe('Codex runtime diagnostics', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it.each([
+    ['exceeded retry limit, last status: 429 Too Many Requests', 'rate_limit_exhausted'],
+    ['Selected model is at capacity. Please try a different model.', 'model_capacity'],
+  ])('recognizes only exact native failure signatures: %s', (message, reason) => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    new CodexRuntimeDiagnostics('tenant-a-session' as SessionID).recordFailure('turn_failed', {
+      message,
+    });
+    new CodexRuntimeDiagnostics('tenant-b-session' as SessionID).recordFailure('turn_failed', {
+      message: `${message} SENTINEL`,
+    });
+    expect(error.mock.calls[0][0]).toContain(`reason=${reason} metadata=native_signature`);
+    expect(error.mock.calls[0][0]).toContain('category=provider_unavailable');
+    expect(error.mock.calls[1][0]).toContain('category=unknown');
+    expect(error.mock.calls[1][0]).not.toContain(reason);
+    expect(error.mock.calls[1][0]).not.toContain('tenant-a-session');
+    expect(JSON.stringify(error.mock.calls)).not.toContain('SENTINEL');
+    expect(JSON.stringify(error.mock.calls)).not.toContain(message);
+  });
+
   // Defensive extension metadata, NOT fixtures claiming the pinned Codex JSONL
   // emits HTTP statuses. Its declared errors are message-only (see service tests).
   it.each([

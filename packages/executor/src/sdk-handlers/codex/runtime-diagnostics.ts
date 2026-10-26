@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { sanitizeMCPExternalError } from '@agor/core/mcp';
 import type { SessionID, TaskID } from '@agor/core/types';
+import { codexFailureSignature } from './failure-signature.js';
 
 // Codex SDK 0.160.0 forwards native spawn/filesystem errors. Do not log their
 // path, syscall, spawnargs, or message. These codes describe a runtime failure,
@@ -71,22 +72,25 @@ export class CodexRuntimeDiagnostics {
     }
     const runtimeFailure = runtimeCode !== undefined && status === undefined && code === undefined;
     if (runtimeFailure) code = runtimeCode;
-    // No prose parsing. The pinned SDK's ThreadError/ThreadErrorEvent have only
-    // message; CLI exits and JSONL parse errors are also prose-only Error objects.
-    // In particular TypeError alone is not evidence of provider unavailability.
+    // Exact native signatures recover limited evidence lost by exec JSONL.
+    // Do not treat arbitrary prose or TypeError as provider unavailability.
+    const signature = codexFailureSignature(error);
     const classification =
       category ??
-      (runtimeFailure
-        ? 'runtime_failure'
-        : code || status !== undefined
-          ? safe.category
-          : 'unknown');
+      (signature
+        ? 'provider_unavailable'
+        : runtimeFailure
+          ? 'runtime_failure'
+          : code || status !== undefined
+            ? safe.category
+            : 'unknown');
     const message =
       `[codex.runtime] event=${event} reference=${reference} session_id=${this.sessionId}` +
       `${this.taskId ? ` task_id=${this.taskId}` : ''}` +
       ` category=${classification} type=${runtimeFailure ? 'SystemError' : type}` +
       `${code ? ` code=${code}` : ''}${status !== undefined ? ` status=${status}` : ''}` +
-      ` metadata=${code || status !== undefined ? 'structured' : 'unavailable'}`;
+      `${signature ? ` reason=${signature}` : ''}` +
+      ` metadata=${code || status !== undefined ? 'structured' : signature ? 'native_signature' : 'unavailable'}`;
     if (terminal) console.error(message);
     else console.warn(`${message} outcome=awaiting_terminal_event`);
   }
