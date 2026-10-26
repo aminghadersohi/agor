@@ -40,6 +40,7 @@ import type { AgorClient } from '../../services/feathers-client.js';
 import { markTaskFailurePersisted } from '../../terminal-task.js';
 import { isDaemonOwnedAbort, markExecutorCleanupUnverified } from '../../termination-state.js';
 import { configureSessionGitSafeDirectories } from './git-safe-directory.js';
+import { guardTaskModelSelection } from './task-model-selection.js';
 
 const DEBUG_SDK_EXECUTOR =
   process.env.AGOR_DEBUG_SDK_EXECUTOR === '1' || process.env.DEBUG?.includes('sdk-executor');
@@ -626,6 +627,10 @@ export async function executeToolTask(params: {
 
     // Create execution context
     const ctx = createExecutionContext(client, toolName, sessionId, taskId, params.onPulse);
+
+    // Validate the same detached model snapshot that each SDK consumes, against
+    // this Task actor's resolved connection (never ambient/Session-owner config).
+    guardTaskModelSelection(ctx.repos.sessions, sessionId, toolName, resolution);
 
     // Create tool instance using factory function
     // Pass the resolved key (or empty string) and useNativeAuth flag

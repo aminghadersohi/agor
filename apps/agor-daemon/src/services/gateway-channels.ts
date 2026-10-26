@@ -20,7 +20,7 @@ import {
   isSlackWriteTargetAllowed,
   validateDiscordSetup,
 } from '@agor/core/gateway';
-import { isInvalidModelConfigError } from '@agor/core/models';
+import { getCrossAgenticToolModelError, isInvalidModelConfigError } from '@agor/core/models';
 import {
   type AgenticToolConfigurationSource,
   type AuthenticatedParams,
@@ -216,6 +216,8 @@ export class GatewayChannelsService extends DrizzleService<
           ? (channel.agor_user_id as UserID)
           : undefined,
       });
+      const crossToolError = getCrossAgenticToolModelError(tool, materialized.model_config);
+      if (crossToolError) throw new BadRequest(crossToolError);
       const resolved = materializedAgenticToolConfigurationToGatewayConfig(config, materialized);
       this.assertValidEnvironmentVariables(resolved);
       return resolved;

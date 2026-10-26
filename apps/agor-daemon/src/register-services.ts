@@ -102,6 +102,7 @@ import {
   sanitizeMCPExternalError,
 } from '@agor/core/mcp';
 import { catalogRelayIssuer } from '@agor/core/mcp-catalog';
+import { getCrossAgenticToolModelError } from '@agor/core/models';
 import type {
   MCPOAuthDynamicClientRegistrationRequest,
   OAuthFlowContext,
@@ -1463,6 +1464,13 @@ export function createExecuteHandler(
     ) {
       throw new Error('Preset-backed sessions cannot override permission mode per task');
     }
+    // Reject persisted cross-runtime aliases before spawn. Exact IDs await
+    // task-scoped provider resolution; the shared Session owner is not authority.
+    const crossToolModelError = getCrossAgenticToolModelError(
+      session.agentic_tool,
+      session.model_config
+    );
+    if (crossToolModelError) throw new BadRequest(crossToolModelError);
     if (session.agentic_tool === 'opencode') {
       if (!tenantId) throw new Error('Missing active tenant context for OpenCode execution');
       OPENCODE_DAEMON_CONTRIBUTION.admitExecutor({

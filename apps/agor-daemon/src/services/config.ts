@@ -197,6 +197,23 @@ export class ConfigService {
       }
     }
 
+    // Provider context belongs to the live Task principal, regardless of a mutable
+    // Session model selection. The executor validates the model it actually reads.
+    if (tool && executorScope) {
+      const authority = authenticatedTaskExecutorRuntimeAuthority(params);
+      if (!authority || authority.userId !== userId || authority.sessionId !== sessionId) {
+        throw new Forbidden('A live task executor is required to validate this provider model.');
+      }
+      await runWithTenantDatabaseScope(this.db, authority.tenantId, (db) =>
+        new TaskRepository(db).assertRuntimeCredentialAuthority(taskId, {
+          token_fingerprint: authority.tokenFingerprint,
+          principal_user_id: authority.userId,
+          session_id: authority.sessionId,
+          branch_id: authority.branchId,
+        })
+      );
+    }
+
     let result = await runWithTenantDatabaseScope(
       this.db,
       internalParams.tenant?.tenant_id,

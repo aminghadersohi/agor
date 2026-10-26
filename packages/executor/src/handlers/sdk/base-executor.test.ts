@@ -890,3 +890,101 @@ describe('executeToolTask credential resolution logging', () => {
     ]);
   });
 });
+
+describe('executeToolTask consumed model/provider pair', () => {
+  it.each(['drift', 'corrected', 'custom', 'missing', 'decryption'] as const)(
+    'uses the actual consumed selection after asynchronous resolution (%s)',
+    async (scenario) => {
+      const session = {
+        model_config: {
+          mode: 'exact',
+          model: scenario === 'drift' ? 'gpt-6-astra' : 'claude-opus-5-5',
+          updated_at: '',
+        },
+      };
+      let finishResolution!: () => void;
+      let startedResolution!: () => void;
+      const resolving = new Promise<void>((resolve) => {
+        startedResolution = resolve;
+      });
+      const pending = new Promise<void>((resolve) => {
+        finishResolution = resolve;
+      });
+      const providerConsume = vi.fn();
+      const createMessage = vi.fn();
+      const createTool = vi.fn(
+        (repos: Parameters<Parameters<typeof executeToolTask>[0]['createTool']>[0]) => ({
+          executePromptWithStreaming: async () => {
+            const consumed = await repos.sessions.findById('session-1' as never);
+            providerConsume(consumed?.model_config?.model);
+            return { userMessageId: 'user-1' as MessageID, assistantMessageIds: [] };
+          },
+        })
+      );
+      const client = {
+        service(name: string) {
+          if (name === 'config/resolve-api-key')
+            return {
+              create: async () => {
+                startedResolution();
+                await pending;
+                const absent = scenario === 'missing' || scenario === 'decryption';
+                return {
+                  apiKey: absent ? null : 'synthetic-key',
+                  source: absent ? 'none' : 'user',
+                  connection:
+                    scenario === 'custom' ? { OPENAI_BASE_URL: 'https://caller.example/v1' } : {},
+                  useNativeAuth: false,
+                  decryptionFailed: scenario === 'decryption',
+                };
+              },
+            };
+          if (name === 'sessions') return { get: async () => session };
+          if (name === 'tasks') return { patch: vi.fn() };
+          if (name === 'messages')
+            return {
+              create: createMessage,
+              patch: vi.fn(),
+              find: vi.fn().mockResolvedValue({ data: [] }),
+            };
+          if (name === '/tasks/streaming') return { create: vi.fn() };
+          throw new Error(`unexpected service ${name}`);
+        },
+      } as never;
+      const execution = executeToolTask({
+        client,
+        sessionId: 'session-1' as never,
+        taskId: 'task-1' as never,
+        prompt: 'test',
+        abortController: new AbortController(),
+        apiKeyEnvVar: 'OPENAI_API_KEY',
+        toolName: 'codex',
+        createTool,
+      });
+      await resolving;
+      if (scenario === 'drift') session.model_config.model = 'claude-opus-5-5';
+      if (scenario === 'corrected') session.model_config.model = 'gpt-6-astra';
+      finishResolution();
+      if (scenario === 'custom' || scenario === 'corrected') {
+        await execution;
+        expect(providerConsume).toHaveBeenCalledWith(session.model_config.model);
+      } else {
+        await expect(execution).rejects.toThrow(
+          scenario === 'drift'
+            ? 'cannot run on a codex'
+            : scenario === 'decryption'
+              ? 'could not be decrypted'
+              : 'No scoped codex credential'
+        );
+        expect(providerConsume).not.toHaveBeenCalled();
+        if (scenario !== 'drift') expect(createTool).not.toHaveBeenCalled();
+        if (scenario === 'missing')
+          expect(createMessage).toHaveBeenCalledWith(
+            expect.objectContaining({
+              metadata: expect.objectContaining({ is_missing_credential_failure: true }),
+            })
+          );
+      }
+    }
+  );
+});

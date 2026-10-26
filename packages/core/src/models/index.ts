@@ -13,8 +13,9 @@ export * from './codex.js';
 
 // Copilot models
 export * from './copilot.js';
+// Hard validation: a curated model of a different first-party agentic tool
+export * from './cross-tool-model.js';
 export * from './cursor.js';
-
 // Gemini models
 export * from './gemini.js';
 // Soft validation: does a model ID look like it belongs to its agentic tool?

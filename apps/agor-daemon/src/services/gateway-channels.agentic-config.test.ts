@@ -75,6 +75,50 @@ describe('GatewayChannelsService exact agentic configuration', () => {
     expect(await new GatewayChannelRepository(db).findAll()).toHaveLength(0);
   });
 
+  for (const [agent, model, owner] of [
+    ['codex', 'claude-opus-5-5', 'claude-code'],
+    ['claude-code', 'gpt-6-astra', 'codex'],
+  ] as const) {
+    dbTest(`rejects a ${owner} model on a ${agent} channel before persistence`, async ({ db }) => {
+      const { data, owner: user } = await channelData(db);
+      const service = new GatewayChannelsService(db);
+      await expect(
+        service.create(
+          {
+            ...data,
+            agentic_config: {
+              agent,
+              modelConfig: { mode: 'alias', model, effort: 'medium' },
+            } as unknown as GatewayChannel['agentic_config'],
+          },
+          { user } as never
+        )
+      ).rejects.toThrow(`Model "${model}" is a ${owner} model and cannot run on a ${agent}`);
+      expect(await new GatewayChannelRepository(db).findAll()).toHaveLength(0);
+    });
+  }
+
+  dbTest('preserves intentional exact provider IDs for task-scoped validation', async ({ db }) => {
+    const { data, owner } = await channelData(db);
+    const created = await new GatewayChannelsService(db).create(
+      {
+        ...data,
+        agentic_config: {
+          agent: 'codex',
+          modelConfig: { mode: 'exact', model: 'claude-opus-5-5', effort: 'medium' },
+        },
+      } as never,
+      { user: owner } as never
+    );
+    expect(created.agentic_config).toMatchObject({
+      agent: 'codex',
+      modelConfig: { mode: 'exact', model: 'claude-opus-5-5' },
+    });
+    expect(
+      (await new GatewayChannelRepository(db).findById(created.id))?.agentic_config
+    ).toMatchObject({ modelConfig: { mode: 'exact', model: 'claude-opus-5-5' } });
+  });
+
   dbTest('resolves an exact OpenCode pair from the stable execution owner', async ({ db }) => {
     const { data, owner } = await channelData(db, true);
 

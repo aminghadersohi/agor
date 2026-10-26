@@ -37,7 +37,7 @@ const baseSession = {
   sdk_home_scope: 'execution_home',
 } as Session;
 
-async function launchPrompt(session: Session) {
+function createLaunch(session: Session) {
   mocks.session = session;
   mocks.spawnExecutor.mockReset();
   const ctx = {
@@ -51,7 +51,7 @@ async function launchPrompt(session: Session) {
     bindExecutorLaunchAuthority: vi.fn(async () => ({
       session_id: 'session-1',
       branch_id: 'branch-1',
-      principal_user_id: 'user-1',
+      principal_user_id: 'prompt-actor',
       fs_access: 'write',
     })),
   };
@@ -62,9 +62,15 @@ async function launchPrompt(session: Session) {
     sessionTokenService as never,
     tasksService as never
   );
-  await runWithTenantContext('tenant-1', () =>
-    execute('session-1', { taskId: 'task-1', prompt: 'hello' }, {})
-  );
+  const launch = () =>
+    runWithTenantContext('tenant-1', () =>
+      execute('session-1', { taskId: 'task-1', prompt: 'hello' }, {})
+    );
+  return { launch, sessionTokenService };
+}
+
+async function launchPrompt(session: Session) {
+  await createLaunch(session).launch();
   expect(mocks.spawnExecutor).toHaveBeenCalledOnce();
   return mocks.spawnExecutor.mock.calls[0][0].params as Record<string, unknown>;
 }
@@ -89,4 +95,39 @@ describe('execute handler prompt payload', () => {
     expect('model' in withoutConfig).toBe(false);
     expect('model' in withoutModel).toBe(false);
   });
+
+  it('defers persisted exact IDs to provider resolution under the Task actor token', async () => {
+    const { launch, sessionTokenService } = createLaunch({
+      ...baseSession,
+      agentic_tool: 'codex',
+      model_config: { mode: 'exact', model: 'claude-opus-5-5' },
+    } as Session);
+    await launch();
+    expect(sessionTokenService.generateToken).toHaveBeenCalledWith(
+      'session-1',
+      'prompt-actor',
+      expect.anything()
+    );
+    expect(mocks.spawnExecutor).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['codex', 'claude-opus-5-5', 'claude-code'],
+    ['claude-code', 'gpt-6-astra', 'codex'],
+  ] as const)(
+    'refuses to launch a %s session persisted with another runtime model (%s)',
+    async (tool, model, owner) => {
+      const { launch, sessionTokenService } = createLaunch({
+        ...baseSession,
+        agentic_tool: tool,
+        model_config: { mode: 'alias', model },
+      } as Session);
+
+      await expect(launch()).rejects.toThrow(
+        `Model "${model}" is a ${owner} model and cannot run on a ${tool}`
+      );
+      expect(sessionTokenService.generateToken).not.toHaveBeenCalled();
+      expect(mocks.spawnExecutor).not.toHaveBeenCalled();
+    }
+  );
 });
