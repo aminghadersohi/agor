@@ -1489,3 +1489,107 @@ describe('scheduler execution policy admission', () => {
     }
   });
 });
+
+describe('locked manual admission pause fence', () => {
+  for (const pauseKind of ['human', 'automatic'] as const) {
+    for (const recovering of [false, true]) {
+      dbTest(
+        `${pauseKind} pause fences new manual work but preserves admitted recovery (${recovering})`,
+        async ({ db }) => {
+          const now = vi.spyOn(Date, 'now').mockReturnValue(NOW);
+          const { creator, schedule } = await seedRunnableSchedule(
+            db,
+            { email: `manual-fence-${generateId()}@example.com`, name: 'Creator' },
+            { agentic_tool: 'claude-code' }
+          );
+          await new ScheduleRepository(db).update(schedule.schedule_id, { failure_threshold: 1 });
+          const { app, prompt } = createSchedulerApp(db);
+          let admitted: Session | undefined;
+          if (recovering) {
+            const crashed = new SchedulerService(db, app, {
+              testHooks: {
+                afterSessionAdmission: (session) => {
+                  admitted = session;
+                  throw new Error('simulated process death');
+                },
+              },
+            });
+            await expect(
+              crashed.executeScheduleNow({
+                scheduleId: schedule.schedule_id,
+                triggeredBy: creator.user_id,
+              })
+            ).rejects.toThrow('simulated process death');
+          }
+          // A genuine earlier cron occurrence can trip the automatic guard while
+          // run-now is between its enabled pre-read and its admission lock.
+          const taskId = generateId();
+          if (pauseKind === 'automatic') {
+            const prior = await new SessionRepository(db).create({
+              branch_id: schedule.branch_id,
+              created_by: creator.user_id,
+              agentic_tool: 'claude-code',
+              schedule_id: schedule.schedule_id,
+              scheduled_from_branch: true,
+              scheduled_run_at: NOW - 60_000,
+              custom_context: {
+                scheduled_run: {
+                  run_index: 1,
+                  rendered_prompt: 'Prior cron',
+                  initial_task_id: taskId,
+                },
+              },
+            });
+            await new TaskRepository(db).create({
+              task_id: taskId,
+              session_id: prior.session_id,
+              created_by: creator.user_id,
+              full_prompt: 'Prior cron',
+              status: TaskStatus.RUNNING,
+            });
+          }
+          const lock = ScheduleRepository.prototype.lockForRunAdmission;
+          const race = vi
+            .spyOn(ScheduleRepository.prototype, 'lockForRunAdmission')
+            .mockImplementationOnce(async function (this: ScheduleRepository, id) {
+              await lock.call(this, id);
+              if (pauseKind === 'human') await this.update(id, { enabled: false });
+              else await new TaskRepository(db).update(taskId, { status: TaskStatus.FAILED });
+            });
+          try {
+            const run = new SchedulerService(db, app).executeScheduleNow({
+              scheduleId: schedule.schedule_id,
+              triggeredBy: creator.user_id,
+            });
+            if (recovering) {
+              expect((await run).session_id).toBe(admitted?.session_id);
+              expect(prompt).toHaveBeenCalledOnce();
+              expect(prompt.mock.calls[0][0].idempotencyTaskId).toBe(
+                admitted?.custom_context?.scheduled_run?.initial_task_id
+              );
+            } else {
+              await expect(run).rejects.toMatchObject({ code: 'schedule_disabled' });
+              expect(prompt).not.toHaveBeenCalled();
+            }
+            const sessions = await new SessionRepository(db).findByScheduleId(schedule.schedule_id);
+            expect(sessions).toHaveLength(
+              (pauseKind === 'automatic' ? 1 : 0) + (recovering ? 1 : 0)
+            );
+            expect(await new ScheduleRepository(db).findById(schedule.schedule_id)).toMatchObject({
+              enabled: false,
+              attention_required: pauseKind === 'automatic',
+            });
+            if (pauseKind === 'automatic') {
+              expect((await new TaskRepository(db).findById(taskId))?.status).toBe(
+                TaskStatus.FAILED
+              );
+            }
+          } finally {
+            race.mockRestore();
+            now.mockRestore();
+          }
+        }
+      );
+    }
+  }
+});

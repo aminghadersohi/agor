@@ -2,7 +2,10 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase, type Database } from './client';
 import { executeRaw, rawRows } from './database-wrapper';
-import { dropTeamsAndDeletionDiscoveryObjectsPostgres } from './fork-rewind.test-support';
+import {
+  dropScheduleExecutionPolicyColumns,
+  dropTeamsAndDeletionDiscoveryObjectsPostgres,
+} from './fork-rewind.test-support';
 import { checkMigrationStatus, RETIRED_FORK_MAIN_ORDER, runMigrations } from './migrate';
 
 const postgresUrl = process.env.AGOR_TEST_POSTGRES_URL;
@@ -26,6 +29,7 @@ const UPSTREAM_TAIL = [
   '9032_session_attention_states',
   '0118_teams_gateway_ha',
   '0119_branch_deletion_failed_discovery',
+  '9033_schedule_execution_policy',
 ];
 
 // Fork main journalled front desk at 1790129000214 and profile images at
@@ -69,6 +73,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       // Upstream's Teams gateway HA and failed-deletion discovery replay with
       // plain CREATE/ADD statements too.
       await dropTeamsAndDeletionDiscoveryObjectsPostgres(db);
+      await dropScheduleExecutionPolicyColumns(db);
     }
 
     async function recordRetiredOrder(count: 1 | 2) {

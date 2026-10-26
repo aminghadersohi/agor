@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateId } from '../lib/ids';
 import { createDatabase, type Database } from './client';
 import { executeRaw, isPostgresDatabase, rawRows } from './database-wrapper';
+import { dropScheduleExecutionPolicyColumns } from './fork-rewind.test-support';
 import { checkMigrationStatus, classifyMigrationWatermark, runMigrations } from './migrate';
 import { MCPServerRepository } from './repositories/mcp-servers';
 import { UsersRepository } from './repositories/users';
@@ -453,6 +454,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
       // is newer than this watermark.
       await executeRaw(db, sql`DROP TABLE session_attention_states`);
       await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
+      await dropScheduleExecutionPolicyColumns(db);
       await executeRaw(db, sql`DROP INDEX sessions_tenant_session_id_unique`);
       await executeRaw(db, sql`DROP INDEX tasks_tenant_task_id_unique`);
       // Upstream's provider-grant table is likewise newer than this watermark.

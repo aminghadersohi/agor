@@ -907,10 +907,26 @@ export function ensureSessionImmutability() {
 }
 
 /** `custom_context` keys only the daemon writes. */
-const SERVER_MANAGED_SESSION_CONTEXT_KEYS = ['gateway_source', 'skills_receipt'] as const;
+const SERVER_MANAGED_SESSION_CONTEXT_KEYS = [
+  'gateway_source',
+  'skills_receipt',
+  'scheduled_run',
+] as const;
+
+/** Indexed scheduler identity/initialization fields have the same trust boundary. */
+const SERVER_MANAGED_SCHEDULER_FIELDS = [
+  'schedule_id',
+  'scheduled_from_branch',
+  'scheduled_run_at',
+  'scheduler_init_failure_code',
+  'scheduler_init_failure_stage',
+  'scheduler_init_attempt_count',
+  'scheduler_init_retry_at',
+] as const;
 
 /**
- * Keep gateway provenance and the skills receipt under daemon ownership.
+ * Keep gateway/scheduler provenance, frozen schedule policy and skills receipts
+ * under daemon ownership, including for owners, managers and shared callers.
  *
  * Gateway integrations create sessions through provider-less service calls,
  * and the executor launch records which skill set release a session was
@@ -925,6 +941,9 @@ export function protectGatewaySourceMetadata(context: HookContext): HookContext 
   const writes = Array.isArray(context.data) ? context.data : [context.data];
   for (const write of writes) {
     if (!write || typeof write !== 'object') continue;
+    for (const key of SERVER_MANAGED_SCHEDULER_FIELDS) {
+      if (Object.hasOwn(write, key)) throw new Forbidden(`session.${key} is server-managed`);
+    }
     const customContext = (write as { custom_context?: unknown }).custom_context;
     if (customContext === undefined) continue;
     if (!customContext || typeof customContext !== 'object' || Array.isArray(customContext)) {

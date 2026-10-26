@@ -1023,7 +1023,7 @@ export class SchedulerService {
           );
           if (existing) return { outcome: 'existing', session: existing } as const;
           const currentSchedule = await this.scheduleRepo.findById(schedule.schedule_id);
-          if (!currentSchedule || (!manual && !currentSchedule.enabled)) {
+          if (!currentSchedule?.enabled) {
             return { outcome: 'paused', session: null } as const;
           }
 
@@ -1135,7 +1135,14 @@ export class SchedulerService {
       );
     }
 
-    if (admission.outcome === 'paused') return null;
+    if (admission.outcome === 'paused') {
+      if (manual)
+        throw new ScheduleNotReadyError(
+          'schedule_disabled',
+          'Schedule is disabled. Enable it before running manually.'
+        );
+      return null;
+    }
     if (admission.outcome === 'busy') {
       this.logWorkEvent('info', 'occurrence_skipped_busy', {
         schedule_id: schedule.schedule_id,

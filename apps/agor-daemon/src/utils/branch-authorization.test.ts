@@ -28,7 +28,7 @@ describe('protectGatewaySourceMetadata', () => {
   const context = (
     data: unknown,
     provider: string | null = 'rest',
-    method: 'create' | 'patch' = 'patch'
+    method: 'create' | 'patch' | 'update' = 'patch'
   ) => ({ data, method, params: { provider } }) as HookContext;
 
   it.each(['create', 'patch'] as const)(
@@ -81,6 +81,15 @@ describe('protectGatewaySourceMetadata', () => {
       ).toThrow('session.custom_context.skills_receipt is server-managed');
     }
   );
+
+  it('allows ordinary external custom context without mutating it', () => {
+    const data = { custom_context: { project: 'agor', nested: { note: 'user-owned' } } };
+    for (const method of ['create', 'patch', 'update'] as const) {
+      const hook = context(data, 'socketio', method);
+      expect(protectGatewaySourceMetadata(hook)).toBe(hook);
+      expect(hook.data).toEqual(data);
+    }
+  });
 
   it('allows the daemon to write the skills receipt', () => {
     const hook = context({ custom_context: { skills_receipt: { release: 1 } } }, null);

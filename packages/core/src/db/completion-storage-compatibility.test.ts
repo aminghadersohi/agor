@@ -1,7 +1,10 @@
 import { sql } from 'drizzle-orm';
 import { expect } from 'vitest';
 import { executeRaw, rawRows } from './database-wrapper';
-import { dropTeamsAndDeletionDiscoveryObjects } from './fork-rewind.test-support';
+import {
+  dropScheduleExecutionPolicyColumns,
+  dropTeamsAndDeletionDiscoveryObjects,
+} from './fork-rewind.test-support';
 import { runMigrations } from './migrate';
 import { dbTest } from './test-helpers';
 
@@ -31,6 +34,7 @@ dbTest('retains inert draft completion rows across SQLite initialization', async
   await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
   // And upstream's Teams gateway HA and failed-deletion discovery objects.
   await dropTeamsAndDeletionDiscoveryObjects(db);
+  await dropScheduleExecutionPolicyColumns(db);
   await executeRaw(
     db,
     sql`CREATE TRIGGER boards_primary_owner_immutable BEFORE UPDATE OF primary_owner_user_id ON boards BEGIN SELECT RAISE(ABORT, 'immutable'); END`
@@ -71,6 +75,7 @@ dbTest('adds inert completion storage after main ownership transfer', async ({ d
   await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
   // And upstream's Teams gateway HA and failed-deletion discovery objects.
   await dropTeamsAndDeletionDiscoveryObjects(db);
+  await dropScheduleExecutionPolicyColumns(db);
   await runMigrations(db, { allowOfflineCutover: true });
   expect(rawRows(await executeRaw(db, sql`SELECT * FROM completion_subscriptions`))).toEqual([]);
 });

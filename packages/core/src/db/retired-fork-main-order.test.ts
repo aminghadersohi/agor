@@ -6,7 +6,10 @@ import { sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { createDatabase } from './client';
 import { executeRaw, rawRows } from './database-wrapper';
-import { dropTeamsAndDeletionDiscoveryObjects } from './fork-rewind.test-support';
+import {
+  dropScheduleExecutionPolicyColumns,
+  dropTeamsAndDeletionDiscoveryObjects,
+} from './fork-rewind.test-support';
 import {
   checkMigrationStatus,
   classifyMigrationWatermark,
@@ -192,6 +195,7 @@ describe('retired fork-main front desk / profile image order', () => {
     '9032_session_attention_states',
     '0117_teams_gateway_ha',
     '0118_branch_deletion_failed_discovery',
+    '9033_schedule_execution_policy',
   ];
   const dropUpstreamTail = async (db: ReturnType<typeof createDatabase>) => {
     await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
@@ -202,6 +206,7 @@ describe('retired fork-main front desk / profile image order', () => {
     await executeRaw(db, sql`DROP TABLE session_attention_states`);
     await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
     await dropTeamsAndDeletionDiscoveryObjects(db);
+    await dropScheduleExecutionPolicyColumns(db);
   };
 
   const ALL_OBJECTS = [
