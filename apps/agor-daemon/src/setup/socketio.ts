@@ -53,6 +53,7 @@ import { authenticatedTaskExecutorRuntimeAuthority } from '../auth/executor-runt
 import type { ExecutorSessionTokenRevocation } from '../auth/executor-session-token.js';
 import { getDaemonOperationalMetrics } from '../metrics/operational.js';
 import {
+  BRANCH_REVOCATION_SCOPE,
   boardPresenceAssociationRoomName,
   boardPresenceRoomName,
   emitHaNativeSocketEvent,
@@ -887,18 +888,42 @@ export function createSocketIOConfig(
         app.emit(LOCAL_AUTHORIZATION_CACHE_INVALIDATION_EVENT, { tenantId: data.tenantId });
         return;
       }
-      // Clear replica-local authorization capabilities before disconnecting.
-      // A reconnect can land on this same replica immediately and must not
-      // inherit a warmed pre-revocation ACL cache or terminal allocation.
-      app.emit(LOCAL_AUTHORIZATION_INVALIDATION_EVENT, { tenantId: data.tenantId });
       const affectedBranchId =
         typeof data.affectedBranchId === 'string' && isValidUUID(data.affectedBranchId)
           ? data.affectedBranchId.toLowerCase()
           : undefined;
+      const branchScoped =
+        affectedBranchId !== undefined && data.revocationScope === BRANCH_REVOCATION_SCOPE;
+      if (branchScoped) {
+        // Only this branch's ACL changed. Publication re-checks current branch
+        // visibility, so clearing caches retires stale event delivery; the
+        // branch's terminal attachments are the only passive browser rooms
+        // bound to it. Leave every other terminal and connection untouched.
+        app.emit(LOCAL_AUTHORIZATION_CACHE_INVALIDATION_EVENT, { tenantId: data.tenantId });
+        app.emit('terminal:close-branch', { tenantId: data.tenantId, branchId: affectedBranchId });
+      } else {
+        // Clear replica-local authorization capabilities before disconnecting.
+        // A reconnect can land on this same replica immediately and must not
+        // inherit a warmed pre-revocation ACL cache or terminal allocation.
+        app.emit(LOCAL_AUTHORIZATION_INVALIDATION_EVENT, { tenantId: data.tenantId });
+      }
       for (const socket of io.sockets.sockets.values()) {
         if (getSocketAuthState(socket).tenant?.tenant_id === data.tenantId) {
           const connection = (socket as FeathersSocket).feathers;
           const authority = getAuthenticatedConnectionAuthority(connection);
+          if (branchScoped) {
+            const kind = authority?.principal.kind;
+            // Users and full service accounts hold no branch-bound passive
+            // capability that survives the cache clear above.
+            if (kind === 'user' || kind === 'service') continue;
+            // A terminal executor serves exactly one branch's attachment.
+            if (
+              authority?.principal.kind === 'terminal-executor' &&
+              isValidUUID(authority.principal.branchId) &&
+              authority.principal.branchId.toLowerCase() !== affectedBranchId
+            )
+              continue;
+          }
           if (
             affectedBranchId &&
             authority?.principal.kind === 'executor' &&

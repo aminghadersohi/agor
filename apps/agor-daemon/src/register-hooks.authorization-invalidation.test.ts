@@ -12,6 +12,7 @@
 import type { HookContext } from '@agor/core/types';
 import { describe, expect, it, vi } from 'vitest';
 import { type RegisterHooksContext, registerHooks } from './register-hooks';
+import { markBranchBoardChanged } from './utils/branch-board-move-invalidation';
 
 type RegisteredHook = (context: HookContext) => unknown;
 
@@ -25,6 +26,7 @@ type InvalidationEvent = {
   tenantId: string;
   disconnectSockets: boolean;
   affectedBranchId?: string;
+  revocationScope?: string;
 };
 
 const registerAndCapture = () => {
@@ -139,11 +141,46 @@ describe('registered after-hooks emit branch-scoped authorization invalidation',
     } as never);
 
     await vi.waitFor(() => expect(emitted).toHaveLength(1));
+    // Branch-scoped revocation: receivers keep unrelated sockets connected.
+    // disconnectSockets stays true so pre-scope replicas still evict.
     expect(emitted[0]).toEqual({
       tenantId: REQUEST_TENANT_ID,
       disconnectSockets: true,
       affectedBranchId: BRANCH_ID,
+      revocationScope: 'branch',
     });
+  });
+
+  it('emits nothing for a board_id patch the service proved did not move the branch', async () => {
+    const { after, emitted } = registerAndCapture();
+    const params = { tenant: { tenant_id: REQUEST_TENANT_ID } };
+    markBranchBoardChanged(params, false);
+    await runAfterChain(after, {
+      path: 'branches',
+      method: 'patch',
+      data: { board_id: 'board-1' },
+      result: { branch_id: BRANCH_ID, board_id: 'board-1', permission_binding: 'inherit' },
+      params,
+    } as never);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(emitted).toEqual([]);
+  });
+
+  it('only clears caches when an override-bound branch moves boards', async () => {
+    const { after, emitted } = registerAndCapture();
+    const params = { tenant: { tenant_id: REQUEST_TENANT_ID } };
+    markBranchBoardChanged(params, true);
+    await runAfterChain(after, {
+      path: 'branches',
+      method: 'patch',
+      data: { board_id: 'board-2' },
+      result: { branch_id: BRANCH_ID, board_id: 'board-2', permission_binding: 'override' },
+      params,
+    } as never);
+
+    await vi.waitFor(() => expect(emitted).toHaveLength(1));
+    expect(emitted[0]).toEqual({ tenantId: REQUEST_TENANT_ID, disconnectSockets: false });
   });
 
   it('does not narrow a bulk branches patch (no single validated target)', async () => {

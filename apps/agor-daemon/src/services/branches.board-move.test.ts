@@ -384,6 +384,7 @@ dbTest(
             tenantId,
             disconnectSockets: true,
             affectedBranchId: f.branch.branch_id,
+            revocationScope: 'branch',
           });
           order.push('evicted');
           io.disconnectSockets(true);
