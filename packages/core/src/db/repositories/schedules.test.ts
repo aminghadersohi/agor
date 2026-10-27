@@ -511,6 +511,39 @@ async function failureFixture(db: Database) {
 
 describe('authentic scheduled failure outbox', () => {
   dbTest(
+    'discovery advances a stable keyset within a finite cycle and wraps without mutating rows',
+    async ({ db }) => {
+      const { occurrence, tasks, notices } = await failureFixture(db);
+      const ids: string[] = [];
+      for (let i = 0; i < 26; i++) {
+        const task = await occurrence();
+        ids.push(task.task_id);
+        await tasks.update(task.task_id, { status: TaskStatus.FAILED });
+      }
+      ids.sort();
+      const now = new Date(Date.now() + 1000);
+      const upper = await notices.discoveryUpperBound(now);
+      expect(upper).toBe(ids[25]);
+      const first = await notices.findDueRefs(now, undefined, upper);
+      expect(first.map((row) => row.task_id)).toEqual(ids.slice(0, 25));
+      const newer = await occurrence();
+      await tasks.update(newer.task_id, { status: TaskStatus.FAILED });
+      const second = await notices.findDueRefs(now, first[24].task_id, upper);
+      expect(second.map((row) => row.task_id)).toEqual([ids[25]]);
+      expect(await notices.findDueRefs(now, second[0].task_id, upper)).toEqual([]);
+      expect((await notices.findDueRefs(now, undefined, upper)).map((row) => row.task_id)).toEqual(
+        ids.slice(0, 25)
+      );
+      expect(await notices.discoveryUpperBound(now)).toBe(newer.task_id);
+      expect(
+        (await notices.findAll()).every(
+          (row) => row.status === 'pending' && row.last_error_code === null
+        )
+      ).toBe(true);
+    }
+  );
+
+  dbTest(
     'distinct initial failures each enqueue once; no failure count or automatic pause',
     async ({ db }) => {
       const { schedule, occurrence, tasks, notices } = await failureFixture(db);

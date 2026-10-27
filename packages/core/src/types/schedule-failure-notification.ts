@@ -24,3 +24,6 @@ export interface ScheduleFailureNotification {
 export const SCHEDULE_FAILURE_ALERT_TARGET = 'schedule_failure_alert_target' as const;
 
 export const SCHEDULE_FAILURE_ALERT_PURPOSE = 'schedule_failure' as const;
+
+/** Provider metadata marker for read-only receipt verification, not idempotency. */
+export const SCHEDULE_FAILURE_ALERT_EVENT_TYPE = 'agor_schedule_failure' as const;

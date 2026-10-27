@@ -6,6 +6,7 @@ import {
   getCurrentTenantDatabaseScope,
   getCurrentTenantId,
   RepoRepository,
+  runWithTenantContext,
   runWithTenantDatabaseScope,
   ScheduleFailureNotificationRepository,
   ScheduleRepository,
@@ -13,8 +14,13 @@ import {
   TaskRepository,
   UsersRepository,
 } from '@agor/core/db';
-import { SCHEDULE_FAILURE_ALERT_TARGET, TaskStatus } from '@agor/core/types';
-import { describe, expect, vi } from 'vitest';
+import { GatewayNotDispatchedError } from '@agor/core/gateway';
+import {
+  type AuthenticatedParams,
+  SCHEDULE_FAILURE_ALERT_TARGET,
+  TaskStatus,
+} from '@agor/core/types';
+import { afterEach, describe, expect, vi } from 'vitest';
 import type { Database } from '../../../../packages/core/src/db/client';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import type { Application } from '../declarations';
@@ -23,6 +29,19 @@ import {
   ScheduleFailureNotificationWorker,
   scheduleFailureAlertText,
 } from './schedule-failure-notifications';
+
+const frozen = vi.hoisted(() => new Set<string>());
+vi.mock('@agor/core/db', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@agor/core/db')>();
+  return {
+    ...original,
+    assertTenantWritable: vi.fn(async (db, tenantId) => {
+      if (frozen.has(tenantId)) throw new Error('fixture tenant frozen');
+      return original.assertTenantWritable(db, tenantId);
+    }),
+  };
+});
+afterEach(() => frozen.clear());
 
 vi.mock('@agor/core/config', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@agor/core/config')>()),
@@ -119,7 +138,12 @@ async function fixture(raw: Database) {
       platform_message_id: `receipt-${emitMessage.mock.calls.length}`,
     };
   });
-  const app = { service: () => ({ emitMessage }) } as unknown as Application;
+  const confirmScheduleFailureReceipt = vi.fn(
+    async (_task: string, message: string, _operator: string) => message as string | null
+  );
+  const app = {
+    service: () => ({ emitMessage, confirmScheduleFailureReceipt }),
+  } as unknown as Application;
   let now = new Date(Date.now() + 1000);
   const worker = () =>
     new ScheduleFailureNotificationWorker(db, app, { tenantId: tenant, now: () => now });
@@ -127,6 +151,8 @@ async function fixture(raw: Database) {
     scoped((unit) => new ScheduleFailureNotificationRepository(unit).findById(id));
   return {
     ...seed,
+    app,
+    confirmScheduleFailureReceipt,
     db,
     scoped,
     fail,
@@ -140,6 +166,80 @@ async function fixture(raw: Database) {
 }
 
 describe('schedule failure notifications (offline gateway)', () => {
+  dbTest(
+    'a saturated frozen discovery page cannot starve the next healthy tenant and cycle wraps',
+    async ({ db }) => {
+      const f = await fixture(db);
+      const task = await f.fail();
+      const held = Array.from({ length: 25 }, (_, i) => ({
+        task_id: `held-${i}`,
+        tenant_id: 'frozen-A',
+      }));
+      const discovery = vi
+        .spyOn(ScheduleFailureNotificationRepository.prototype, 'findDueRefs')
+        .mockImplementation(async (_now, after) =>
+          after === 'held-24' ? [{ task_id: task.task_id, tenant_id: 'default' }] : held
+        );
+      const upper = vi
+        .spyOn(ScheduleFailureNotificationRepository.prototype, 'discoveryUpperBound')
+        .mockResolvedValue('cycle-upper');
+      frozen.add('frozen-A');
+      const worker = new ScheduleFailureNotificationWorker(f.db, f.app);
+      try {
+        await worker.checkOnce();
+        expect(f.emitMessage).not.toHaveBeenCalled();
+        await worker.checkOnce();
+        expect(f.emitMessage).toHaveBeenCalledTimes(1);
+        expect(await f.read(task.task_id)).toMatchObject({ status: 'delivered' });
+        await worker.checkOnce();
+        expect(discovery.mock.calls.map((call) => call.slice(1))).toEqual([
+          [undefined, 'cycle-upper'],
+          ['held-24', 'cycle-upper'],
+          [undefined, 'cycle-upper'],
+        ]);
+        expect(f.emitMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        discovery.mockRestore();
+        upper.mockRestore();
+      }
+    }
+  );
+
+  dbTest(
+    'operator receipt confirmation rechecks the tenant gate after its provider read, without resending',
+    async ({ db }) => {
+      const f = await fixture(db);
+      const task = await f.fail();
+      f.emitMessage.mockRejectedValueOnce(new Error('lost receipt'));
+      await f.worker().checkOnce();
+      const service = new ScheduleFailureNotificationsService(f.db, f.app);
+      f.confirmScheduleFailureReceipt.mockImplementationOnce(async (_task, id) => {
+        expect(getCurrentTenantDatabaseScope()).toBeUndefined();
+        frozen.add('default');
+        return id;
+      });
+      await runWithTenantContext('default', async () => {
+        const data = { action: 'confirm_delivery', platform_message_id: '123.456' };
+        const params = { user: f.user } as unknown as AuthenticatedParams;
+        await expect(service.patch(task.task_id, data, params)).rejects.toThrow('frozen');
+        expect(await service.get(task.task_id)).toMatchObject({
+          status: 'uncertain',
+          platform_message_id: null,
+        });
+        frozen.clear();
+        expect(await service.patch(task.task_id, data, params)).toMatchObject({
+          status: 'delivered',
+        });
+      });
+      expect(f.emitMessage).toHaveBeenCalledTimes(1);
+      expect(f.confirmScheduleFailureReceipt).toHaveBeenCalledWith(
+        task.task_id,
+        '123.456',
+        f.user.user_id
+      );
+    }
+  );
+
   dbTest(
     'every distinct failure alerts once across worker restart; redacted content and manual hold preserved',
     async ({ db }) => {
@@ -183,7 +283,7 @@ describe('schedule failure notifications (offline gateway)', () => {
       await f.worker().checkOnce();
       expect(await f.read(task.task_id)).toMatchObject({
         status: 'pending',
-        last_error_code: 'target_not_allowed',
+        last_error_code: 'target_unconfigured',
       });
       expect(f.emitMessage).not.toHaveBeenCalled();
       await f.scoped((unit) =>
@@ -364,4 +464,159 @@ describe('schedule failure notifications (offline gateway)', () => {
       )
     ).toThrow();
   });
+  dbTest(
+    'typed pre-provider rejection retries only after fresh target/authority checks',
+    async ({ db }) => {
+      const f = await fixture(db);
+      const task = await f.fail();
+      const worker = f.worker();
+      f.emitMessage.mockRejectedValueOnce(new GatewayNotDispatchedError());
+      await worker.checkOnce();
+      expect(await f.read(task.task_id)).toMatchObject({
+        status: 'pending',
+        last_error_code: 'not_dispatched',
+      });
+      await f.scoped((unit) =>
+        new GatewayChannelRepository(unit).update(f.channel.id, { enabled: false })
+      );
+      f.advance(31_000);
+      await worker.checkOnce();
+      expect(f.emitMessage).toHaveBeenCalledTimes(1);
+      await f.scoped((unit) =>
+        new GatewayChannelRepository(unit).update(f.channel.id, { enabled: true })
+      );
+      f.advance(31_000);
+      await worker.checkOnce();
+      expect(f.emitMessage).toHaveBeenCalledTimes(2);
+      expect(await f.read(task.task_id)).toMatchObject({ status: 'delivered' });
+    }
+  );
+
+  for (const result of ['receipt', 'ambiguous', 'not_dispatched'] as const) {
+    dbTest(
+      `a gate acquired during provider IO fences ${result} settlement; resume never sends again`,
+      async ({ db }) => {
+        const f = await fixture(db);
+        const task = await f.fail();
+        const worker = f.worker();
+        f.emitMessage.mockImplementationOnce(async () => {
+          frozen.add('default');
+          if (result === 'ambiguous') throw new Error('lost receipt');
+          if (result === 'not_dispatched') throw new GatewayNotDispatchedError();
+          return { delivered: true, recorded: false, platform_message_id: '123.456' };
+        });
+        await worker.checkOnce();
+        expect(await f.read(task.task_id)).toMatchObject({ status: 'sending' });
+        await worker.checkOnce();
+        expect(await f.read(task.task_id)).toMatchObject({ status: 'sending' });
+        expect(f.emitMessage).toHaveBeenCalledTimes(1);
+        frozen.clear();
+        await worker.checkOnce();
+        expect(await f.read(task.task_id)).toMatchObject({
+          status:
+            result === 'receipt' ? 'delivered' : result === 'ambiguous' ? 'uncertain' : 'pending',
+        });
+        expect(f.emitMessage).toHaveBeenCalledTimes(1);
+      }
+    );
+  }
+
+  dbTest(
+    'trusted zero-effect evidence can recover after another worker expires the lease, never overwrite a receipt',
+    async ({ db }) => {
+      const f = await fixture(db);
+      const task = await f.fail();
+      const worker = f.worker();
+      f.emitMessage.mockImplementationOnce(async () => {
+        frozen.add('default');
+        throw new GatewayNotDispatchedError();
+      });
+      await worker.checkOnce();
+      frozen.clear();
+      f.advance(150_000);
+      await f.worker().checkOnce(); // Another process cannot know the first outcome.
+      expect(await f.read(task.task_id)).toMatchObject({ status: 'uncertain' });
+      await worker.checkOnce(); // Original process retains proof of nonacceptance.
+      expect(await f.read(task.task_id)).toMatchObject({ status: 'pending' });
+      expect(f.emitMessage).toHaveBeenCalledTimes(1);
+      f.advance(31_000);
+      await worker.checkOnce();
+      expect(await f.read(task.task_id)).toMatchObject({ status: 'delivered' });
+      await f.scoped((unit) =>
+        new ScheduleFailureNotificationRepository(unit).notDispatched(task.task_id)
+      );
+      expect(await f.read(task.task_id)).toMatchObject({ status: 'delivered' });
+    }
+  );
+  dbTest(
+    'a positive receipt persistence failure is retried idempotently, never a provider failure',
+    async ({ db }) => {
+      const f = await fixture(db);
+      const task = await f.fail();
+      const worker = f.worker();
+      const original = ScheduleFailureNotificationRepository.prototype.finish;
+      const write = vi
+        .spyOn(ScheduleFailureNotificationRepository.prototype, 'finish')
+        .mockRejectedValueOnce(new Error('fixture DB outage'));
+      try {
+        await worker.checkOnce();
+        expect(await f.read(task.task_id)).toMatchObject({ status: 'sending' });
+        await worker.checkOnce();
+        expect(await f.read(task.task_id)).toMatchObject({ status: 'delivered' });
+        expect(f.emitMessage).toHaveBeenCalledTimes(1);
+        expect(write).toHaveBeenCalledTimes(2);
+      } finally {
+        write.mockRestore();
+        expect(ScheduleFailureNotificationRepository.prototype.finish).toBe(original);
+      }
+    }
+  );
+
+  dbTest(
+    'restart ambiguity has a verified operator receipt path, never blind resend or automatic attention clear',
+    async ({ db }) => {
+      const f = await fixture(db);
+      const task = await f.fail();
+      f.emitMessage.mockRejectedValueOnce(new Error('lost receipt'));
+      await f.worker().checkOnce();
+      expect(
+        await f.scoped((unit) => new BranchRepository(unit).findById(f.branch.branch_id))
+      ).toMatchObject({ needs_attention: true });
+      const service = new ScheduleFailureNotificationsService(f.db, f.app);
+      const params = { user: f.user } as unknown as AuthenticatedParams;
+      await runWithTenantContext('default', async () => {
+        f.confirmScheduleFailureReceipt.mockResolvedValueOnce(null);
+        await expect(
+          service.patch(
+            task.task_id,
+            { action: 'confirm_delivery', platform_message_id: '123.456' },
+            params
+          )
+        ).rejects.toThrow('could not be verified');
+        expect(await service.get(task.task_id)).toMatchObject({ status: 'uncertain' });
+        await expect(service.patch(task.task_id, { action: 'resend' }, params)).rejects.toThrow(
+          'resends are not supported'
+        );
+        expect(
+          await service.patch(
+            task.task_id,
+            { action: 'confirm_delivery', platform_message_id: '123.456' },
+            params
+          )
+        ).toMatchObject({ status: 'delivered' });
+        expect(
+          await service.patch(
+            task.task_id,
+            { action: 'confirm_delivery', platform_message_id: '123.456' },
+            params
+          )
+        ).toMatchObject({ status: 'delivered' });
+      });
+      expect(f.emitMessage).toHaveBeenCalledTimes(1);
+      expect(f.confirmScheduleFailureReceipt).toHaveBeenCalledTimes(2);
+      expect(
+        await f.scoped((unit) => new BranchRepository(unit).findById(f.branch.branch_id))
+      ).toMatchObject({ needs_attention: true });
+    }
+  );
 });

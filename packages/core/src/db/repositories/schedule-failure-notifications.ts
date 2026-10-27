@@ -1,6 +1,6 @@
 import type { ScheduleFailureNotification, TaskStatus } from '@agor/core/types';
 import { TaskStatus as Status } from '@agor/core/types';
-import { and, asc, desc, eq, lte, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lte, or } from 'drizzle-orm';
 import type { Database } from '../client';
 import { insert, isPostgresDatabase, select, update } from '../database-wrapper';
 import { scheduleFailureNotifications as notifications, type SessionRow } from '../schema';
@@ -82,7 +82,11 @@ export class ScheduleFailureNotificationRepository {
     ).map(notification);
   }
   /** System scope returns routing identities only; the worker re-enters tenant scope. */
-  async findDueRefs(now = new Date()): Promise<Array<{ task_id: string; tenant_id?: string }>> {
+  async findDueRefs(
+    now = new Date(),
+    afterTaskId?: string,
+    throughTaskId?: string
+  ): Promise<Array<{ task_id: string; tenant_id?: string }>> {
     const tenantColumn = (notifications as unknown as { tenant_id?: unknown }).tenant_id;
     const columns =
       isPostgresDatabase(this.db) && tenantColumn
@@ -93,13 +97,51 @@ export class ScheduleFailureNotificationRepository {
       .where(
         and(
           or(eq(notifications.status, 'pending'), eq(notifications.status, 'sending')),
-          lte(notifications.next_attempt_at, now)
+          lte(notifications.next_attempt_at, now),
+          afterTaskId ? gt(notifications.task_id, afterTaskId) : undefined,
+          throughTaskId ? lte(notifications.task_id, throughTaskId) : undefined
         )
       )
-      .orderBy(asc(notifications.next_attempt_at))
+      .orderBy(asc(notifications.task_id))
       .limit(25)
       .all()) as Array<{ task_id: string; tenant_id?: string }>;
   }
+  /** A finite cycle watermark prevents an endless stream of newer rows postponing wrap. */
+  async discoveryUpperBound(now = new Date()): Promise<string | undefined> {
+    const row = await select(this.db, { task_id: notifications.task_id })
+      .from(notifications)
+      .where(
+        and(
+          or(eq(notifications.status, 'pending'), eq(notifications.status, 'sending')),
+          lte(notifications.next_attempt_at, now)
+        )
+      )
+      .orderBy(desc(notifications.task_id))
+      .limit(1)
+      .one();
+    return row?.task_id;
+  }
+
+  /** Only a typed, proven zero-provider-effect rejection may release the fence. */
+  async notDispatched(taskId: string, now = new Date()): Promise<void> {
+    await update(this.db, notifications)
+      .set({
+        status: 'pending',
+        gateway_channel_id: null,
+        target: null,
+        last_error_code: 'not_dispatched',
+        updated_at: now,
+        next_attempt_at: new Date(now.getTime() + 30_000),
+      })
+      .where(
+        and(
+          eq(notifications.task_id, taskId),
+          or(eq(notifications.status, 'sending'), eq(notifications.status, 'uncertain'))
+        )
+      )
+      .run();
+  }
+
   /** One durable provider-attempt fence, never a process-local dedup cache. */
   async beginSend(
     taskId: string,

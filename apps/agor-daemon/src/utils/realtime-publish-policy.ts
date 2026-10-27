@@ -129,7 +129,7 @@ export const REALTIME_PUBLISH_POLICY = {
   },
   'schedule-failure-notifications': {
     audience: 'none',
-    why: 'Read-only tenant/admin delivery status; no realtime consumer or public event audience.',
+    why: 'Tenant/admin delivery status and verified receipt reconciliation; no realtime consumer or public event audience.',
   },
   'session-reminders': {
     audience: 'branch-or-session',

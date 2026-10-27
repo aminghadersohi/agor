@@ -36,6 +36,7 @@ import type {
   SlackTestFailure,
   SlackTestResult,
 } from '../../types/gateway';
+import { SCHEDULE_FAILURE_ALERT_EVENT_TYPE } from '../../types/schedule-failure-notification';
 import type {
   GatewayConnector,
   GatewayInboundCallback,
@@ -45,6 +46,7 @@ import type {
   InboundFile,
   OutboundPayload,
 } from '../connector';
+import { GatewayNotDispatchedError } from '../connector';
 import { GatewayListenerError } from '../listener-error';
 import { sanitizeGatewayProviderError } from '../provider-error';
 import { createSlackSdkLoggerController, type SlackSdkLoggerController } from './slack-sdk-logger';
@@ -110,6 +112,26 @@ export const SLACK_REQUEST_TIMEOUT_METADATA_KEY = 'slack_request_timeout_ms';
 
 // Slack error codes that indicate the `blocks` payload was malformed/rejected,
 // where retrying with text-only is the right fallback.
+// Only explicit validation/authorization rejections prove that no message was
+// accepted. Unknown platform errors (including internal_error) remain ambiguous.
+const ALERT_NONACCEPTANCE_ERRORS = new Set([
+  'not_authed',
+  'invalid_auth',
+  'account_inactive',
+  'token_revoked',
+  'missing_scope',
+  'channel_not_found',
+  'not_in_channel',
+  'is_archived',
+  'restricted_action',
+  'invalid_arguments',
+  'invalid_arg_name',
+  'invalid_blocks',
+  'invalid_blocks_format',
+  'msg_too_long',
+  'no_text',
+]);
+
 const BLOCK_PAYLOAD_ERRORS = new Set([
   'invalid_blocks',
   'invalid_blocks_format',
@@ -1089,10 +1111,14 @@ export class SlackConnector implements GatewayConnector {
    * send because `WebClient` takes both only at construction; cards are rare
    * enough that this costs nothing that matters.
    */
-  protected createSingleAttemptWebClient(timeoutMs: number): WebClient {
+  protected createSingleAttemptWebClient(
+    timeoutMs: number,
+    rejectRateLimitedCalls = false
+  ): WebClient {
     return new WebClient(this.config.bot_token, {
       timeout: Math.min(timeoutMs, SLACK_WEB_API_TIMEOUT_MS),
       retryConfig: { retries: 0 },
+      rejectRateLimitedCalls,
     });
   }
 
@@ -2021,6 +2047,9 @@ export class SlackConnector implements GatewayConnector {
    * emits where no gateway thread_session_map exists yet.
    */
   async sendSlackMessage(req: {
+    singleAttempt?: boolean;
+    failureTaskId?: string;
+    failureScheduleId?: string;
     channel: string;
     text: string;
     blocks?: unknown[];
@@ -2028,12 +2057,31 @@ export class SlackConnector implements GatewayConnector {
     metadata?: Record<string, unknown>;
   }): Promise<{ ts: string; channel: string; thread_ts: string; permalink?: string | null }> {
     const blocks = req.blocks && req.blocks.length > 0 ? (req.blocks as KnownBlock[]) : undefined;
+    let web: WebClient;
+    try {
+      web = req.singleAttempt
+        ? this.createSingleAttemptWebClient(SLACK_WEB_API_TIMEOUT_MS, true)
+        : this.web;
+    } catch {
+      throw new GatewayNotDispatchedError();
+    }
     const send = (withBlocks: boolean) =>
-      this.web.chat.postMessage({
+      web.chat.postMessage({
         channel: req.channel,
         text: req.text,
         ...(withBlocks && blocks ? { blocks } : {}),
         ...(req.thread_ts ? { thread_ts: req.thread_ts } : {}),
+        ...(req.singleAttempt
+          ? {
+              metadata: {
+                event_type: SCHEDULE_FAILURE_ALERT_EVENT_TYPE,
+                event_payload: {
+                  task_id: req.failureTaskId ?? '',
+                  schedule_id: req.failureScheduleId ?? '',
+                },
+              },
+            }
+          : {}),
         unfurl_links: false,
         unfurl_media: false,
       });
@@ -2042,8 +2090,18 @@ export class SlackConnector implements GatewayConnector {
     try {
       result = await send(true);
     } catch (err) {
+      if (
+        req.singleAttempt &&
+        typeof err === 'object' &&
+        err &&
+        'code' in err &&
+        ((err as { code?: unknown }).code === 'slack_webapi_rate_limited_error' ||
+          ((err as { code?: unknown }).code === 'slack_webapi_platform_error' &&
+            ALERT_NONACCEPTANCE_ERRORS.has(extractSlackErrorCode(err) ?? '')))
+      )
+        throw new GatewayNotDispatchedError();
       const code = extractSlackErrorCode(err);
-      if (blocks && code && BLOCK_PAYLOAD_ERRORS.has(code)) {
+      if (!req.singleAttempt && blocks && code && BLOCK_PAYLOAD_ERRORS.has(code)) {
         console.warn(`[slack] Block payload rejected (${code}); retrying direct send as text-only`);
         result = await send(false);
       } else {
@@ -2052,8 +2110,10 @@ export class SlackConnector implements GatewayConnector {
     }
 
     if (!result.ok || !result.ts) {
+      if (req.singleAttempt && !result.ok && ALERT_NONACCEPTANCE_ERRORS.has(result.error ?? ''))
+        throw new GatewayNotDispatchedError();
       const code = extractSlackErrorCode(result);
-      if (blocks && code && BLOCK_PAYLOAD_ERRORS.has(code)) {
+      if (!req.singleAttempt && blocks && code && BLOCK_PAYLOAD_ERRORS.has(code)) {
         const retry = await send(false);
         if (!retry.ok || !retry.ts) {
           throw slackProviderFailure('Slack API error', retry.error ?? 'unknown error');
@@ -2070,6 +2130,8 @@ export class SlackConnector implements GatewayConnector {
     }
     let permalink: string | null = null;
     try {
+      if (req.singleAttempt)
+        return { ts: sentTs, channel: req.channel, thread_ts: req.thread_ts ?? sentTs };
       const link = await this.web.chat.getPermalink({ channel: req.channel, message_ts: sentTs });
       permalink = link.ok ? (link.permalink ?? null) : null;
     } catch {
@@ -2090,6 +2152,9 @@ export class SlackConnector implements GatewayConnector {
    * outbound seed orchestration.
    */
   async sendDirectMessage(req: {
+    singleAttempt?: boolean;
+    failureTaskId?: string;
+    failureScheduleId?: string;
     target: string;
     text: string;
     blocks?: unknown[];
@@ -2102,38 +2167,52 @@ export class SlackConnector implements GatewayConnector {
     permalink?: string | null;
     metadata: Record<string, unknown>;
   }> {
-    const parsedTarget = parseSlackOutboundTarget(req.target);
-    let resolvedChannel: string;
-    const resolvedTargetMetadata: Record<string, unknown> = {
-      target: req.target,
-      target_kind: parsedTarget.kind,
-    };
-    if (parsedTarget.kind === 'channel_id') {
-      resolvedChannel = parsedTarget.channel as string;
-    } else if (parsedTarget.kind === 'channel_name') {
-      const resolved = await this.resolveChannelByName(parsedTarget.name as string);
-      resolvedChannel = resolved.channel;
-      resolvedTargetMetadata.resolved_channel_id = resolved.channel;
-      resolvedTargetMetadata.resolved_channel_name = resolved.name;
-    } else {
-      const resolved = await this.openDmByEmail(parsedTarget.email as string);
-      resolvedChannel = resolved.channel;
-      resolvedTargetMetadata.resolved_channel_id = resolved.channel;
-      resolvedTargetMetadata.resolved_user_id = resolved.user_id;
-    }
-    if (
-      !isSlackWriteTargetAllowed(this.config as unknown as Record<string, unknown>, resolvedChannel)
-    ) {
-      throw new Error(
-        `Gateway outbound denied: target ${req.target} resolves to Slack conversation ${resolvedChannel}, which is not in this gateway channel's allowed_channel_ids whitelist.`
-      );
-    }
-    const threadTs = req.threadId
-      ? req.threadId.includes('-')
-        ? parseThreadId(req.threadId).thread_ts
-        : req.threadId
-      : undefined;
+    const { resolvedChannel, resolvedTargetMetadata, threadTs } = await (async () => {
+      try {
+        const parsedTarget = parseSlackOutboundTarget(req.target);
+        let resolvedChannel: string;
+        const resolvedTargetMetadata: Record<string, unknown> = {
+          target: req.target,
+          target_kind: parsedTarget.kind,
+        };
+        if (parsedTarget.kind === 'channel_id') {
+          resolvedChannel = parsedTarget.channel as string;
+        } else if (parsedTarget.kind === 'channel_name') {
+          const resolved = await this.resolveChannelByName(parsedTarget.name as string);
+          resolvedChannel = resolved.channel;
+          resolvedTargetMetadata.resolved_channel_id = resolved.channel;
+          resolvedTargetMetadata.resolved_channel_name = resolved.name;
+        } else {
+          const resolved = await this.openDmByEmail(parsedTarget.email as string);
+          resolvedChannel = resolved.channel;
+          resolvedTargetMetadata.resolved_channel_id = resolved.channel;
+          resolvedTargetMetadata.resolved_user_id = resolved.user_id;
+        }
+        if (
+          !isSlackWriteTargetAllowed(
+            this.config as unknown as Record<string, unknown>,
+            resolvedChannel
+          )
+        ) {
+          throw new Error(
+            `Gateway outbound denied: target ${req.target} resolves to Slack conversation ${resolvedChannel}, which is not in this gateway channel's allowed_channel_ids whitelist.`
+          );
+        }
+        const threadTs = req.threadId
+          ? req.threadId.includes('-')
+            ? parseThreadId(req.threadId).thread_ts
+            : req.threadId
+          : undefined;
+        return { resolvedChannel, resolvedTargetMetadata, threadTs };
+      } catch (error) {
+        if (req.singleAttempt) throw new GatewayNotDispatchedError();
+        throw error;
+      }
+    })();
     const sent = await this.sendSlackMessage({
+      singleAttempt: req.singleAttempt,
+      failureTaskId: req.failureTaskId,
+      failureScheduleId: req.failureScheduleId,
       channel: resolvedChannel,
       text: req.text,
       blocks: req.blocks,
@@ -2148,6 +2227,46 @@ export class SlackConnector implements GatewayConnector {
       permalink: sent.permalink,
       metadata: resolvedTargetMetadata,
     };
+  }
+
+  /** Explicit operator reconciliation; never sends or treats absence as safe to retry. */
+  async confirmScheduleFailureMessage(req: {
+    channel: string;
+    messageId: string;
+    taskId: string;
+    scheduleId: string;
+  }): Promise<boolean> {
+    if (
+      !/^[CG][A-Z0-9]+$/.test(req.channel) ||
+      !/^\d+\.\d+$/.test(req.messageId) ||
+      !isSlackWriteTargetAllowed(this.config as unknown as Record<string, unknown>, req.channel)
+    )
+      return false;
+    const result = await this.web.conversations.history({
+      channel: req.channel,
+      oldest: req.messageId,
+      latest: req.messageId,
+      inclusive: true,
+      limit: 1,
+      include_all_metadata: true,
+    });
+    const botUserId = this.botUserId ?? (await this.web.auth.test()).user_id;
+    return (
+      result.ok === true &&
+      (result.messages ?? []).some((message) => {
+        const meta = message.metadata as
+          | { event_type?: string; event_payload?: Record<string, unknown> }
+          | undefined;
+        return (
+          !!botUserId &&
+          message.ts === req.messageId &&
+          message.user === botUserId &&
+          meta?.event_type === SCHEDULE_FAILURE_ALERT_EVENT_TYPE &&
+          meta.event_payload?.task_id === req.taskId &&
+          meta.event_payload?.schedule_id === req.scheduleId
+        );
+      })
+    );
   }
 
   /** Add an emoji reaction to a Slack message. */

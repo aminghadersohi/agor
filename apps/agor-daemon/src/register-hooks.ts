@@ -538,7 +538,6 @@ export const AUTHENTICATED_RBAC_SERVICE_PATHS = [
  * Register all FeathersJS service hooks.
  */
 export const TENANT_OWNED_SERVICE_PATHS = [
-  'schedule-failure-notifications',
   BRANCH_DELETION_REPORT_SERVICE,
   BRANCH_CLEANUP_REPORT_SERVICE,
   ENVIRONMENT_COMMAND_REPORT_SERVICE,
@@ -606,6 +605,7 @@ export const TENANT_OWNED_SERVICE_PATHS = [
 // so they carry tenant identity for the full request and open short database
 // units of work at the call site instead of holding an HTTP-long transaction.
 export const TENANT_IDENTITY_ONLY_SERVICE_PATHS = [
+  'schedule-failure-notifications',
   'check-auth',
   // This command-scoped capability opens one short owner-bound read after
   // verifying the executor token; it must not inherit an HTTP-long DB scope.

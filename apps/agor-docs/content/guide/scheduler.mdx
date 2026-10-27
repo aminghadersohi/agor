@@ -118,7 +118,7 @@ text. Sending an alert never pauses or disables a schedule, changes its cadence,
 human pause, or replays a failed job. Retaining or deleting run history does not erase the
 notification intent.
 
-Administrators can inspect delivery state through the read-only
+Administrators can inspect delivery state through the tenant-scoped
 `/schedule-failure-notifications` service (`find`, with bounded `$skip`/`$limit`, and `get`
 by exact Task ID):
 
@@ -128,13 +128,46 @@ by exact Task ID):
 - `delivered`: a provider message receipt was returned.
 - `uncertain`: the provider effect cannot be confirmed (for example, a crash or lost
   receipt after dispatch began). This requires operator attention and is **not** blindly
-  resent, because Slack may already have accepted the message. This mechanism guarantees
-  one durable intent and at most one dispatch attempt, not exactly-once delivery across
-  ambiguous provider/network failures.
+  resent, because Slack may already have accepted the message. The failed branch is marked
+  as needing attention; this does not pause the schedule. Each alert post uses a bounded,
+  single-attempt Slack client, with no SDK retransmission or formatting-fallback post.
+  This is not an exactly-once delivery guarantee across ambiguous provider/network failures.
 
 The worker retries pending configuration checks independently of schedule execution.
+A proven pre-dispatch rejection or explicit authorization/validation nonacceptance returns
+an intent to `pending`, with fresh target and permission checks before another attempt.
+Unknown platform/network errors do not authorize a retry. A frozen tenant does not block
+other tenants: discovery advances in bounded, stable-key pages and wraps after a finite cycle.
 It never retries the scheduled job. No messages are sent until an authorized gateway
 binding is configured.
+
+### Reconciling an uncertain alert
+
+A returned receipt is retried as a database settlement, never as another Slack post.
+If a write gate or database outage blocks settlement, the worker retains up to 256
+content-free outcomes in memory. That cache does not survive a daemon restart; the
+durable outbox fence still prevents another send.
+
+For an unresolved `sending` or `uncertain` intent, an administrator can inspect the
+original bound Slack channel for the fixed summary and exact failed Task ID. If the
+message is present, take its Slack timestamp and submit:
+
+```json
+{ "action": "confirm_delivery", "platform_message_id": "1234567890.123456" }
+```
+
+to `PATCH /schedule-failure-notifications/<EXACT_TASK_ID>`. The service rechecks the
+operator's and gateway creator's branch access, current target binding, and allowlist,
+then reads only that exact Slack message. It confirms delivery only when the original
+bot identity and Task/Schedule metadata match. A tenant write gate is checked again
+before persisting the verified receipt. Repeating the same confirmation is idempotent.
+No lookup or confirmation sends a message or replays the scheduled job.
+
+If the message cannot be found or verified (including missing Slack history access),
+the intent remains unresolved and the branch stays marked for attention. Absence is
+not proof of non-delivery: there is deliberately no blind-resend API. Keep the attention
+flag until an operator has investigated; confirming delivery never automatically clears
+an existing human attention flag.
 
 ## Best Practices
 

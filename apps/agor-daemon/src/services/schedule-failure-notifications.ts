@@ -10,17 +10,23 @@ import {
   type TenantScopeAwareDatabase,
   UsersRepository,
 } from '@agor/core/db';
-import { NotFound } from '@agor/core/feathers';
-import { isSlackWriteTargetAllowed } from '@agor/core/gateway';
+import { BadRequest, NotFound } from '@agor/core/feathers';
+import { GatewayNotDispatchedError, isSlackWriteTargetAllowed } from '@agor/core/gateway';
 import {
+  type AuthenticatedParams,
   SCHEDULE_FAILURE_ALERT_PURPOSE,
   SCHEDULE_FAILURE_ALERT_TARGET,
   type ScheduleFailureNotification,
   type TenantID,
+  type UserID,
 } from '@agor/core/types';
 import { getBranchUrl, getSessionUrl } from '@agor/core/utils/url';
 import type { Application } from '../declarations.js';
 import { hasBranchPermission } from '../utils/branch-authorization.js';
+import {
+  createTenantBoundDataAccess,
+  type TenantBoundDataAccess,
+} from '../utils/tenant-bound-data-access.js';
 import type { GatewayService } from './gateway.js';
 
 /** Only fixed, content-free copy is sent. No names, prompts, errors or provider logs. */
@@ -48,26 +54,93 @@ export function scheduleFailureAlertText(
   return text;
 }
 
-/** Read-only, admin-gated operational status; never accepts delivery/retry writes. */
+/** Admin status + verified receipt reconciliation. Never exposes a resend operation. */
 export class ScheduleFailureNotificationsService {
-  constructor(private db: TenantScopeAwareDatabase) {}
+  private readonly data: TenantBoundDataAccess;
+  constructor(
+    db: TenantScopeAwareDatabase,
+    private app?: Pick<Application, 'service'>
+  ) {
+    this.data = createTenantBoundDataAccess(db);
+  }
   find(params?: { query?: { $skip?: number; $limit?: number } }) {
-    return new ScheduleFailureNotificationRepository(this.db).findAll(
-      params?.query?.$skip,
-      params?.query?.$limit
+    return this.data.read((db) =>
+      new ScheduleFailureNotificationRepository(db).findAll(
+        params?.query?.$skip,
+        params?.query?.$limit
+      )
     );
   }
   async get(id: string) {
-    const row = await new ScheduleFailureNotificationRepository(this.db).findById(id);
+    const row = await this.data.read((db) =>
+      new ScheduleFailureNotificationRepository(db).findById(id)
+    );
     if (!row) throw new NotFound('Schedule failure notification not found');
     return row;
   }
+  async patch(id: string, data: unknown, params: AuthenticatedParams) {
+    if (
+      !data ||
+      typeof data !== 'object' ||
+      Array.isArray(data) ||
+      Object.keys(data).some((key) => !['action', 'platform_message_id'].includes(key)) ||
+      (data as { action?: unknown }).action !== 'confirm_delivery' ||
+      typeof (data as { platform_message_id?: unknown }).platform_message_id !== 'string' ||
+      !/^\d+\.\d+$/.test((data as { platform_message_id: string }).platform_message_id) ||
+      !params.user?.user_id
+    ) {
+      throw new BadRequest(
+        'Use confirm_delivery with an observed Slack message timestamp; resends are not supported'
+      );
+    }
+    const row = await this.get(id);
+    const messageId = (data as { platform_message_id: string }).platform_message_id;
+    if (row.status === 'delivered') {
+      if (row.platform_message_id !== messageId)
+        throw new BadRequest('A different delivery is already confirmed');
+      return row;
+    }
+    const gateway = this.app?.service('gateway') as unknown as
+      | Pick<GatewayService, 'confirmScheduleFailureReceipt'>
+      | undefined;
+    // Provider READ is outside all DB units. Absence never authorizes a resend.
+    let verified: string | null | undefined;
+    try {
+      verified = await gateway?.confirmScheduleFailureReceipt(
+        row.task_id,
+        messageId,
+        params.user.user_id as UserID
+      );
+    } catch {
+      throw new BadRequest('Delivery lookup unavailable; notification remains unresolved');
+    }
+    if (verified !== messageId)
+      throw new BadRequest('Delivery could not be verified; notification remains unresolved');
+    await this.data.write((db) =>
+      new ScheduleFailureNotificationRepository(db).finish(row.task_id, messageId)
+    );
+    return this.get(id);
+  }
 }
 
-/** Durable at-most-once dispatch. Uncertain provider effects are NEVER blindly resent. */
+/** Durable per-occurrence fence. Only proven nonacceptance permits another attempt. */
 export class ScheduleFailureNotificationWorker {
   private timer: NodeJS.Timeout | undefined;
   private stopped = true;
+  private cursor: string | undefined;
+  private cycleUpper: string | undefined;
+  // Positive receipts and typed nonacceptance survive DB/gate failures in this
+  // process. Bounded; restart recovery verifies durable provider metadata through
+  // the operator API. No cache entry ever causes a second provider send.
+  private settlements = new Map<
+    string,
+    {
+      tenantId: string;
+      taskId: string;
+      outcome: 'receipt' | 'not_dispatched' | 'uncertain';
+      messageId?: string;
+    }
+  >();
   constructor(
     private db: TenantScopeAwareDatabase,
     private app: Application,
@@ -93,8 +166,24 @@ export class ScheduleFailureNotificationWorker {
   }
   async checkOnce(): Promise<number> {
     const now = this.options.now?.() ?? new Date();
-    const discover = (db: ConstructorParameters<typeof ScheduleFailureNotificationRepository>[0]) =>
-      new ScheduleFailureNotificationRepository(db).findDueRefs(now);
+    for (const [key, settlement] of this.settlements) {
+      try {
+        await runWithTenantContext(settlement.tenantId, () =>
+          this.persistSettlement(settlement, now)
+        );
+        this.settlements.delete(key);
+      } catch {
+        /* Write gate / transient DB failure: preserve the evidence, not another send. */
+      }
+    }
+    const discover = async (
+      db: ConstructorParameters<typeof ScheduleFailureNotificationRepository>[0]
+    ) => {
+      const repo = new ScheduleFailureNotificationRepository(db);
+      this.cycleUpper ??= await repo.discoveryUpperBound(now);
+      if (!this.cycleUpper) return [];
+      return repo.findDueRefs(now, this.cursor, this.cycleUpper);
+    };
     const refs = this.options.tenantId
       ? await runWithTenantDatabaseScope(this.db, this.options.tenantId, discover)
       : await runWithSystemDatabaseScope(
@@ -103,9 +192,14 @@ export class ScheduleFailureNotificationWorker {
           discover,
           { capability: 'scheduler_discovery' }
         );
+    // Advance even if the tenant is frozen. Never mutate that tenant to achieve fairness.
+    if (refs.length < 25) {
+      this.cursor = undefined;
+      this.cycleUpper = undefined;
+    } else this.cursor = refs.at(-1)?.task_id;
     for (const ref of refs) {
       const tenantId = this.options.tenantId ?? ref.tenant_id;
-      if (!tenantId) continue; // Never infer a tenant from a provider payload or another row.
+      if (!tenantId || this.settlements.has(`${tenantId}:${ref.task_id}`)) continue; // Never infer a tenant from a provider payload or another row.
       try {
         await runWithTenantContext(tenantId, () => this.processOne(tenantId, ref.task_id, now));
       } catch {
@@ -121,13 +215,16 @@ export class ScheduleFailureNotificationWorker {
       const row = await repo.findById(taskId);
       if (!row || row.status === 'delivered' || row.status === 'uncertain') return null;
       if (row.status === 'sending') {
-        if (Date.parse(row.next_attempt_at) <= now.getTime()) await repo.uncertain(taskId);
+        if (Date.parse(row.next_attempt_at) <= now.getTime()) {
+          await repo.uncertain(taskId);
+          if (await new BranchRepository(db).findById(row.branch_id))
+            await new BranchRepository(db).update(row.branch_id, { needs_attention: true });
+        }
         return null;
       }
       const channels = (await new GatewayChannelRepository(db).findAll()).filter(
         (channel) =>
-          channel.channel_type === 'slack' &&
-          channel.config[SCHEDULE_FAILURE_ALERT_TARGET] !== undefined
+          channel.channel_type === 'slack' && channel.config[SCHEDULE_FAILURE_ALERT_TARGET] != null
       );
       if (channels.length !== 1) {
         await repo.defer(taskId, channels.length ? 'target_ambiguous' : 'target_unconfigured', now);
@@ -187,9 +284,13 @@ export class ScheduleFailureNotificationWorker {
       );
     });
     if (!began) return;
+    let settlement: {
+      tenantId: string;
+      taskId: string;
+      outcome: 'receipt' | 'not_dispatched' | 'uncertain';
+      messageId?: string;
+    };
     try {
-      // Identity remains ambient; GatewayService's tenant-bound repository facade
-      // opens short DB units. No DB transaction spans the provider send.
       const gateway = this.app.service('gateway') as unknown as Pick<GatewayService, 'emitMessage'>;
       const sent = await gateway.emitMessage({
         gatewayChannelId: ready.channelId,
@@ -201,15 +302,50 @@ export class ScheduleFailureNotificationWorker {
         emittedByTaskId: taskId,
         emittedByScheduleId: ready.row.schedule_id,
       });
-      await runWithTenantDatabaseScope(this.db, tenantId, (db) =>
-        new ScheduleFailureNotificationRepository(db).finish(taskId, sent.platform_message_id)
-      );
-    } catch {
-      // The gateway may have posted before losing its receipt. A crash after
-      // beginSend has the same ambiguity. Park visibly, do not post duplicates.
-      await runWithTenantDatabaseScope(this.db, tenantId, (db) =>
-        new ScheduleFailureNotificationRepository(db).uncertain(taskId)
-      );
+      settlement = { tenantId, taskId, outcome: 'receipt', messageId: sent.platform_message_id };
+    } catch (error) {
+      settlement = {
+        tenantId,
+        taskId,
+        outcome: error instanceof GatewayNotDispatchedError ? 'not_dispatched' : 'uncertain',
+      };
     }
+    const key = `${tenantId}:${taskId}`;
+    if (this.settlements.size >= 256 && !this.settlements.has(key)) {
+      this.settlements.delete(this.settlements.keys().next().value!);
+      console.warn('[schedule-failure-notifications] operator_receipt_reconciliation_required');
+    }
+    this.settlements.set(key, settlement);
+    try {
+      await this.persistSettlement(settlement, now);
+      this.settlements.delete(key);
+    } catch {
+      console.warn('[schedule-failure-notifications] settlement_deferred');
+    }
+  }
+  private async persistSettlement(
+    settlement: {
+      tenantId: string;
+      taskId: string;
+      outcome: 'receipt' | 'not_dispatched' | 'uncertain';
+      messageId?: string;
+    },
+    now: Date
+  ): Promise<void> {
+    await runWithTenantDatabaseScope(this.db, settlement.tenantId, async (db) => {
+      await assertTenantWritable(db, settlement.tenantId);
+      const repo = new ScheduleFailureNotificationRepository(db);
+      if (settlement.outcome === 'receipt')
+        await repo.finish(settlement.taskId, settlement.messageId!);
+      else if (settlement.outcome === 'not_dispatched')
+        await repo.notDispatched(settlement.taskId, now);
+      else {
+        await repo.uncertain(settlement.taskId);
+        const row = await repo.findById(settlement.taskId);
+        if (row && (await new BranchRepository(db).findById(row.branch_id))) {
+          await new BranchRepository(db).update(row.branch_id, { needs_attention: true });
+        }
+      }
+    });
   }
 }

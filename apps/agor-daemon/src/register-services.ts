@@ -880,14 +880,14 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
     methods: ['find', 'get', 'create', 'update', 'patch', 'remove'],
   });
 
-  app.use('/schedule-failure-notifications', new ScheduleFailureNotificationsService(db), {
-    methods: ['find', 'get'],
+  app.use('/schedule-failure-notifications', new ScheduleFailureNotificationsService(db, app), {
+    methods: ['find', 'get', 'patch'],
   });
   app.service('schedule-failure-notifications').hooks({
     before: {
       all: [
         ctx.requireAuth,
-        requireMinimumRole(ROLES.ADMIN, 'read schedule failure delivery status'),
+        requireMinimumRole(ROLES.ADMIN, 'inspect or reconcile schedule failure delivery'),
       ],
     },
   });
