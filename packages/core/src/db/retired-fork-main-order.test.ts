@@ -6,7 +6,10 @@ import { sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { createDatabase } from './client';
 import { executeRaw, rawRows } from './database-wrapper';
-import { dropTeamsAndDeletionDiscoveryObjects } from './fork-rewind.test-support';
+import {
+  dropScheduleExecutionPolicyColumns,
+  dropTeamsAndDeletionDiscoveryObjects,
+} from './fork-rewind.test-support';
 import {
   checkMigrationStatus,
   classifyMigrationWatermark,
@@ -142,7 +145,7 @@ describe('retired fork-main front desk / profile image order', () => {
     const db = createDatabase({ url: `file:${join(directory, 'migration.db')}` });
     const { from } = RETIRED_FORK_MAIN_ORDER.sqlite;
     try {
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       await run(db, {
         ledger: async () =>
           rawRows(
@@ -192,6 +195,9 @@ describe('retired fork-main front desk / profile image order', () => {
     '9032_session_attention_states',
     '0117_teams_gateway_ha',
     '0118_branch_deletion_failed_discovery',
+    '9033_schedule_execution_policy',
+    '9034_schedule_failure_notifications',
+    '9035_schedule_failure_attempt_fence',
   ];
   const dropUpstreamTail = async (db: ReturnType<typeof createDatabase>) => {
     await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
@@ -202,6 +208,7 @@ describe('retired fork-main front desk / profile image order', () => {
     await executeRaw(db, sql`DROP TABLE session_attention_states`);
     await executeRaw(db, sql`ALTER TABLE sessions DROP COLUMN attention_generation`);
     await dropTeamsAndDeletionDiscoveryObjects(db);
+    await dropScheduleExecutionPolicyColumns(db);
   };
 
   const ALL_OBJECTS = [
@@ -229,9 +236,11 @@ describe('retired fork-main front desk / profile image order', () => {
         retired: ['9028_branch_front_desk_sessions', '9029_profile_image_galleries'],
       });
       expect(status.pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
-      expect(pendingOfflineCutoverMigrations('sqlite', status)).toEqual([]);
+      expect(pendingOfflineCutoverMigrations('sqlite', status)).toEqual([
+        '9035_schedule_failure_attempt_fence',
+      ]);
 
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       expect(await objects()).toEqual(ALL_OBJECTS);
       // The repaired ledger is the deployed history, row for row.
       expect(await ledger()).toEqual(fresh);
@@ -253,7 +262,7 @@ describe('retired fork-main front desk / profile image order', () => {
       // Without the repair the new journal would read profile images as applied.
       expect((await checkMigrationStatus(db)).pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
 
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       expect(await objects()).toEqual(ALL_OBJECTS);
       expect(await ledger()).toEqual(fresh);
     });

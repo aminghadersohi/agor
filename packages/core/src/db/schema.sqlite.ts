@@ -1197,6 +1197,11 @@ export const schedules = sqliteTable(
     mcp_server_ids: t.json<string[]>('mcp_server_ids'),
 
     enabled: t.bool('enabled').notNull().default(true),
+    skills_enabled: t.bool('skills_enabled').notNull().default(true),
+    failure_threshold: integer('failure_threshold').notNull().default(3),
+    consecutive_failures: integer('consecutive_failures').notNull().default(0),
+    pause_reason: text('pause_reason'),
+    attention_required: t.bool('attention_required').notNull().default(false),
     allow_concurrent_runs: t.bool('allow_concurrent_runs').notNull().default(false),
     retention: integer('retention').notNull().default(5), // 0 = keep all
 
@@ -3810,5 +3815,30 @@ export const opencodeCheckpointAttempts = sqliteTable(
       .on(table.session_id)
       .where(sql`${table.state} = 'accepted'`),
     ownerIdx: index('opencode_checkpoint_attempts_owner_idx').on(table.owner_user_id),
+  })
+);
+
+/** Content-free outbox; soft identities deliberately survive run retention. */
+export const scheduleFailureNotifications = sqliteTable(
+  'schedule_failure_notifications',
+  {
+    task_id: text('task_id').primaryKey(),
+    session_id: text('session_id').notNull(),
+    schedule_id: text('schedule_id').notNull(),
+    branch_id: text('branch_id').notNull(),
+    created_by: text('created_by').notNull(),
+    scheduled_run_at: integer('scheduled_run_at').notNull(),
+    status: text('status').notNull().default('pending'),
+    attempt_id: text('attempt_id'),
+    next_attempt_at: t.timestamp('next_attempt_at').notNull(),
+    created_at: t.timestamp('created_at').notNull(),
+    updated_at: t.timestamp('updated_at').notNull(),
+    gateway_channel_id: text('gateway_channel_id'),
+    target: text('target'),
+    platform_message_id: text('platform_message_id'),
+    last_error_code: text('last_error_code'),
+  },
+  (table) => ({
+    dueIdx: index('schedule_failure_notifications_due_idx').on(table.status, table.next_attempt_at),
   })
 );

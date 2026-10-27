@@ -39,7 +39,9 @@ type CapturedHooks = {
  */
 const captureRegisteredHooks = (
   branchRepositoryOverride?: RegisterHooksContext['branchRepository'],
-  boardRepositoryOverride?: RegisterHooksContext['boardRepository']
+  boardRepositoryOverride?: RegisterHooksContext['boardRepository'],
+  sessionsRepositoryOverride?: RegisterHooksContext['sessionsRepository'],
+  usersRepositoryOverride?: RegisterHooksContext['usersRepository']
 ): Map<string, CapturedHooks> => {
   const captured = new Map<string, CapturedHooks>();
   const visibleBranch = {
@@ -95,10 +97,13 @@ const captureRegisteredHooks = (
         isOwner: async () => false,
         resolveUserPermission: async () => 'view',
       } as unknown as RegisterHooksContext['branchRepository']),
-    usersRepository: {
-      listUserIds: async () => ['00000000-0000-7000-8000-0000000000ff'],
-    } as unknown as RegisterHooksContext['usersRepository'],
-    sessionsRepository: {} as RegisterHooksContext['sessionsRepository'],
+    usersRepository:
+      usersRepositoryOverride ??
+      ({
+        listUserIds: async () => ['00000000-0000-7000-8000-0000000000ff'],
+      } as unknown as RegisterHooksContext['usersRepository']),
+    sessionsRepository:
+      sessionsRepositoryOverride ?? ({} as RegisterHooksContext['sessionsRepository']),
   });
 
   return captured;
@@ -716,4 +721,143 @@ describe('executor interruption report registration', () => {
       else await expect(run()).rejects.toThrow(/scoped to this executor task/);
     }
   );
+});
+
+describe('registered Session scheduler provenance boundary', () => {
+  const sessionId = '00000000-0000-7000-8000-000000000011';
+  const branchId = '00000000-0000-7000-8000-000000000012';
+  const owner = '00000000-0000-7000-8000-000000000013';
+  const scheduledRun = {
+    initial_task_id: '00000000-0000-7000-8000-000000000014',
+    triggered_manually: false,
+    run_index: 1,
+    rendered_prompt: 'Run once',
+    schedule_config_snapshot: { skills_enabled: false },
+  };
+  const session = {
+    session_id: sessionId,
+    branch_id: branchId,
+    created_by: owner,
+    sdk_home_scope: 'branch',
+    scheduled_from_branch: true,
+    custom_context: { project: 'original', scheduled_run: scheduledRun },
+  };
+  const branch = { branch_id: branchId, created_by: owner, others_can: 'all' };
+  function setup(actor: 'owner' | 'other-manager' | 'shared-caller') {
+    const userId =
+      actor === 'owner'
+        ? owner
+        : actor === 'other-manager'
+          ? '00000000-0000-7000-8000-000000000015'
+          : '00000000-0000-7000-8000-000000000016';
+    const branches = {
+      findById: async () => branch,
+      isOwner: async () => actor === 'owner',
+      resolveUserPermission: async () => 'all',
+      resolveSessionPromptAuthority: async () => ({
+        allowed: true,
+        source: 'shared',
+        execution_user_id: userId,
+      }),
+    } as unknown as RegisterHooksContext['branchRepository'];
+    const sessions = {
+      findById: async () => session,
+    } as unknown as RegisterHooksContext['sessionsRepository'];
+    const users = {
+      findById: async () => ({ user_id: userId, unix_username: 'test-home' }),
+    } as unknown as RegisterHooksContext['usersRepository'];
+    const hooks = captureRegisteredHooks(branches, undefined, sessions, users).get(
+      'sessions'
+    )!.before;
+    const run = async (
+      method: 'create' | 'patch' | 'update',
+      provider: string | undefined,
+      data: unknown
+    ) => {
+      const context = {
+        path: 'sessions',
+        method,
+        id: method === 'create' ? undefined : sessionId,
+        data:
+          method === 'create'
+            ? { branch_id: branchId, ...(data as Record<string, unknown>) }
+            : data,
+        app: {
+          service: (path: string) => ({
+            get: async () =>
+              path === 'branches' ? branch : { repo_id: 'test-repo', slug: 'test-repo' },
+          }),
+        },
+        params: { provider, query: {}, user: { user_id: userId, role: 'member' } },
+      } as unknown as HookContext;
+      for (const hook of hooks[method] ?? []) await hook(context);
+      return context;
+    };
+    return { run };
+  }
+  for (const actor of ['owner', 'other-manager', 'shared-caller'] as const) {
+    for (const provider of ['rest', 'socketio', 'mcp']) {
+      for (const method of ['create', 'patch', 'update'] as const) {
+        it(`rejects ${actor} ${provider} ${method} provenance/policy forgery`, async () => {
+          const { run } = setup(actor);
+          for (const scheduled_run of [
+            { triggered_manually: true },
+            { initial_task_id: 'continuation-task' },
+            { schedule_config_snapshot: { skills_enabled: true } },
+            null,
+            {},
+          ]) {
+            await expect(
+              run(method, provider, { custom_context: { scheduled_run } })
+            ).rejects.toThrow('scheduled_run is server-managed');
+          }
+          for (const data of [
+            { schedule_id: 'another-schedule' },
+            { scheduled_from_branch: false },
+            { scheduled_run_at: 0 },
+            { scheduler_init_retry_at: null },
+            { scheduler_init_completed_at: null },
+          ])
+            await expect(run(method, provider, data)).rejects.toThrow('is server-managed');
+          await expect(run(method, provider, { custom_context: null })).rejects.toThrow(
+            'must be an object'
+          );
+          if (method !== 'create')
+            await expect(run(method, provider, { branch_id: 'another-branch' })).rejects.toThrow(
+              'scheduled Session branch_id is immutable'
+            );
+          expect(session.custom_context.scheduled_run).toEqual(scheduledRun);
+        });
+      }
+    }
+    it(`preserves ordinary ${actor} create/patch/PUT context`, async () => {
+      const { run } = setup(actor);
+      for (const method of ['create', 'patch', 'update'] as const) {
+        const data = {
+          custom_context: { project: 'edited', user_data: { note: 'ordinary context' } },
+        };
+        expect((await run(method, 'rest', data)).data).toMatchObject(data);
+        expect(session.custom_context.scheduled_run).toEqual(scheduledRun);
+      }
+    });
+  }
+  it('allows trusted scheduler create/recovery writes through the registered guard', async () => {
+    const hooks = captureRegisteredHooks().get('sessions')!.before;
+    // The shared provenance guard is installed on each verb; internal scheduler
+    // calls intentionally bypass transport/RBAC hooks, not persistence invariants.
+    for (const method of ['create', 'patch', 'update'] as const) {
+      const guard = hooks[method].find((hook) => hook.name === 'protectGatewaySourceMetadata');
+      if (!guard) throw new Error('Expected registered server-managed metadata guard');
+      const context = {
+        method,
+        data: {
+          schedule_id: 'trusted-schedule',
+          scheduled_from_branch: true,
+          custom_context: { scheduled_run: scheduledRun },
+        },
+        params: {},
+      } as unknown as HookContext;
+      expect(await guard(context)).toBe(context);
+    }
+  });
 });

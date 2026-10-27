@@ -50,6 +50,7 @@ export * from './opencode-checkpoints';
 export * from './power-policy-runtime-settings';
 export * from './profile-images';
 export * from './repos';
+export * from './schedule-failure-notifications';
 export * from './schedules';
 export * from './session-attention-states';
 export * from './session-env-selections';

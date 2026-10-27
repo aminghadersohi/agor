@@ -1,3 +1,4 @@
+import { ScheduleFailureNotificationWorker } from './services/schedule-failure-notifications.js';
 /**
  * Startup & Shutdown
  *
@@ -971,6 +972,10 @@ export async function startup(ctx: StartupContext): Promise<void> {
     tenantId: queueMultiTenancy.mode === 'static' ? queueMultiTenancy.static_tenant_id : undefined,
   });
   sessionReminderWorker.start();
+  const scheduleFailureNotificationWorker = new ScheduleFailureNotificationWorker(db, app, {
+    tenantId: queueMultiTenancy.mode === 'static' ? queueMultiTenancy.static_tenant_id : undefined,
+  });
+  scheduleFailureNotificationWorker.start();
 
   // 7. Start scheduler service (background worker)
   const schedulerMultiTenancy = resolveMultiTenancyConfig(config);
@@ -1095,6 +1100,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
       sessionQueueWorker?.stop();
       sessionAutoArchiveWorker?.stop();
       sessionReminderWorker?.stop();
+      scheduleFailureNotificationWorker.stop();
 
       if (shouldContainLocalExecutorsOnShutdown(ctx.taskRuntimePolicy, ownedStandalonePostgres)) {
         // Preserve the historical single-daemon shutdown contract. The next

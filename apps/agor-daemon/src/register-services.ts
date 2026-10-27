@@ -4,6 +4,7 @@ import {
 } from '@agor/core/types';
 import { BranchCleanupStepsService } from './services/branch-cleanup-steps.js';
 import type { MCPOAuthCallbackHandler } from './services/mcp-oauth-callback-route.js';
+import { ScheduleFailureNotificationsService } from './services/schedule-failure-notifications.js';
 /**
  * Service Registration
  *
@@ -878,6 +879,19 @@ export async function registerServices(ctx: RegisterServicesContext): Promise<Re
   app.use('/repos', createReposService(db, app), {
     methods: ['find', 'get', 'create', 'update', 'patch', 'remove'],
   });
+
+  app.use('/schedule-failure-notifications', new ScheduleFailureNotificationsService(db, app), {
+    methods: ['find', 'get', 'patch'],
+  });
+  app.service('schedule-failure-notifications').hooks({
+    before: {
+      all: [
+        ctx.requireAuth,
+        requireMinimumRole(ROLES.ADMIN, 'inspect or reconcile schedule failure delivery'),
+      ],
+    },
+  });
+  app.service('schedule-failure-notifications').publish(() => []);
 
   // First-class schedules. RBAC hooks wired in register-hooks.ts.
   app.use('/schedules', createSchedulesService(db), {

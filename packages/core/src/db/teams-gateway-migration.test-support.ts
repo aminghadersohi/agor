@@ -33,6 +33,21 @@ export async function beforeTeamsMigrations(dialect: 'sqlite' | 'postgres') {
   return folder;
 }
 
+/** Prove Teams itself online without silently including future offline protocols. */
+export async function stageOnlineTeamsMigration(folder: string, dialect: 'sqlite' | 'postgres') {
+  const source = new URL(`../../drizzle/${dialect}/`, import.meta.url);
+  const journal = JSON.parse(await readFile(new URL('meta/_journal.json', source), 'utf8')) as {
+    entries: Array<{ idx: number; tag: string }>;
+  };
+  const boundary = journal.entries.find(({ tag }) => tag === teamsMigration(dialect))!;
+  journal.entries = journal.entries.filter(({ idx }) => idx <= boundary.idx);
+  await writeFile(join(folder, 'meta/_journal.json'), JSON.stringify(journal));
+  await writeFile(
+    join(folder, `${teamsMigration(dialect)}.sql`),
+    await readFile(new URL(`${teamsMigration(dialect)}.sql`, source))
+  );
+}
+
 /** Prove the disable/config cutover rolls back with the schema on failure. */
 export async function stageFailingTeamsMigration(folder: string, dialect: 'sqlite' | 'postgres') {
   const source = new URL(`../../drizzle/${dialect}/`, import.meta.url);

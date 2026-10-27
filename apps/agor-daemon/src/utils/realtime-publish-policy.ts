@@ -127,6 +127,10 @@ export const REALTIME_PUBLISH_POLICY = {
     audience: 'branch-or-session',
     why: 'The Session Memory & reminders panel converges create and CAS patch changes across authorized tabs.',
   },
+  'schedule-failure-notifications': {
+    audience: 'none',
+    why: 'Tenant/admin delivery status and verified receipt reconciliation; no realtime consumer or public event audience.',
+  },
   'session-reminders': {
     audience: 'branch-or-session',
     why: 'The Session Memory & reminders panel tracks edits, cancellation, dispatch claims, and terminal states.',

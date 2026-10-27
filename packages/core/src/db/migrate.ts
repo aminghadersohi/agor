@@ -135,6 +135,45 @@ export function createMigrationImpactRegistry(
 }
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
+  [
+    '9035_schedule_failure_attempt_fence',
+    {
+      requiresOfflineCutover: true,
+      impact: defineMigrationImpact({
+        classification: 'protocol',
+        userAction: 'required',
+        rollbackCompatibility: 'incompatible',
+        summary:
+          'Fences failure-notification attempts. Stop all writers before upgrading; never roll back to unfenced writers while notifications are active.',
+      }),
+    },
+  ],
+  [
+    '9034_schedule_failure_notifications',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'required',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Adds a content-free failure notification outbox. Configure one authorized Slack gateway alert target to deliver; ambiguous sends are never blindly retried. Older binaries ignore the table.',
+      }),
+    },
+  ],
+  [
+    '9033_schedule_execution_policy',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Retains unused schedule-policy columns for compatibility. This release does not read them, disable schedules, or change skill loading.',
+      }),
+    },
+  ],
   // SQLite and PostgreSQL number the same Teams migration differently.
   ...['0117_teams_gateway_ha', '0118_teams_gateway_ha'].map(
     (name) =>

@@ -2,7 +2,10 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase, type Database } from './client';
 import { executeRaw, rawRows } from './database-wrapper';
-import { dropTeamsAndDeletionDiscoveryObjectsPostgres } from './fork-rewind.test-support';
+import {
+  dropScheduleExecutionPolicyColumns,
+  dropTeamsAndDeletionDiscoveryObjectsPostgres,
+} from './fork-rewind.test-support';
 import { checkMigrationStatus, RETIRED_FORK_MAIN_ORDER, runMigrations } from './migrate';
 
 const postgresUrl = process.env.AGOR_TEST_POSTGRES_URL;
@@ -26,6 +29,9 @@ const UPSTREAM_TAIL = [
   '9032_session_attention_states',
   '0118_teams_gateway_ha',
   '0119_branch_deletion_failed_discovery',
+  '9033_schedule_execution_policy',
+  '9034_schedule_failure_notifications',
+  '9035_schedule_failure_attempt_fence',
 ];
 
 // Fork main journalled front desk at 1790129000214 and profile images at
@@ -40,7 +46,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
 
     beforeAll(async () => {
       db = createDatabase({ dialect: 'postgresql', url: postgresUrl! });
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       fresh = await ledger();
     });
     afterAll(async () => {
@@ -69,6 +75,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       // Upstream's Teams gateway HA and failed-deletion discovery replay with
       // plain CREATE/ADD statements too.
       await dropTeamsAndDeletionDiscoveryObjectsPostgres(db);
+      await dropScheduleExecutionPolicyColumns(db);
     }
 
     async function recordRetiredOrder(count: 1 | 2) {
@@ -117,7 +124,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       ]);
       expect(status.pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
 
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       const after = await relations();
       // Existing tables are verified in place, not recreated; callback storage
       // is created with forced tenant isolation.
@@ -135,7 +142,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       await recordRetiredOrder(1);
       expect((await checkMigrationStatus(db)).pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
 
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       const after = await relations();
       for (const table of [
         'profile_images',
@@ -151,7 +158,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       await executeRaw(db, sql`ALTER TABLE branch_front_desk_sessions DROP COLUMN retired_reason`);
       await dropUpstreamTail();
       await recordRetiredOrder(2);
-      await expect(runMigrations(db)).rejects.toMatchObject({
+      await expect(runMigrations(db, { allowOfflineCutover: true })).rejects.toMatchObject({
         cause: { cause: { message: expect.stringContaining('retired_reason') } },
       });
       // The batch rolled back; the rewound ledger keeps reporting the replay.

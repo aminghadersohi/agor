@@ -904,6 +904,27 @@
       "when": 1790208000022,
       "tag": "0118_branch_deletion_failed_discovery",
       "breakpoints": true
+    },
+    {
+      "idx": 9043,
+      "version": "6",
+      "when": 1790208000023,
+      "tag": "9033_schedule_execution_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 9044,
+      "version": "6",
+      "when": 1790208000024,
+      "tag": "9034_schedule_failure_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 9045,
+      "version": "6",
+      "when": 1790208000025,
+      "tag": "9035_schedule_failure_attempt_fence",
+      "breakpoints": true
     }
   ]
 }

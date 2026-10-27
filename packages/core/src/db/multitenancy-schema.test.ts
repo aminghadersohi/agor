@@ -93,6 +93,9 @@ function migrationTenantTables(): string[] {
   const sessionAttentionMigration = readRepoFile(
     'packages/core/drizzle/postgres/9032_session_attention_states.sql'
   );
+  const scheduleFailureMigration = readRepoFile(
+    'packages/core/drizzle/postgres/9034_schedule_failure_notifications.sql'
+  );
   const retiredTables = retiredTenantTables();
   return [
     ...new Set(
@@ -128,6 +131,7 @@ function migrationTenantTables(): string[] {
         ...sessionAttentionMigration.matchAll(
           /CREATE TABLE IF NOT EXISTS "([^"]+)" \([\s\S]*?"tenant_id"/g
         ),
+        ...scheduleFailureMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
         ...teamsGatewayHaMigration.matchAll(/CREATE TABLE "([^"]+)" \([\s\S]*?"tenant_id"/g),
       ]
         .map((m) => m[1])
@@ -161,6 +165,7 @@ function rlsPolicyTables(): string[] {
     readRepoFile('packages/core/drizzle/postgres/9028_profile_image_galleries.sql'),
     readRepoFile('packages/core/drizzle/postgres/0117_opencode_checkpoint_attempts.sql'),
     readRepoFile('packages/core/drizzle/postgres/9032_session_attention_states.sql'),
+    readRepoFile('packages/core/drizzle/postgres/9034_schedule_failure_notifications.sql'),
   ].join('\n');
   const retiredTables = retiredTenantTables();
   return [

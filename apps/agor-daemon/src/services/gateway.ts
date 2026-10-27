@@ -1,4 +1,5 @@
 import { safeTeamsMetadata } from '@agor/core/gateway';
+import { SCHEDULE_FAILURE_ALERT_PURPOSE, SCHEDULE_FAILURE_ALERT_TARGET } from '@agor/core/types';
 /**
  * Gateway Service
  *
@@ -42,6 +43,7 @@ import {
   runWithSystemDatabaseScope,
   runWithTenantContext,
   runWithTenantDatabaseScope,
+  ScheduleFailureNotificationRepository,
   SessionMCPServerRepository,
   SessionRepository,
   shortId,
@@ -85,6 +87,7 @@ import {
   formatGatewaySystemPayload,
   GATEWAY_COMMAND_AMBIGUOUS,
   GATEWAY_COMMAND_HELP,
+  GatewayNotDispatchedError,
   gatewayFailureCode,
   gatewayListenerFailure,
   getConnector,
@@ -501,6 +504,7 @@ interface EmitGatewayMessageData {
   emittedBySessionId?: SessionID;
   emittedByTaskId?: string;
   emittedByScheduleId?: string;
+  emittedByScheduleAttemptId?: string;
   userRole?: string;
 }
 
@@ -1533,6 +1537,7 @@ export class GatewayService {
   private sessionRepo: SessionRepository;
   private taskRepo: TaskRepository;
   private usersRepo: UsersRepository;
+  private scheduleFailureRepo: ScheduleFailureNotificationRepository;
   private messagesRepo: MessagesRepository;
   private inboundEventRepo: GatewayInboundEventRepository;
   private deliveryRepo: DiscordMessageDeliveryRepository;
@@ -1649,6 +1654,7 @@ export class GatewayService {
     this.sessionRepo = this.data.repository(new SessionRepository(db));
     this.taskRepo = this.data.repository(new TaskRepository(db));
     this.usersRepo = this.data.repository(new UsersRepository(db));
+    this.scheduleFailureRepo = this.data.repository(new ScheduleFailureNotificationRepository(db));
     this.messagesRepo = this.data.repository(new MessagesRepository(db));
     this.inboundEventRepo = this.data.repository(new GatewayInboundEventRepository(db));
     this.deliveryRepo = this.data.repository(new DiscordMessageDeliveryRepository(db));
@@ -5028,6 +5034,75 @@ export class GatewayService {
   }
 
   async emitMessage(data: EmitGatewayMessageData): Promise<EmitGatewayMessageResult> {
+    let dispatched = false;
+    try {
+      return await this.emitMessageAttempt(data, () => {
+        dispatched = true;
+      });
+    } catch (error) {
+      if (data.purpose === SCHEDULE_FAILURE_ALERT_PURPOSE && !dispatched)
+        throw new GatewayNotDispatchedError();
+      throw error;
+    }
+  }
+
+  async confirmScheduleFailureReceipt(
+    taskId: string,
+    attemptId: string | null,
+    messageId: string,
+    operatorId: UserID
+  ): Promise<string | null> {
+    const row = await this.scheduleFailureRepo.findById(taskId);
+    if (
+      !row ||
+      row.attempt_id !== attemptId ||
+      !['sending', 'uncertain', 'delivered'].includes(row.status) ||
+      !row.gateway_channel_id ||
+      !row.target
+    )
+      return null;
+    const channel = await this.channelRepo.findById(row.gateway_channel_id);
+    const branch = await this.branchRepo.findById(row.branch_id);
+    if (
+      !channel ||
+      !branch ||
+      channel.channel_type !== 'slack' ||
+      channel.config[SCHEDULE_FAILURE_ALERT_TARGET] !== row.target
+    )
+      return null;
+    for (const userId of [operatorId, channel.created_by]) {
+      const user = await this.usersRepo.findById(userId);
+      if (
+        !user ||
+        !hasBranchPermission(
+          branch,
+          user.user_id,
+          await this.branchRepo.isOwner(branch.branch_id, user.user_id),
+          'view',
+          user.role,
+          this.app.get?.('config')?.execution?.allow_superadmin === true,
+          await this.branchRepo.resolveUserPermission(branch, user.user_id)
+        )
+      )
+        return null;
+    }
+    const connector = getConnector('slack', channel.config);
+    if (!connector.confirmScheduleFailureMessage) return null;
+    return (await connector.confirmScheduleFailureMessage({
+      channel: row.target.slice(8),
+      messageId,
+      taskId: row.task_id,
+      scheduleId: row.schedule_id,
+      attemptId,
+    }))
+      ? messageId
+      : null;
+  }
+
+  private async emitMessageAttempt(
+    data: EmitGatewayMessageData,
+    markDispatch: () => void
+  ): Promise<EmitGatewayMessageResult> {
     const channel = await this.channelRepo.findById(data.gatewayChannelId);
     if (!channel) throw new Error('Gateway channel not found');
     if (!channel.enabled) throw new Error('Gateway channel is disabled');
@@ -5055,6 +5130,45 @@ export class GatewayService {
         ? config.default_outbound_target
         : undefined);
     if (!target) throw new Error('No usable default outbound target configured');
+    if (
+      data.purpose === SCHEDULE_FAILURE_ALERT_PURPOSE &&
+      (channel.channel_type !== 'slack' ||
+        config[SCHEDULE_FAILURE_ALERT_TARGET] !== target ||
+        channel.created_by !== data.emittedByUserId)
+    ) {
+      throw new Forbidden('Schedule failure notification target binding changed');
+    }
+    if (data.purpose === SCHEDULE_FAILURE_ALERT_PURPOSE) {
+      const notice = data.emittedByTaskId
+        ? await this.scheduleFailureRepo.findById(data.emittedByTaskId)
+        : null;
+      const sender = await this.usersRepo.findById(channel.created_by);
+      const failedBranch = notice ? await this.branchRepo.findById(notice.branch_id) : null;
+      if (
+        notice?.status !== 'sending' ||
+        !data.emittedByScheduleAttemptId ||
+        notice.attempt_id !== data.emittedByScheduleAttemptId ||
+        notice.gateway_channel_id !== channel.id ||
+        notice.target !== target ||
+        notice.schedule_id !== data.emittedByScheduleId ||
+        !sender ||
+        !failedBranch ||
+        !hasBranchPermission(
+          failedBranch,
+          sender.user_id,
+          await this.branchRepo.isOwner(failedBranch.branch_id, sender.user_id),
+          'view',
+          sender.role,
+          this.app.get?.('config')?.execution?.allow_superadmin === true,
+          await this.branchRepo.resolveUserPermission(failedBranch, sender.user_id)
+        )
+      ) {
+        throw new Forbidden('Schedule failure notification authority changed');
+      }
+      // Re-read actual role/access instead of trusting the worker's earlier snapshot.
+      await this.ensureCanEmitFromChannel(channel, sender.user_id, sender.role);
+    }
+
     if (channel.channel_type === 'discord' && data.threadTs) {
       throw new Error('Discord proactive outbound does not accept thread targets');
     }
@@ -5077,8 +5191,17 @@ export class GatewayService {
 
     let sent: ReturnType<typeof normalizeSendReceipt>;
     try {
+      markDispatch();
       sent = normalizeSendReceipt(
         await connector.sendDirectMessage({
+          ...(data.purpose === SCHEDULE_FAILURE_ALERT_PURPOSE
+            ? {
+                singleAttempt: true,
+                failureTaskId: data.emittedByTaskId,
+                failureScheduleId: data.emittedByScheduleId,
+                failureAttemptId: data.emittedByScheduleAttemptId,
+              }
+            : {}),
           target,
           text,
           blocks,
@@ -5090,7 +5213,8 @@ export class GatewayService {
         })
       );
     } catch (error) {
-      if (error instanceof DiscordDirectMessageError) throw error;
+      if (error instanceof GatewayNotDispatchedError || error instanceof DiscordDirectMessageError)
+        throw error;
       const failure = gatewayFailureCode(error);
       throw new Error(
         `${channel.channel_type === 'slack' ? 'Slack' : 'Discord'} API failure: ${failure}`
@@ -5148,7 +5272,10 @@ export class GatewayService {
 
     let record: GatewayOutboundSendRecord;
     try {
-      record = await this.outboundRepo.recordSend(audit);
+      record =
+        data.purpose === SCHEDULE_FAILURE_ALERT_PURPOSE
+          ? await this.data.write(() => this.outboundRepo.recordSend(audit))
+          : await this.outboundRepo.recordSend(audit);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       console.error(
@@ -5163,7 +5290,13 @@ export class GatewayService {
       };
     }
 
-    await this.channelRepo.updateLastMessage(channel.id);
+    if (data.purpose === SCHEDULE_FAILURE_ALERT_PURPOSE) {
+      try {
+        await this.data.write(() => this.channelRepo.updateLastMessage(channel.id));
+      } catch {
+        /* The positive receipt is authoritative; worker persists it without resending. */
+      }
+    } else await this.channelRepo.updateLastMessage(channel.id);
     console.log(
       `[gateway] Proactive ${channel.channel_type} outbound ${shortId(record.message.id)} (${record.role}) sent via ${shortId(channel.id)}`
     );

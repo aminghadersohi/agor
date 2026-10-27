@@ -13,22 +13,26 @@ import {
   type AgenticToolPresetID,
   type BranchID,
   type PersistedScheduleAgenticToolConfig,
+  TaskStatus,
   USER_DEFAULT_AGENTIC_CONFIGURATION,
   type UserID,
   type UUID,
   WORKSPACE_DEFAULT_AGENTIC_CONFIGURATION,
 } from '@agor/core/types';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { describe, expect } from 'vitest';
 import { generateId } from '../../lib/ids';
-import type { Database } from '../client';
-import { select, update } from '../database-wrapper';
+import { createDatabase, type Database } from '../client';
+import { executeRaw, select, update } from '../database-wrapper';
 import { schedules } from '../schema';
 import { dbTest } from '../test-helpers';
 import { AgenticToolPresetRepository } from './agentic-tool-presets';
 import { BranchRepository } from './branches';
 import { RepoRepository } from './repos';
+import { ScheduleFailureNotificationRepository } from './schedule-failure-notifications';
 import { ScheduleRepository } from './schedules';
+import { SessionRepository } from './sessions';
+import { TaskRepository } from './tasks';
 import { UsersRepository } from './users';
 
 async function setupContext(db: Database) {
@@ -461,5 +465,247 @@ describe('ScheduleRepository.delete', () => {
     await ctx.scheduleRepo.delete(created.schedule_id);
     const after = await ctx.scheduleRepo.findById(created.schedule_id);
     expect(after).toBeNull();
+  });
+});
+
+async function failureFixture(db: Database) {
+  const ctx = await setupContext(db);
+  const schedule = await ctx.scheduleRepo.create({
+    ...scheduleData(),
+    branch_id: ctx.branchId,
+    created_by: ctx.userId,
+  });
+  const occurrence = async (manual = false) => {
+    const taskId = generateId();
+    const session = await new SessionRepository(db).create({
+      branch_id: schedule.branch_id,
+      created_by: schedule.created_by,
+      agentic_tool: 'claude-code',
+      schedule_id: schedule.schedule_id,
+      scheduled_from_branch: true,
+      scheduled_run_at: Date.now(),
+      custom_context: {
+        scheduled_run: {
+          run_index: 1,
+          rendered_prompt: 'SECRET PROMPT MUST NOT ENTER OUTBOX',
+          initial_task_id: taskId,
+          triggered_manually: manual,
+        },
+      },
+    });
+    return new TaskRepository(db).create({
+      task_id: taskId,
+      session_id: session.session_id,
+      created_by: schedule.created_by,
+      full_prompt: 'SECRET PROMPT MUST NOT ENTER OUTBOX',
+      status: TaskStatus.RUNNING,
+    });
+  };
+  return {
+    schedule,
+    occurrence,
+    tasks: new TaskRepository(db),
+    notices: new ScheduleFailureNotificationRepository(db),
+  };
+}
+
+describe('authentic scheduled failure outbox', () => {
+  dbTest(
+    'legacy null attempt receipts remain confirmable, but never settle a newly claimed generation',
+    async ({ db }) => {
+      const { occurrence, tasks, notices } = await failureFixture(db);
+      const task = await occurrence();
+      await tasks.update(task.task_id, { status: TaskStatus.FAILED });
+      await executeRaw(
+        db,
+        sql`UPDATE schedule_failure_notifications SET status = 'sending' WHERE task_id = ${task.task_id}`
+      );
+      expect(await notices.finish(task.task_id, null, 'legacy-positive')).toBe(true);
+      expect(await notices.notDispatched(task.task_id, undefined as unknown as string)).toBe(false);
+      expect(await notices.findById(task.task_id)).toMatchObject({
+        status: 'delivered',
+        attempt_id: null,
+        platform_message_id: 'legacy-positive',
+      });
+    }
+  );
+
+  dbTest(
+    'discovery advances a stable keyset within a finite cycle and wraps without mutating rows',
+    async ({ db }) => {
+      const { occurrence, tasks, notices } = await failureFixture(db);
+      const ids: string[] = [];
+      for (let i = 0; i < 26; i++) {
+        const task = await occurrence();
+        ids.push(task.task_id);
+        await tasks.update(task.task_id, { status: TaskStatus.FAILED });
+      }
+      ids.sort();
+      const now = new Date(Date.now() + 1000);
+      const upper = await notices.discoveryUpperBound(now);
+      expect(upper).toBe(ids[25]);
+      const first = await notices.findDueRefs(now, undefined, upper);
+      expect(first.map((row) => row.task_id)).toEqual(ids.slice(0, 25));
+      const newer = await occurrence();
+      await tasks.update(newer.task_id, { status: TaskStatus.FAILED });
+      const second = await notices.findDueRefs(now, first[24].task_id, upper);
+      expect(second.map((row) => row.task_id)).toEqual([ids[25]]);
+      expect(await notices.findDueRefs(now, second[0].task_id, upper)).toEqual([]);
+      expect((await notices.findDueRefs(now, undefined, upper)).map((row) => row.task_id)).toEqual(
+        ids.slice(0, 25)
+      );
+      expect(await notices.discoveryUpperBound(now)).toBe(newer.task_id);
+      expect(
+        (await notices.findAll()).every(
+          (row) => row.status === 'pending' && row.last_error_code === null
+        )
+      ).toBe(true);
+    }
+  );
+
+  dbTest(
+    'distinct initial failures each enqueue once; no failure count or automatic pause',
+    async ({ db }) => {
+      const { schedule, occurrence, tasks, notices } = await failureFixture(db);
+      for (let i = 0; i < 4; i++) {
+        const task = await occurrence(i === 3); // Run-now is also a genuine scheduled occurrence.
+        const status = i === 2 ? TaskStatus.TIMED_OUT : TaskStatus.FAILED;
+        await tasks.update(task.task_id, { status, error_message: 'SECRET PROVIDER LOG' });
+        await tasks.update(task.task_id, { status });
+      }
+      expect(await notices.findAll()).toHaveLength(4);
+      expect(JSON.stringify(await notices.findAll())).not.toContain('SECRET');
+      expect((await new ScheduleRepository(db).findById(schedule.schedule_id))?.enabled).toBe(true);
+      await new ScheduleRepository(db).update(schedule.schedule_id, { enabled: false });
+      const afterHumanPause = await occurrence();
+      await tasks.update(afterHumanPause.task_id, { status: TaskStatus.FAILED });
+      expect(await notices.findAll()).toHaveLength(5);
+      expect((await new ScheduleRepository(db).findById(schedule.schedule_id))?.enabled).toBe(
+        false
+      );
+    }
+  );
+
+  dbTest(
+    'ordinary continuations, success and user Stop do not manufacture schedule failures',
+    async ({ db }) => {
+      const { occurrence, tasks, notices } = await failureFixture(db);
+      const initial = await occurrence();
+      await tasks.update(initial.task_id, { status: TaskStatus.COMPLETED });
+      const later = await tasks.create({
+        session_id: initial.session_id,
+        created_by: initial.created_by,
+        full_prompt: 'Later continuation',
+        status: TaskStatus.RUNNING,
+      });
+      await tasks.update(later.task_id, { status: TaskStatus.FAILED });
+      const stopped = await occurrence();
+      await tasks.update(stopped.task_id, { status: TaskStatus.STOPPED });
+      expect(await notices.findAll()).toHaveLength(0);
+    }
+  );
+
+  dbTest(
+    'restart/concurrent delivery CAS never sends twice, and retention does not erase intent',
+    async ({ db }) => {
+      const { schedule, occurrence, tasks, notices } = await failureFixture(db);
+      const task = await occurrence();
+      await tasks.update(task.task_id, { status: TaskStatus.FAILED });
+      const rows = (await executeRaw(db, sql`PRAGMA database_list`)).rows as Array<{
+        name: string;
+        file: string;
+      }>;
+      const file = rows.find((row) => row.name === 'main')?.file;
+      if (!file) throw new Error('Expected file-backed test DB');
+      const replacement = new ScheduleFailureNotificationRepository(
+        createDatabase({ url: `file:${file}` })
+      );
+      expect(
+        (
+          await Promise.all([
+            notices.beginSend(task.task_id, generateId(), 'channel:C123'),
+            replacement.beginSend(task.task_id, generateId(), 'channel:C123'),
+          ])
+        ).filter(Boolean)
+      ).toHaveLength(1);
+      await replacement.finish(
+        task.task_id,
+        (await replacement.findById(task.task_id))!.attempt_id,
+        'provider-message'
+      );
+      expect(await notices.beginSend(task.task_id, generateId(), 'channel:C123')).toBeNull();
+      await new SessionRepository(db).delete(task.session_id);
+      await new ScheduleRepository(db).delete(schedule.schedule_id);
+      expect(await replacement.findById(task.task_id)).toMatchObject({
+        status: 'delivered',
+        platform_message_id: 'provider-message',
+      });
+    }
+  );
+
+  dbTest('failure settlement rolls back if its outbox intent cannot commit', async ({ db }) => {
+    const { occurrence, tasks, notices } = await failureFixture(db);
+    const task = await occurrence();
+    await executeRaw(
+      db,
+      sql`CREATE TRIGGER reject_alert BEFORE INSERT ON schedule_failure_notifications BEGIN SELECT RAISE(ABORT, 'fixture failure'); END`
+    );
+    await expect(tasks.update(task.task_id, { status: TaskStatus.FAILED })).rejects.toThrow();
+    expect((await tasks.findById(task.task_id))?.status).toBe(TaskStatus.RUNNING);
+    expect(await notices.findAll()).toHaveLength(0);
+  });
+
+  dbTest('verified containment enqueues once; unverified containment does not', async ({ db }) => {
+    const { occurrence, tasks, notices } = await failureFixture(db);
+    const task = await occurrence();
+    await tasks.claimTermination({
+      taskId: task.task_id,
+      cause: 'heartbeat_lost',
+      errorMessage: 'Lost',
+      sdkFailure: {
+        reason: 'heartbeat_lost',
+        tool: 'claude-code',
+        detected_at: new Date().toISOString(),
+        termination: 'requested',
+      },
+    });
+    await tasks.claimTerminationCoordination({
+      taskId: task.task_id,
+      claimToken: 'claim',
+      instanceId: 'daemon',
+      bootId: 'boot',
+      leaseDurationMs: 30000,
+    });
+    await tasks.settleTermination({
+      taskId: task.task_id,
+      outcome: 'unverified',
+      coordinationToken: 'claim',
+      errorMessage: 'Unverified',
+    });
+    expect(await notices.findAll()).toHaveLength(0);
+    const request = (await tasks.findById(task.task_id))!.termination_request!;
+    await tasks.retryTermination(
+      task.task_id,
+      request.requested_at,
+      request.recovery_revision ?? request.requested_at
+    );
+    await tasks.claimTerminationCoordination({
+      taskId: task.task_id,
+      claimToken: 'recovered',
+      instanceId: 'daemon',
+      bootId: 'boot',
+      leaseDurationMs: 30000,
+    });
+    await tasks.settleTermination({
+      taskId: task.task_id,
+      outcome: 'verified_absent',
+      coordinationToken: 'recovered',
+    });
+    await tasks.settleTermination({
+      taskId: task.task_id,
+      outcome: 'verified_absent',
+      coordinationToken: 'recovered',
+    });
+    expect(await notices.findAll()).toHaveLength(1);
   });
 });

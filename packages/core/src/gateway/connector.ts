@@ -12,6 +12,14 @@ import type {
   SlackAppInfo,
 } from '../types/gateway';
 
+/** Proven before a non-idempotent provider write: retry requires fresh authorization. */
+export class GatewayNotDispatchedError extends Error {
+  constructor() {
+    super('Gateway delivery was not dispatched');
+    this.name = 'GatewayNotDispatchedError';
+  }
+}
+
 /**
  * File attached to an inbound message (provider-neutral shape).
  *
@@ -230,12 +238,25 @@ export interface GatewayConnector {
    * the connector owns provider target parsing/resolution and transport.
    */
   sendDirectMessage?(req: {
+    /** Schedule alerts only: no SDK retransmission of an ambiguous post. */
+    singleAttempt?: boolean;
+    failureTaskId?: string;
+    failureScheduleId?: string;
+    failureAttemptId?: string;
     target: string;
     text: string;
     blocks?: unknown[];
     threadId?: string;
     metadata?: Record<string, unknown>;
   }): Promise<GatewaySendResult>;
+
+  confirmScheduleFailureMessage?(req: {
+    channel: string;
+    messageId: string;
+    taskId: string;
+    scheduleId: string;
+    attemptId: string | null;
+  }): Promise<boolean>;
 
   /** Recover one provider message after an ambiguous nonce-protected send. */
   recoverMessageByNonce?(req: {

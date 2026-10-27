@@ -104,6 +104,7 @@ import { ExecutorSessionTokenAuthorityRepository } from './executor-session-toke
 import { deepMerge } from './merge-utils';
 import { acceptOpenCodeCheckpoint, assertNoOpenOpenCodeCheckpoint } from './opencode-checkpoints';
 import { countRecordedTools } from './recorded-tool-count';
+import { enqueueScheduledFailure } from './schedule-failure-notifications';
 
 export const MAX_COMPACTED_PROMPT_BYTES = 32 * 1024;
 export const MAX_EDITABLE_QUEUED_PROMPT_BYTES = 32 * 1024;
@@ -2505,6 +2506,8 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
         .where(eq(tasks.task_id, fullId))
         .run();
 
+      await enqueueScheduledFailure(txDb, sessionRow, fullId, finalStatus);
+
       // Task terminality is authoritative. Project the promptability fields
       // in the same short transaction, after the Task write, so a coordinator
       // cannot die in a durable Task-terminal/Session-stopping gap. The
@@ -2700,6 +2703,7 @@ export class TaskRepository implements BaseRepository<Task, Partial<Task>> {
           if (!sessionRow) {
             throw new RepositoryError('Terminal task transition requires the owning Session lock');
           }
+          await enqueueScheduledFailure(txDb, sessionRow, fullId, merged.status);
           const latestTaskId = sessionRow.data.tasks.at(-1);
           const shouldProjectSession =
             latestTaskId === undefined ||

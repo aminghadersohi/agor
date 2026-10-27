@@ -1,4 +1,18 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { assertNoEgress } from '../../test/no-egress';
+
+vi.mock('@slack/web-api', () => ({
+  default: { retryPolicies: { fiveRetriesInFiveMinutes: { retries: 5 } } },
+  WebClient: class {
+    retryConfig: unknown;
+    axios: { defaults: { timeout?: number } };
+    constructor(_token: string, options: { retryConfig: unknown; timeout?: number }) {
+      this.retryConfig = options.retryConfig;
+      this.axios = { defaults: { timeout: options.timeout } };
+    }
+  },
+}));
+beforeEach(() => assertNoEgress());
 
 const socketModeMocks = vi.hoisted(() => ({
   instances: [] as Array<{
@@ -2620,4 +2634,61 @@ describe('extractSlackInboundFiles', () => {
     expect(extractSlackInboundFiles({})).toEqual([]);
     expect(extractSlackInboundFiles('files')).toEqual([]);
   });
+});
+
+describe('schedule failure receipt verification (read only)', () => {
+  for (const mismatch of [
+    'none',
+    'bot',
+    'task',
+    'schedule',
+    'timestamp',
+    'metadata',
+    'attempt',
+    'allowlist',
+  ] as const) {
+    it(`verifies only an exact own-bot failure receipt: ${mismatch}`, async () => {
+      const connector = new SlackConnector({ bot_token: 'fixture', allowed_channel_ids: ['C123'] });
+      const history = vi.fn(async () => ({
+        ok: true,
+        messages: [
+          {
+            ts: mismatch === 'timestamp' ? '123.999' : '123.456',
+            user: mismatch === 'bot' ? 'UOTHER' : 'UBOT',
+            metadata: {
+              event_type: mismatch === 'metadata' ? 'other' : 'agor_schedule_failure',
+              event_payload: {
+                task_id: mismatch === 'task' ? 'other' : 'task',
+                schedule_id: mismatch === 'schedule' ? 'other' : 'schedule',
+                attempt_id: mismatch === 'attempt' ? 'other' : 'attempt',
+              },
+            },
+          },
+        ],
+      }));
+      (connector as unknown as { web: unknown }).web = {
+        conversations: { history },
+        auth: { test: async () => ({ user_id: 'UBOT' }) },
+      };
+      expect(
+        await connector.confirmScheduleFailureMessage({
+          channel: mismatch === 'allowlist' ? 'C999' : 'C123',
+          messageId: '123.456',
+          taskId: 'task',
+          scheduleId: 'schedule',
+          attemptId: 'attempt',
+        })
+      ).toBe(mismatch === 'none');
+      expect(history).toHaveBeenCalledTimes(mismatch === 'allowlist' ? 0 : 1);
+      if (mismatch !== 'allowlist')
+        expect(history).toHaveBeenCalledWith(
+          expect.objectContaining({
+            oldest: '123.456',
+            latest: '123.456',
+            inclusive: true,
+            limit: 1,
+          })
+        );
+    });
+  }
 });

@@ -579,3 +579,34 @@ OpenCode's descriptor exemption requires cooperative quiescence, successful
 helper containment, or the explicit pre-launch refusal contract—not bare
 launcher absence. The operator guide documents sequential reconciliation
 latency and the pre-connect startup-warning-only exclusion.
+
+### Scheduled failure notifications
+
+The winning initial scheduled Task transition to `failed` or `timed_out` inserts a
+content-free `schedule_failure_notifications` row in the same terminal transaction.
+The exact trusted `custom_context.scheduled_run.initial_task_id`, not just Session
+ancestry, identifies the occurrence. External Session writes cannot manufacture or
+rewrite scheduler provenance; trusted providerless recovery retains that authority.
+Ordinary continuation failures and unverified containment do not enqueue a notice.
+
+The independent worker discovers only Task/tenant routing references in the named
+`scheduler_discovery` system capability, then reloads and claims within tenant scope.
+A conditional `pending` → `sending` write rotates a durable opaque attempt ID and fences concurrent/restarted workers before
+provider IO. No database transaction spans the gateway send. An expired or ambiguous
+attempt parks as `uncertain`, never blind-retries; a late receipt may resolve it as
+`delivered`. Typed proven nonacceptance returns to `pending` for fresh authorization;
+unknown effects never do. Alert posts use a single-attempt SDK client, not ordinary
+Slack relay retries. Every cached release/receipt/uncertain result and operator reconciliation CAS matches its
+expected attempt, including after a committed write loses its acknowledgement. Legacy
+null-attempt receipts match only unchanged legacy rows, never new claims. Uncertainty
+and its branch attention write use one native short metadata transaction on both dialects.
+The attempt-fencing migration requires offline cutover, not mixed old/new writers.
+Every fresh post-IO settlement transaction asserts the tenant
+write gate. Positive receipts are retried as settlements only; a bounded process-local
+cache retains evidence during write outages. After restart, the admin confirmation RPC
+can verify the exact original bot message and Task/Schedule metadata with a provider
+read before gated, idempotent settlement. It never treats absence as permission to resend.
+Uncertainty marks the failed branch for attention, without automatically clearing a
+human flag. Stable-key bounded discovery advances past frozen tenants and wraps at a
+finite-cycle watermark. Target/access failures before the fence remain `pending`. None of these
+states modifies schedule enabled state, cadence, budgets, permissions, or replays work.

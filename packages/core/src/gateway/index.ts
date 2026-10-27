@@ -29,7 +29,7 @@ export type {
   InboundSkippedFile,
   OutboundPayload,
 } from './connector';
-export { normalizeOutbound, normalizeSendReceipt } from './connector';
+export { GatewayNotDispatchedError, normalizeOutbound, normalizeSendReceipt } from './connector';
 export { getConnector, hasConnector, registerConnector } from './connector-registry';
 export {
   chunkDiscordMessage,

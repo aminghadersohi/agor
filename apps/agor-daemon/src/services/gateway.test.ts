@@ -1,3 +1,7 @@
+import { assertNoEgress } from '../../../../packages/core/src/test/no-egress';
+
+assertNoEgress();
+
 import { materializeAgenticToolConfiguration } from '@agor/agentic-tools/config';
 import type { TenantScopeAwareDatabase } from '@agor/core/db';
 import {
@@ -28,6 +32,7 @@ import {
   DiscordDirectMessageError,
   DiscordThreadUnavailableError,
   GatewayListenerError,
+  GatewayNotDispatchedError,
   getConnector,
   TeamsMemberLookupError,
   TeamsSendError,
@@ -6321,7 +6326,7 @@ describe('GatewayService outbound emit session branch binding', () => {
     (service as unknown as { outboundRepo: unknown }).outboundRepo = outboundRepo;
     (service as unknown as { sessionRepo: unknown }).sessionRepo = sessionRepo;
     (service as unknown as { branchRepo: unknown }).branchRepo = branchRepo;
-    return { service, sendSlackMessage, outboundRepo, sessionRepo, branchRepo };
+    return { service, sendSlackMessage, sendDirectMessage, outboundRepo, sessionRepo, branchRepo };
   }
 
   type EmitData = Parameters<GatewayService['emitMessage']>[0];
@@ -6334,6 +6339,200 @@ describe('GatewayService outbound emit session branch binding', () => {
       userRole: 'admin',
       ...overrides,
     };
+  }
+
+  it('rechecks schedule notification target binding before any provider send', async () => {
+    const { service, sendSlackMessage, outboundRepo } = makeEmitHarness({});
+    await expect(
+      service.emitMessage(emitData({ purpose: 'schedule_failure', target: 'channel:C999' }))
+    ).rejects.toBeInstanceOf(GatewayNotDispatchedError);
+    expect(sendSlackMessage).not.toHaveBeenCalled();
+    expect(outboundRepo.recordSend).not.toHaveBeenCalled();
+  });
+
+  for (const scenario of [
+    'authorized',
+    'access-revoked',
+    'user-missing',
+    'already-delivered',
+    'role-revoked',
+    'construction-failed',
+    'stale-attempt',
+    'audit-gated',
+    'last-message-gated',
+  ] as const) {
+    it(`checks current scheduled-failure authority before dispatch: ${scenario}`, async () => {
+      const { service, sendSlackMessage, sendDirectMessage, branchRepo } = makeEmitHarness({});
+      const internals = service as unknown as {
+        channelRepo: unknown;
+        scheduleFailureRepo: unknown;
+        usersRepo: unknown;
+      };
+      internals.channelRepo = {
+        updateLastMessage: vi.fn(async () => undefined),
+        findById: vi.fn(async () => ({
+          ...outboundChannel,
+          config: { ...outboundChannel.config, schedule_failure_alert_target: 'channel:C123' },
+        })),
+      };
+      internals.scheduleFailureRepo = {
+        findById: vi.fn(async () => ({
+          status: scenario === 'already-delivered' ? 'delivered' : 'sending',
+          attempt_id: scenario === 'stale-attempt' ? 'newer-attempt' : 'attempt-1',
+          gateway_channel_id: outboundChannel.id,
+          target: 'channel:C123',
+          schedule_id: 'schedule-1',
+          branch_id: 'branch-2',
+        })),
+      };
+      internals.usersRepo = {
+        findById: vi.fn(async () =>
+          scenario === 'user-missing'
+            ? null
+            : {
+                ...user,
+                role: scenario === 'role-revoked' ? 'member' : 'admin',
+              }
+        ),
+      };
+      if (scenario === 'access-revoked') {
+        branchRepo.findById.mockResolvedValue({ branch_id: 'branch-2', others_can: 'none' });
+        branchRepo.resolveUserPermission.mockResolvedValue('none');
+      }
+      if (scenario === 'audit-gated' || scenario === 'last-message-gated') {
+        let writes = 0;
+        (service as unknown as { data: unknown }).data = {
+          write: vi.fn(async (fn: () => Promise<unknown>) => {
+            writes++;
+            if (writes === (scenario === 'audit-gated' ? 1 : 2))
+              throw new Error('fixture tenant gate');
+            return fn();
+          }),
+        };
+      }
+      if (scenario === 'construction-failed')
+        vi.mocked(getConnector).mockImplementationOnce(() => {
+          throw new Error('fixture construction failure');
+        });
+      const send = service.emitMessage(
+        emitData({
+          purpose: 'schedule_failure',
+          target: 'channel:C123',
+          emittedByTaskId: 'task-1',
+          emittedByScheduleAttemptId: 'attempt-1',
+          emittedByScheduleId: 'schedule-1',
+        })
+      );
+      if (
+        scenario === 'authorized' ||
+        scenario === 'audit-gated' ||
+        scenario === 'last-message-gated'
+      ) {
+        await expect(send).resolves.toMatchObject({
+          delivered: true,
+          ...(scenario === 'authorized'
+            ? {}
+            : { recorded: scenario !== 'audit-gated', platform_message_id: '200.000100' }),
+        });
+        expect(sendSlackMessage).toHaveBeenCalledTimes(1);
+        expect(sendDirectMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            singleAttempt: true,
+            failureTaskId: 'task-1',
+            failureScheduleId: 'schedule-1',
+            failureAttemptId: 'attempt-1',
+          })
+        );
+      } else {
+        await expect(send).rejects.toBeInstanceOf(GatewayNotDispatchedError);
+        expect(sendSlackMessage).not.toHaveBeenCalled();
+      }
+    });
+  }
+
+  for (const scenario of [
+    'authorized',
+    'operator-revoked',
+    'creator-revoked',
+    'binding-changed',
+    'wrong-tenant-task',
+    'receipt-mismatch',
+    'stale-confirmation',
+  ] as const) {
+    it(`receipt reconciliation reauthorizes the real operator and original binding: ${scenario}`, async () => {
+      const { service, sendDirectMessage } = makeEmitHarness({});
+      const verify = vi.fn(async () => scenario !== 'receipt-mismatch');
+      vi.mocked(getConnector).mockReturnValue({ confirmScheduleFailureMessage: verify } as never);
+      const internals = service as unknown as {
+        channelRepo: unknown;
+        scheduleFailureRepo: unknown;
+        usersRepo: unknown;
+        branchRepo: unknown;
+      };
+      internals.scheduleFailureRepo = {
+        findById: vi.fn(async () =>
+          scenario === 'wrong-tenant-task'
+            ? null
+            : {
+                task_id: 'task-1',
+                schedule_id: 'schedule-1',
+                branch_id: 'branch-2',
+                status: 'uncertain',
+                attempt_id: scenario === 'stale-confirmation' ? 'newer-attempt' : 'attempt-1',
+                gateway_channel_id: outboundChannel.id,
+                target: 'channel:C123',
+              }
+        ),
+      };
+      internals.channelRepo = {
+        findById: vi.fn(async () => ({
+          ...outboundChannel,
+          config: {
+            ...outboundChannel.config,
+            schedule_failure_alert_target:
+              scenario === 'binding-changed' ? 'channel:C999' : 'channel:C123',
+          },
+        })),
+      };
+      const userLookup = vi.fn(async (id: string) => ({ ...user, user_id: id, role: 'member' }));
+      internals.usersRepo = { findById: userLookup };
+      internals.branchRepo = {
+        findById: vi.fn(async () => ({
+          branch_id: 'branch-2',
+          created_by: 'someone-else',
+          others_can: 'none',
+        })),
+        isOwner: vi.fn(async () => false),
+        resolveUserPermission: vi.fn(async (_branch: unknown, id: string) =>
+          (scenario === 'operator-revoked' && id === 'actual-operator') ||
+          (scenario === 'creator-revoked' && id === outboundChannel.created_by)
+            ? 'none'
+            : 'view'
+        ),
+      };
+      expect(
+        await service.confirmScheduleFailureReceipt(
+          'task-1',
+          'attempt-1',
+          '123.456',
+          'actual-operator' as UserID
+        )
+      ).toBe(scenario === 'authorized' ? '123.456' : null);
+      expect(sendDirectMessage).not.toHaveBeenCalled();
+      if (scenario === 'authorized' || scenario === 'receipt-mismatch') {
+        expect(userLookup.mock.calls.map((call) => call[0])).toEqual([
+          'actual-operator',
+          outboundChannel.created_by,
+        ]);
+        expect(verify).toHaveBeenCalledWith({
+          channel: 'C123',
+          messageId: '123.456',
+          taskId: 'task-1',
+          scheduleId: 'schedule-1',
+          attemptId: 'attempt-1',
+        });
+      } else expect(verify).not.toHaveBeenCalled();
+    });
   }
 
   it('allows a same-branch session emit and keeps session attribution on the audit row', async () => {

@@ -4,16 +4,17 @@ import { migrate } from 'drizzle-orm/libsql/migrator';
 import { expect, it } from 'vitest';
 import { createDatabase } from './client';
 import { executeRaw, isSQLiteDatabase, rawRows } from './database-wrapper';
-import { checkMigrationStatus, runMigrations } from './migrate';
+import { checkMigrationStatus, pendingOfflineCutoverMigrations, runMigrations } from './migrate';
 import {
   beforeTeamsMigrations,
   insertLegacyInbound,
   seedLegacyGateway,
   stageFailingTeamsMigration,
+  stageOnlineTeamsMigration,
   teamsMigration,
 } from './teams-gateway-migration.test-support';
 
-it('upgrades current-main SQLite online, disables Teams only and preserves old insert shape', async () => {
+it('applies Teams online, gates the later offline tail, disables Teams only and preserves old insert shape', async () => {
   const folder = await beforeTeamsMigrations('sqlite');
   const db = createDatabase({ url: ':memory:' });
   if (!isSQLiteDatabase(db)) throw new Error('Expected SQLite');
@@ -29,7 +30,18 @@ it('upgrades current-main SQLite online, disables Teams only and preserves old i
         await executeRaw(db, sql`SELECT enabled FROM gateway_channels WHERE channel_type='teams'`)
       )
     ).toEqual([{ enabled: 1 }, { enabled: 1 }]);
-    await runMigrations(db);
+    // The online Teams proof ends at Teams, not at later offline protocols.
+    await stageOnlineTeamsMigration(folder, 'sqlite');
+    expect(
+      pendingOfflineCutoverMigrations('sqlite', {
+        applied: [],
+        pending: [teamsMigration('sqlite')],
+      })
+    ).toEqual([]);
+    await migrate(db, { migrationsFolder: folder });
+    expect((await checkMigrationStatus(db)).pending).not.toContain(teamsMigration('sqlite'));
+    await expect(runMigrations(db)).rejects.toThrow('Offline migration cutover required');
+    await runMigrations(db, { allowOfflineCutover: true });
     expect((await checkMigrationStatus(db)).pending).toEqual([]);
     expect(
       rawRows(

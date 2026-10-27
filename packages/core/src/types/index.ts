@@ -43,6 +43,7 @@ export * from './realtime';
 export * from './repo';
 export * from './report';
 export * from './schedule';
+export * from './schedule-failure-notification';
 export type { ClaudeCodePermissionMode, CodexPermissionMode, PermissionMode } from './session';
 export * from './session';
 export * from './session-memory';
