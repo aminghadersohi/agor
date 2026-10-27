@@ -3,13 +3,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { generateId } from '../lib/ids';
 import { TaskStatus } from '../types';
 import { createDatabase, type Database } from './client';
-import { executeRaw, rawRows } from './database-wrapper';
+import { executeRaw, rawRows, runDatabaseTransaction } from './database-wrapper';
 import {
   acquireMaintenanceAdmission,
   inspectMaintenanceAdmission,
   releaseMaintenanceAdmission,
   sealMaintenanceAdmission,
 } from './maintenance-admission';
+import { MAINTENANCE_POLICY } from './maintenance-admission-sql';
 import { runMigrations } from './migrate';
 import { seedEnvironmentCommandBranch } from './repositories/environment-commands.test-support';
 import { SessionRepository } from './repositories/sessions';
@@ -39,6 +40,8 @@ describe.skipIf(!enabled)('operator maintenance admission (real PostgreSQL, forc
     await executeRaw(db, sql`DROP SCHEMA IF EXISTS agor_maintenance CASCADE`);
     await executeRaw(db, sql`DROP POLICY IF EXISTS maintenance_admission_discovery ON tasks`);
     await executeRaw(db, sql`DROP POLICY IF EXISTS maintenance_admission_discovery ON branches`);
+    await executeRaw(db, sql`DROP POLICY IF EXISTS maintenance_hide_foreign ON tasks`);
+    await executeRaw(db, sql`DROP POLICY IF EXISTS maintenance_hide_foreign ON branches`);
     // Keep old tenant fixtures terminal/non-active; no config or cadence changes.
   });
   afterAll(async () => {
@@ -325,6 +328,89 @@ describe.skipIf(!enabled)('operator maintenance admission (real PostgreSQL, forc
     await executeRaw(db, sql`DROP POLICY maintenance_admission_discovery ON tasks`);
     await expect(inspectMaintenanceAdmission(db)).rejects.toThrow('installation');
   });
+  // Foreign unfinished work lives only in a non-default tenant. Each broken RLS
+  // shape below keeps the policy NAME, COMMAND and EXPRESSION intact, so a
+  // presence check passes while the operator silently sees zero rows.
+  async function operatorVisibleUnfinished(): Promise<number> {
+    return runDatabaseTransaction(db, async (tx) => {
+      await executeRaw(
+        tx,
+        sql`SELECT set_config('agor.system_scope','maintenance_admission_discovery',true)`
+      );
+      const [r] = rawRows<{ n: number }>(
+        await executeRaw(
+          tx,
+          sql`SELECT count(*)::integer AS n FROM public.tasks WHERE status NOT IN ('completed','failed','stopped','timed_out')`
+        )
+      );
+      return r.n;
+    });
+  }
+  async function expectRlsRefusal(lease: Awaited<ReturnType<typeof acquire>>) {
+    await expect(inspectMaintenanceAdmission(db)).rejects.toThrow(
+      /installation row-level security/
+    );
+    await expect(sealMaintenanceAdmission(db, lease)).rejects.toThrow(
+      /installation row-level security/
+    );
+    await expect(sealMaintenanceAdmission(db, lease)).rejects.toThrow();
+    expect(
+      rawRows<{ phase: string; idle_since: unknown }>(
+        await executeRaw(db, sql`SELECT phase, idle_since FROM agor_maintenance.control`)
+      )
+    ).toEqual([{ phase: 'draining', idle_since: null }]);
+  }
+
+  it('refuses a maintenance policy scoped to a role that excludes the operator (foreign work hidden)', async () => {
+    await fixture('rls-role', TaskStatus.QUEUED);
+    const lease = await acquire();
+    expect(await operatorVisibleUnfinished()).toBeGreaterThan(0);
+    await executeRaw(db, sql`ALTER POLICY maintenance_admission_discovery ON tasks TO pg_monitor`);
+    // Non-vacuity: the defect is real; the operator now sees none of the work.
+    expect(await operatorVisibleUnfinished()).toBe(0);
+    await expectRlsRefusal(lease);
+  });
+
+  it('refuses a maintenance policy recreated as RESTRICTIVE (same name/command/expression)', async () => {
+    await fixture('rls-restrictive', TaskStatus.QUEUED);
+    const lease = await acquire();
+    await executeRaw(db, sql`DROP POLICY maintenance_admission_discovery ON branches`);
+    await executeRaw(
+      db,
+      sql.raw(
+        `CREATE POLICY maintenance_admission_discovery ON public.branches AS RESTRICTIVE FOR SELECT USING ${MAINTENANCE_POLICY}`
+      )
+    );
+    await expectRlsRefusal(lease);
+  });
+
+  it('refuses an additional applicable RESTRICTIVE policy that hides rows', async () => {
+    await fixture('rls-extra', TaskStatus.QUEUED);
+    const lease = await acquire();
+    await executeRaw(
+      db,
+      sql`CREATE POLICY maintenance_hide_foreign ON tasks AS RESTRICTIVE FOR SELECT USING (false)`
+    );
+    expect(await operatorVisibleUnfinished()).toBe(0);
+    await expectRlsRefusal(lease);
+    await executeRaw(db, sql`DROP POLICY maintenance_hide_foreign ON tasks`);
+    // Restoring the canonical contract restores a truthful, non-zero observation.
+    expect(await sealMaintenanceAdmission(db, lease)).toMatchObject({
+      admissionDrained: false,
+    });
+    expect((await inspectMaintenanceAdmission(db)).unfinishedTasks).toBeGreaterThan(0);
+  });
+
+  it('does not refuse restrictive policies that cannot narrow SELECT', async () => {
+    await fixture('rls-write-only');
+    await acquire();
+    await executeRaw(
+      db,
+      sql`CREATE POLICY maintenance_hide_foreign ON tasks AS RESTRICTIVE FOR DELETE USING (true)`
+    );
+    await expect(inspectMaintenanceAdmission(db)).resolves.toMatchObject({ phase: 'draining' });
+  });
+
   it('covers new Session admission and branch command intents, while existing command settlement drains', async () => {
     const f = await fixture('branch-intent');
     await runWithTenantDatabaseScope(peer, 'branch-intent', (scoped) =>

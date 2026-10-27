@@ -74,8 +74,16 @@ coordinator, operator Task or foreign-tenant exclusion. An unfinished sample
 clears the idle start. No polling loop is installed. A seal command that has not drained exits 3 with
 its truthful JSON status, not a success marker.
 
-A missing/changed trigger body, wrong trigger event, disabled trigger or missing
-aggregate RLS policy invalidates inspection instead of becoming an empty count.
+A missing/changed trigger body, wrong trigger event or disabled trigger
+invalidates inspection instead of becoming an empty count. So does any
+row-level-security shape that could make the global counts silently zero:
+PostgreSQL filters rather than errors when a policy does not apply to the
+operator role or a `RESTRICTIVE` policy intersects the result, so the
+aggregate maintenance policy must exist on `tasks` and `branches` as a
+`PERMISSIVE`, `SELECT`-only policy with the canonical expression that applies to
+the operator role, and no other applicable policy that could narrow `SELECT`
+visibility may be present. Any unknown catalog value fails closed. Policies that
+only affect writes are not refused.
 `admissionDrained` means only that the database fence is sealed, unexpired and
 its covered durable counters are zero **at `observedAt`**. Consumers must bind
 all lease fields and recheck the deadline and current proof before and after

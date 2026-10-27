@@ -9,8 +9,11 @@ import {
   runDatabaseTransaction,
 } from './database-wrapper';
 import {
+  type MaintenancePolicyRow,
+  maintenanceVisibilityViolation,
+} from './maintenance-admission-rls';
+import {
   INSTALL_MAINTENANCE_ADMISSION_SQL,
-  MAINTENANCE_POLICY,
   MAINTENANCE_TRIGGER_BODY,
 } from './maintenance-admission-sql';
 import {
@@ -63,7 +66,6 @@ async function verifyInstallation(tx: Database): Promise<void> {
     body: string;
     version: number;
     triggers: number;
-    policies: number;
   }>(
     tx,
     sql`
@@ -73,11 +75,7 @@ async function verifyInstallation(tx: Database): Promise<void> {
         WHERE t.tgname = 'agor_maintenance_admission' AND NOT t.tgisinternal
           AND t.tgenabled IN ('O','A') AND t.tgfoid = p.oid
           AND ((t.tgrelid IN ('public.tasks'::regclass,'public.branches'::regclass) AND t.tgtype=23)
-            OR (t.tgrelid='public.sessions'::regclass AND t.tgtype=7))) AS triggers,
-      (SELECT count(*)::integer FROM pg_policy pol
-        WHERE pol.polname = 'maintenance_admission_discovery' AND pol.polcmd = 'r'
-          AND pol.polrelid IN ('public.tasks'::regclass,'public.branches'::regclass)
-          AND pg_get_expr(pol.polqual,pol.polrelid) = ${MAINTENANCE_POLICY}) AS policies
+            OR (t.tgrelid='public.sessions'::regclass AND t.tgtype=7))) AS triggers
     FROM pg_namespace n JOIN pg_proc p ON p.pronamespace = n.oid
       CROSS JOIN agor_maintenance.control c
     WHERE n.nspname = 'agor_maintenance' AND p.proname = 'admission' AND p.prosecdef
@@ -87,10 +85,47 @@ async function verifyInstallation(tx: Database): Promise<void> {
     !proof?.owner ||
     proof.body !== MAINTENANCE_TRIGGER_BODY ||
     proof.version !== 1 ||
-    proof.triggers !== 3 ||
-    proof.policies !== 2
+    proof.triggers !== 3
   )
     fail('Maintenance installation is missing, changed or not owned by this operator');
+  // Effective visibility, not policy-name presence: wrong-role or restrictive
+  // policies make the global counts silently zero without any SQL error.
+  const policies = await rows<{
+    table_name: string;
+    policy: string | null;
+    command: string | null;
+    permissive: boolean | null;
+    applies: boolean | null;
+    using_expression: string | null;
+  }>(
+    tx,
+    sql`
+    SELECT c.relname::text AS table_name, pol.polname::text AS policy,
+      pol.polcmd::text AS command, pol.polpermissive AS permissive,
+      CASE WHEN pol.oid IS NULL THEN NULL ELSE EXISTS (
+        SELECT 1 FROM pg_catalog.unnest(pol.polroles) AS pr(role_oid)
+        WHERE CASE WHEN pr.role_oid = 0::pg_catalog.oid THEN true
+          ELSE pg_catalog.pg_has_role(current_user, pr.role_oid, 'USAGE') END) END AS applies,
+      pg_catalog.pg_get_expr(pol.polqual, pol.polrelid) AS using_expression
+    FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_policy pol ON pol.polrelid = c.oid
+    WHERE c.oid IN ('public.tasks'::regclass,'public.branches'::regclass)`
+  );
+  const violation = maintenanceVisibilityViolation(
+    policies.map(
+      (p): MaintenancePolicyRow => ({
+        table: p.table_name,
+        policy: p.policy,
+        command: p.command,
+        permissive: p.permissive,
+        applies: p.applies,
+        using: p.using_expression,
+      })
+    )
+  );
+  if (violation)
+    fail(
+      `Maintenance installation row-level security does not give the operator global visibility (${violation})`
+    );
 }
 
 /** Installation and acquisition commit together: no restart or prior daemon support required. */
