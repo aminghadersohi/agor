@@ -67,6 +67,7 @@ describe.skipIf(!url || !pg)(
           ref: 'main',
           branch_unique_id: Math.floor(Math.random() * 1_000_000),
           path: '/tmp/unused',
+          needs_attention: false, // Gate regression needs an explicit unchanged precondition.
         });
         const channel = await new GatewayChannelRepository(db).create({
           channel_type: 'slack',
@@ -152,6 +153,11 @@ describe.skipIf(!url || !pg)(
       const tenant = `late-gate-${generateId()}`,
         id = generateId();
       const seeded = await seed(tenant, [id]);
+      await scoped(tenant, async (db) =>
+        expect(await new BranchRepository(db).findById(seeded.branch.branch_id)).toMatchObject({
+          needs_attention: false,
+        })
+      );
       let generation = '';
       const emitMessage = vi.fn(async () => {
         expect(getCurrentTenantDatabaseScope()).toBeUndefined();

@@ -165,7 +165,8 @@ describe('session footer MCP link read recovery', () => {
     const findLinks = vi.fn().mockRejectedValueOnce(new Error('read unavailable'));
     const retryRead = deferred();
     findLinks.mockReturnValueOnce(retryRead.promise);
-    const findServers = vi.fn().mockResolvedValue([shared]);
+    const availableRead = deferred();
+    const findServers = vi.fn().mockReturnValue(availableRead.promise);
     const client = {
       service: (name: string) => ({
         find: name === 'session-mcp-servers' ? findLinks : findServers,
@@ -197,7 +198,14 @@ describe('session footer MCP link read recovery', () => {
     const retry = await screen.findByRole('button', { name: 'Retry' });
     expect(screen.getByText('MCP servers unavailable')).toBeInTheDocument();
     expect(screen.getByRole('combobox')).toBeDisabled();
-    expect(screen.getByRole('dialog').querySelector('.ant-select-loading')).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog').querySelector('.ant-select-loading')).toBeInTheDocument();
+    await act(async () => availableRead.resolve([shared]));
+    // Retry proves the links request settled, not the independent available-server read.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('dialog').querySelector('.ant-select-loading')
+      ).not.toBeInTheDocument()
+    );
     expect(agorStore.getState().sessionMcpLoaded.has('session-a')).toBe(false);
     fireEvent.click(retry);
     await waitFor(() => expect(findLinks).toHaveBeenCalledTimes(2));
