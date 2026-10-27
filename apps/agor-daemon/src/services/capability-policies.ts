@@ -11,6 +11,8 @@ import type {
   BoardID,
   BranchCapabilityPolicy,
   BranchID,
+  BranchPermissionConfig,
+  CapabilityPolicy,
   CapabilityPolicyWorkspacePreferences,
   Params,
   UserID,
@@ -23,6 +25,15 @@ import {
 } from './tenant-authorization-fence.js';
 
 export const CAPABILITY_POLICY_SERVICE_TRANSPORT_METHODS = ['find', 'patch'] as const;
+
+// Server-owned result identity, never a client-supplied "unchanged" flag. Only
+// a fully authorized, validated write under the tenant authorization fence can
+// establish this fact. Keep normal revision/conflict/audit semantics intact.
+const unchangedPolicyResults = new WeakSet<object>();
+
+export function isUnchangedCapabilityPolicyResult(result: unknown): boolean {
+  return typeof result === 'object' && result !== null && unchangedPolicyResults.has(result);
+}
 
 function actor(params?: Params): { user_id: UserID; role?: string; service: boolean } | null {
   const user = (
@@ -64,6 +75,19 @@ function stable(value: unknown): string {
       .join(',')}}`;
   }
   return JSON.stringify(value);
+}
+
+function policyAuthority(policy: CapabilityPolicy): unknown {
+  return {
+    ...policy,
+    // Replacements allocate fresh entry row IDs. Those identify audit rows,
+    // not grants; principal, capabilities, preset and filesystem access do.
+    entries: policy.entries.map(({ entry_id: _entryId, ...grant }) => grant),
+  };
+}
+
+function configAuthority(config: BranchPermissionConfig | undefined): unknown {
+  return config ? { ...config, access: policyAuthority(config.access) } : undefined;
 }
 
 function mapRepositoryError(error: unknown): never {
@@ -125,6 +149,14 @@ export function setupCapabilityPolicyServices(
               value,
               current?.user_id ?? existing.primary_owner_user_id
             );
+            if (
+              stable(policyAuthority(saved.board_access)) ===
+                stable(policyAuthority(existing.board_access)) &&
+              stable(configAuthority(saved.branch_template)) ===
+                stable(configAuthority(existing.branch_template))
+            ) {
+              unchangedPolicyResults.add(saved);
+            }
             console.info(
               `[rbac.policy] updated kind=board board_id=${boardId} access_revision=${saved.board_access_revision} template_revision=${saved.branch_template_revision} access_entries=${saved.board_access.entries.length} template_entries=${saved.branch_template.access.entries.length}`
             );
@@ -199,6 +231,15 @@ export function setupCapabilityPolicyServices(
               value,
               current?.user_id ?? existing.primary_owner_user_id
             );
+            if (
+              saved.binding_mode === existing.binding_mode &&
+              stable(configAuthority(saved.override_config)) ===
+                stable(configAuthority(existing.override_config)) &&
+              stable(configAuthority(saved.inherited_config)) ===
+                stable(configAuthority(existing.inherited_config))
+            ) {
+              unchangedPolicyResults.add(saved);
+            }
             const config =
               saved.binding_mode === 'inherit' ? saved.inherited_config : saved.override_config;
             console.info(

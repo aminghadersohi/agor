@@ -2,9 +2,12 @@ import {
   BoardRepository,
   BranchRepository,
   CapabilityPolicyRepository,
+  createTenantScopedDatabaseProxy,
   type Database,
   generateId,
   RepoRepository,
+  runWithTenantContext,
+  runWithTenantDatabaseScope,
   UsersRepository,
 } from '@agor/core/db';
 import { feathers } from '@agor/core/feathers';
@@ -14,15 +17,20 @@ import type {
   BranchCapabilityPolicy,
   BranchID,
   CapabilityPolicyEntry,
+  TenantID,
   UserID,
 } from '@agor/core/types';
 import { describe, expect } from 'vitest';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { capabilityPolicyPresetCapabilities } from '../../../../packages/core/src/types/capability-policy';
-import { setupCapabilityPolicyServices } from './capability-policies';
+import { classifyRealtimeAuthorizationInvalidation } from '../register-hooks';
+import {
+  isUnchangedCapabilityPolicyResult,
+  setupCapabilityPolicyServices,
+} from './capability-policies';
 
 function params(userId: UserID, role = 'member') {
-  return { provider: 'rest', route: { id: '' }, user: { user_id: userId, role } } as never;
+  return { provider: 'rest', route: { id: '' }, user: { user_id: userId, role } };
 }
 
 function entry(
@@ -115,6 +123,156 @@ async function fixture(db: Database) {
 }
 
 describe('capability policy services', () => {
+  dbTest(
+    'does not let another tenant reuse an unchanged policy or its resource IDs',
+    async ({ db }) => {
+      const tenantA = 'policy-owner-tenant' as TenantID;
+      const tenantB = 'policy-other-tenant' as TenantID;
+      const value = await runWithTenantDatabaseScope(db, tenantA, (scoped) =>
+        fixture(scoped as Database)
+      );
+      const other = await runWithTenantDatabaseScope(db, tenantB, (scoped) =>
+        fixture(scoped as Database)
+      );
+      const app = feathers();
+      setupCapabilityPolicyServices(
+        app,
+        createTenantScopedDatabaseProxy(db, { requireScope: true })
+      );
+      for (const [path, id] of [
+        ['boards/:id/permissions', value.boardId],
+        ['branches/:id/permissions', value.branchId],
+      ] as const) {
+        const service = app.service(path);
+        const ownerParams = {
+          ...params(value.owner),
+          route: { id },
+          tenant: { tenant_id: tenantA },
+        } as never;
+        const current = await runWithTenantDatabaseScope(db, tenantA, () =>
+          service.find(ownerParams)
+        );
+        const saved = await runWithTenantContext(tenantA, () =>
+          service.patch(null, current, ownerParams)
+        );
+        expect(isUnchangedCapabilityPolicyResult(saved)).toBe(true);
+        // Even an authentic server result from A cannot authorize a write by B.
+        const foreignParams = {
+          ...params(other.owner),
+          route: { id },
+          tenant: { tenant_id: tenantB },
+        } as never;
+        await expect(
+          runWithTenantContext(tenantB, () => service.patch(null, saved, foreignParams))
+        ).rejects.toMatchObject({ code: 403 });
+      }
+    }
+  );
+
+  dbTest('still evicts for filesystem, sharing, fallback and binding changes', async ({ db }) => {
+    const value = await fixture(db);
+    const app = feathers();
+    setupCapabilityPolicyServices(app, db as never);
+    const path = 'branches/:id/permissions';
+    const service = app.service(path);
+    const ownerParams = { ...params(value.owner), route: { id: value.branchId } } as never;
+    const changes: Array<(policy: BranchCapabilityPolicy) => void> = [
+      (policy) => {
+        policy.override_config!.allow_shared_session_prompts = true;
+      },
+      (policy) => {
+        const grant = policy.override_config!.access.entries[0];
+        grant.fs_access = 'read';
+        grant.capabilities =
+          capabilityPolicyPresetCapabilities('branch_access', grant.preset, 'read') ?? [];
+      },
+      (policy) => {
+        policy.override_config!.access.others = {
+          preset: 'viewer',
+          capabilities: ['branch.view'],
+          fs_access: 'none',
+        };
+      },
+      (policy) => {
+        const access = policy.override_config!.access;
+        access.sharing_mode = 'private';
+        access.entries = [];
+        access.others = { preset: 'none', capabilities: [], fs_access: 'none' };
+      },
+      (policy) => {
+        policy.binding_mode = 'inherit';
+      },
+    ];
+    for (const change of changes) {
+      const policy = (await service.find(ownerParams)) as BranchCapabilityPolicy;
+      change(policy);
+      const saved = await service.patch(null, policy, ownerParams);
+      expect(
+        classifyRealtimeAuthorizationInvalidation({
+          path,
+          method: 'patch',
+          data: policy,
+          result: saved,
+        })
+      ).toBe('evict');
+    }
+  });
+
+  dbTest(
+    'uses cache-only invalidation only for validated unchanged policy writes',
+    async ({ db }) => {
+      const value = await fixture(db);
+      const app = feathers();
+      setupCapabilityPolicyServices(app, db as never);
+      for (const [path, id] of [
+        ['boards/:id/permissions', value.boardId],
+        ['branches/:id/permissions', value.branchId],
+      ] as const) {
+        const service = app.service(path);
+        const managerParams = { ...params(value.manager), route: { id } } as never;
+        const current = (await service.find(managerParams)) as unknown as
+          | BoardCapabilityPolicies
+          | BranchCapabilityPolicy;
+        const saved = (await service.patch(
+          null,
+          current,
+          managerParams
+        )) as unknown as typeof current;
+        const classify = (result: unknown) =>
+          classifyRealtimeAuthorizationInvalidation({
+            path,
+            method: 'patch',
+            data: current,
+            result,
+          });
+        expect(isUnchangedCapabilityPolicyResult(saved)).toBe(true);
+        expect(classify(saved)).toBe('cache');
+        // A serialized copy, a caller flag or an unmarked read cannot establish
+        // the proof, even when its JSON is byte-for-byte identical.
+        expect(classify(structuredClone(saved))).toBe('evict');
+        expect(classify({ ...saved, unchanged: true })).toBe('evict');
+        expect(classify(current)).toBe('evict');
+        await expect(service.patch(null, current, managerParams)).rejects.toMatchObject({
+          code: 409,
+        });
+
+        const viewerParams = { ...params(value.viewer), route: { id } } as never;
+        await expect(service.patch(null, saved, viewerParams)).rejects.toMatchObject({ code: 403 });
+
+        // A real revocation must not inherit the earlier result's exemption.
+        const changed = structuredClone(saved);
+        if (path === 'boards/:id/permissions') {
+          (changed as BoardCapabilityPolicies).board_access.entries = [];
+        } else {
+          (changed as BranchCapabilityPolicy).override_config!.access.entries = [];
+        }
+        const revoked = await service.patch(null, changed, managerParams);
+        expect(isUnchangedCapabilityPolicyResult(revoked)).toBe(false);
+        expect(classify(revoked)).toBe('evict');
+      }
+    }
+  );
+
   dbTest('lets board managers manage the branch-template sharing switch', async ({ db }) => {
     const value = await fixture(db);
     const app = feathers();
