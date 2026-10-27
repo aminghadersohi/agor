@@ -889,7 +889,13 @@ export function createSocketIOConfig(
       // inherit a warmed pre-revocation ACL cache or terminal allocation.
       app.emit(LOCAL_AUTHORIZATION_INVALIDATION_EVENT, { tenantId: data.tenantId });
       for (const socket of io.sockets.sockets.values()) {
-        if (getSocketAuthState(socket).tenant?.tenant_id === data.tenantId) {
+        const auth = getSocketAuthState(socket);
+        // Agent executors are fenced by their own session-token revocation
+        // path. Dropping them here fails every in-flight turn in the tenant
+        // with "socket has been disconnected" whenever any RBAC-relevant
+        // mutation (e.g. moving a branch between boards) happens.
+        if (auth.isExecutor) continue;
+        if (auth.tenant?.tenant_id === data.tenantId) {
           socket.disconnect(true);
         }
       }
