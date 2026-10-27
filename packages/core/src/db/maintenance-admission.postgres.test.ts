@@ -346,6 +346,27 @@ describe.skipIf(!enabled)('operator maintenance admission (real PostgreSQL, forc
       return r.n;
     });
   }
+  // Leave no unfinished fixture behind: counts are global across tenants.
+  async function settle(tenant: string) {
+    await runWithTenantDatabaseScope(db, tenant, (scoped) =>
+      executeRaw(
+        scoped,
+        sql`UPDATE tasks SET status='completed' WHERE status NOT IN ('completed','failed','stopped','timed_out')`
+      )
+    );
+  }
+  async function operatorVisibleBranches(): Promise<number> {
+    return runDatabaseTransaction(db, async (tx) => {
+      await executeRaw(
+        tx,
+        sql`SELECT set_config('agor.system_scope','maintenance_admission_discovery',true)`
+      );
+      const [r] = rawRows<{ n: number }>(
+        await executeRaw(tx, sql`SELECT count(*)::integer AS n FROM public.branches`)
+      );
+      return r.n;
+    });
+  }
   async function expectRlsRefusal(lease: Awaited<ReturnType<typeof acquire>>) {
     await expect(inspectMaintenanceAdmission(db)).rejects.toThrow(
       /installation row-level security/
@@ -353,7 +374,6 @@ describe.skipIf(!enabled)('operator maintenance admission (real PostgreSQL, forc
     await expect(sealMaintenanceAdmission(db, lease)).rejects.toThrow(
       /installation row-level security/
     );
-    await expect(sealMaintenanceAdmission(db, lease)).rejects.toThrow();
     expect(
       rawRows<{ phase: string; idle_since: unknown }>(
         await executeRaw(db, sql`SELECT phase, idle_since FROM agor_maintenance.control`)
@@ -369,11 +389,14 @@ describe.skipIf(!enabled)('operator maintenance admission (real PostgreSQL, forc
     // Non-vacuity: the defect is real; the operator now sees none of the work.
     expect(await operatorVisibleUnfinished()).toBe(0);
     await expectRlsRefusal(lease);
+    await settle('rls-role');
   });
 
   it('refuses a maintenance policy recreated as RESTRICTIVE (same name/command/expression)', async () => {
     await fixture('rls-restrictive', TaskStatus.QUEUED);
     const lease = await acquire();
+    const branchesBefore = await operatorVisibleBranches();
+    expect(branchesBefore).toBeGreaterThan(0);
     await executeRaw(db, sql`DROP POLICY maintenance_admission_discovery ON branches`);
     await executeRaw(
       db,
@@ -381,7 +404,11 @@ describe.skipIf(!enabled)('operator maintenance admission (real PostgreSQL, forc
         `CREATE POLICY maintenance_admission_discovery ON public.branches AS RESTRICTIVE FOR SELECT USING ${MAINTENANCE_POLICY}`
       )
     );
+    // Non-vacuity: with only a RESTRICTIVE maintenance policy the foreign
+    // tenant's branch rows are hidden from the operator without any error.
+    expect(await operatorVisibleBranches()).toBeLessThan(branchesBefore);
     await expectRlsRefusal(lease);
+    await settle('rls-restrictive');
   });
 
   it('refuses an additional applicable RESTRICTIVE policy that hides rows', async () => {
@@ -399,6 +426,7 @@ describe.skipIf(!enabled)('operator maintenance admission (real PostgreSQL, forc
       admissionDrained: false,
     });
     expect((await inspectMaintenanceAdmission(db)).unfinishedTasks).toBeGreaterThan(0);
+    await settle('rls-extra');
   });
 
   it('does not refuse restrictive policies that cannot narrow SELECT', async () => {
@@ -409,6 +437,69 @@ describe.skipIf(!enabled)('operator maintenance admission (real PostgreSQL, forc
       sql`CREATE POLICY maintenance_hide_foreign ON tasks AS RESTRICTIVE FOR DELETE USING (true)`
     );
     await expect(inspectMaintenanceAdmission(db)).resolves.toMatchObject({ phase: 'draining' });
+  });
+
+  it('accepts the canonical policy scoped to the operator role itself (applicability positive control)', async () => {
+    await fixture('rls-self-role', TaskStatus.QUEUED);
+    await acquire();
+    await executeRaw(
+      db,
+      sql`ALTER POLICY maintenance_admission_discovery ON tasks TO CURRENT_USER`
+    );
+    expect(await operatorVisibleUnfinished()).toBeGreaterThan(0);
+    await expect(inspectMaintenanceAdmission(db)).resolves.toMatchObject({ phase: 'draining' });
+    await settle('rls-self-role');
+  });
+
+  it('releases an exact lease whose RLS proof broke after acquire, audited, without loosening counts', async () => {
+    const f = await fixture('rls-release', TaskStatus.QUEUED);
+    const lease = await acquire();
+    await executeRaw(db, sql`ALTER POLICY maintenance_admission_discovery ON tasks TO pg_monitor`);
+    // Counts still refuse (visibility is not loosened) ...
+    await expectRlsRefusal(lease);
+    // ... ingress is genuinely held (non-vacuity) ...
+    await expect(
+      runWithTenantDatabaseScope(peer, 'rls-release', (scoped) =>
+        new TaskRepository(scoped).createPending({
+          session_id: f.session.session_id,
+          created_by: f.user.user_id,
+          full_prompt: 'held until release',
+          status: TaskStatus.QUEUED,
+        })
+      )
+    ).rejects.toThrow();
+    // ... a wrong generation still cannot release ...
+    await expect(
+      releaseMaintenanceAdmission(db, { ...lease, generation: generateId() })
+    ).rejects.toThrow('generation/deadline');
+    // ... but the exact lease can, even though visibility is unproven.
+    await releaseMaintenanceAdmission(db, lease);
+    expect(
+      rawRows<{ event: string }>(
+        await executeRaw(db, sql`SELECT event FROM agor_maintenance.audit ORDER BY sequence`)
+      ).map((r) => r.event)
+    ).toEqual(['acquired', 'released_visibility_unproven']);
+    await expect(
+      runWithTenantDatabaseScope(peer, 'rls-release', (scoped) =>
+        new TaskRepository(scoped).createPending({
+          session_id: f.session.session_id,
+          created_by: f.user.user_id,
+          full_prompt: 'after release',
+          status: TaskStatus.QUEUED,
+        })
+      )
+    ).resolves.toMatchObject({ status: TaskStatus.QUEUED });
+    await settle('rls-release');
+  });
+
+  it('release still requires installation integrity (disabled trigger refuses, then recovers)', async () => {
+    await fixture('rls-release-integrity');
+    const lease = await acquire();
+    await executeRaw(db, sql`ALTER TABLE tasks DISABLE TRIGGER agor_maintenance_admission`);
+    await expect(releaseMaintenanceAdmission(db, lease)).rejects.toThrow('installation');
+    await executeRaw(db, sql`ALTER TABLE tasks ENABLE TRIGGER agor_maintenance_admission`);
+    await releaseMaintenanceAdmission(db, lease);
+    expect(await inspectMaintenanceAdmission(db)).toMatchObject({ phase: 'released' });
   });
 
   it('covers new Session admission and branch command intents, while existing command settlement drains', async () => {

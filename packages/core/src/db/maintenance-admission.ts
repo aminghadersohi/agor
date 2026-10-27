@@ -60,7 +60,11 @@ async function operator<T>(db: Database, work: (tx: Database) => Promise<T>): Pr
   );
 }
 
-async function verifyInstallation(tx: Database): Promise<void> {
+/**
+ * Trigger/control integrity: enough to know the lease row means what the
+ * installation says. Required by every operation, including release.
+ */
+async function verifyIntegrity(tx: Database): Promise<void> {
   const [proof] = await rows<{
     owner: boolean;
     body: string;
@@ -88,8 +92,14 @@ async function verifyInstallation(tx: Database): Promise<void> {
     proof.triggers !== 3
   )
     fail('Maintenance installation is missing, changed or not owned by this operator');
-  // Effective visibility, not policy-name presence: wrong-role or restrictive
-  // policies make the global counts silently zero without any SQL error.
+}
+
+/**
+ * Effective visibility, not policy-name presence: wrong-role or restrictive
+ * policies make the global counts silently zero without any SQL error. Only
+ * count-bearing operations (acquire, inspect, seal) require it.
+ */
+async function visibilityViolation(tx: Database): Promise<string | null> {
   const policies = await rows<{
     table_name: string;
     policy: string | null;
@@ -110,7 +120,7 @@ async function verifyInstallation(tx: Database): Promise<void> {
     FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_policy pol ON pol.polrelid = c.oid
     WHERE c.oid IN ('public.tasks'::regclass,'public.branches'::regclass)`
   );
-  const violation = maintenanceVisibilityViolation(
+  return maintenanceVisibilityViolation(
     policies.map(
       (p): MaintenancePolicyRow => ({
         table: p.table_name,
@@ -122,6 +132,11 @@ async function verifyInstallation(tx: Database): Promise<void> {
       })
     )
   );
+}
+
+async function verifyInstallation(tx: Database): Promise<void> {
+  await verifyIntegrity(tx);
+  const violation = await visibilityViolation(tx);
   if (violation)
     fail(
       `Maintenance installation row-level security does not give the operator global visibility (${violation})`
@@ -282,18 +297,27 @@ async function exactLease(
   if (!match?.valid) fail('Maintenance generation/deadline changed, released or expired');
 }
 
-/** Expiry invalidates readiness, NEVER silently reopens ingress during a cutover. */
+/**
+ * Expiry invalidates readiness, NEVER silently reopens ingress during a cutover.
+ *
+ * Release only reopens producers, so it needs the exact lease and an intact
+ * installation, not global SELECT visibility (that matters only to counts). An
+ * owner-run policy change after acquire must not leave the hold unreleasable.
+ * Nothing here loosens visibility for any count: inspect and seal still refuse.
+ * The audit row records when release happened without a visibility proof.
+ */
 export async function releaseMaintenanceAdmission(
   db: Database,
   lease: MaintenanceAdmissionLease
 ): Promise<void> {
   return operator(db, async (tx) => {
-    await verifyInstallation(tx);
+    await verifyIntegrity(tx);
     await exactLease(tx, lease, false);
+    const unproven = await visibilityViolation(tx);
     await executeRaw(
       tx,
       sql`UPDATE agor_maintenance.control SET phase='released', idle_since=NULL WHERE singleton`
     );
-    await audit(tx, 'released', lease.generation);
+    await audit(tx, unproven ? 'released_visibility_unproven' : 'released', lease.generation);
   });
 }

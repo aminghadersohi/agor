@@ -109,6 +109,17 @@ producer behavior; it does not replay a Task/tool call or restore a database.
 Acquire, seal and release audit entries commit with their state changes in
 `agor_maintenance.audit`. No provider or network call occurs in these transactions.
 
+Release requires the exact lease and an intact installation (owner, trigger body,
+version and the three enabled triggers). It does **not** require the global
+row-level-security visibility proof, because release only reopens producers and
+never reports a count. If an owner-run policy change on `tasks` or `branches`
+after acquire breaks that proof, `inspect` and `seal` keep refusing (visibility is
+never loosened), but the exact lease can still release the hold instead of
+leaving ingress blocked until someone writes manual SQL. Such a release is
+audited as `released_visibility_unproven` rather than `released`. A tampered or
+missing trigger still refuses release; repair or inspect it as the database owner
+first.
+
 ## First-install bootstrap and the remaining old-runtime gate
 
 A reviewed standalone CLI from the exact candidate can install/acquire the
