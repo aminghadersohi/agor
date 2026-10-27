@@ -453,6 +453,55 @@ it('clears distributed authorization caches without disconnecting sockets for ad
   });
 });
 
+it('keeps task executor sockets connected through tenant authorization eviction', () => {
+  const multiTenancy = {
+    mode: 'required_from_auth',
+    static_tenant_id: 'default' as never,
+    auth_claim: 'tenant_id',
+  } as const;
+  const { app, io } = buildHarness({ adapter: {} as never, multiTenancy });
+  const fence = getOrCreateExecutorConnectionRevocationFence(app);
+  const executor = makeSocket('executor-running-turn', io);
+  executor.feathers = {};
+  const authResult = {
+    user: { user_id: ALICE },
+    authentication: {
+      strategy: 'jwt',
+      payload: {
+        type: 'executor-session',
+        purpose: 'executor-task',
+        session_id: 'session-1',
+        task_id: 'task-1',
+        tenant_id: 'tenant-a',
+      },
+    },
+  };
+  attachExecutorConnectionCandidate(authResult, {
+    tenantId: 'tenant-a',
+    taskId: 'task-1',
+    tokenFingerprint: fingerprintExecutorSessionToken('executor-token-running'),
+    revocationGeneration: fence.snapshot('tenant-a'),
+  });
+  finalizeAuthenticatedConnectionAuthority({
+    connection: executor.feathers,
+    authResult,
+    multiTenancy,
+    executorRevocationFence: fence,
+  });
+  connect(io, executor);
+  const user = makeSocket('tenant-a-user', io);
+  asUser(user, ALICE, 'tenant-a');
+  connect(io, user);
+
+  (app as any).eventHandlers.get('realtime:authorization-invalidated')?.({
+    tenantId: 'tenant-a',
+    disconnectSockets: true,
+  });
+
+  expect(user.connected).toBe(false);
+  expect(executor.connected).toBe(true);
+});
+
 it('fences already-authenticated task executors on local and HA exact revocation', async () => {
   const { app, io } = buildHarness({
     adapter: {} as never,
