@@ -1,6 +1,7 @@
 import type { ScheduleFailureNotification, TaskStatus } from '@agor/core/types';
 import { TaskStatus as Status } from '@agor/core/types';
-import { and, asc, desc, eq, gt, lte, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, isNull, lte, or } from 'drizzle-orm';
+import { generateId } from '../../lib/ids';
 import type { Database } from '../client';
 import { insert, isPostgresDatabase, select, update } from '../database-wrapper';
 import { scheduleFailureNotifications as notifications, type SessionRow } from '../schema';
@@ -123,10 +124,12 @@ export class ScheduleFailureNotificationRepository {
   }
 
   /** Only a typed, proven zero-provider-effect rejection may release the fence. */
-  async notDispatched(taskId: string, now = new Date()): Promise<void> {
-    await update(this.db, notifications)
+  async notDispatched(taskId: string, attemptId: string, now = new Date()): Promise<boolean> {
+    if (typeof attemptId !== 'string' || !attemptId) return false;
+    const result = await update(this.db, notifications)
       .set({
         status: 'pending',
+        attempt_id: null,
         gateway_channel_id: null,
         target: null,
         last_error_code: 'not_dispatched',
@@ -136,10 +139,14 @@ export class ScheduleFailureNotificationRepository {
       .where(
         and(
           eq(notifications.task_id, taskId),
+          attemptId === null
+            ? isNull(notifications.attempt_id)
+            : eq(notifications.attempt_id, attemptId),
           or(eq(notifications.status, 'sending'), eq(notifications.status, 'uncertain'))
         )
       )
       .run();
+    return result.rowsAffected === 1;
   }
 
   /** One durable provider-attempt fence, never a process-local dedup cache. */
@@ -148,10 +155,12 @@ export class ScheduleFailureNotificationRepository {
     gatewayId: string,
     target: string,
     now = new Date()
-  ): Promise<boolean> {
+  ): Promise<string | null> {
+    const attemptId = generateId();
     const result = await update(this.db, notifications)
       .set({
         status: 'sending',
+        attempt_id: attemptId,
         gateway_channel_id: gatewayId,
         target,
         last_error_code: null,
@@ -160,7 +169,7 @@ export class ScheduleFailureNotificationRepository {
       })
       .where(and(eq(notifications.task_id, taskId), eq(notifications.status, 'pending')))
       .run();
-    return result.rowsAffected === 1;
+    return result.rowsAffected === 1 ? attemptId : null;
   }
   async defer(taskId: string, code: string, now = new Date()): Promise<void> {
     await update(this.db, notifications)
@@ -172,9 +181,10 @@ export class ScheduleFailureNotificationRepository {
       .where(and(eq(notifications.task_id, taskId), eq(notifications.status, 'pending')))
       .run();
   }
-  async finish(taskId: string, messageId: string): Promise<void> {
-    // A late receipt may resolve uncertainty, but can never start another send.
-    await update(this.db, notifications)
+  async finish(taskId: string, attemptId: string | null, messageId: string): Promise<boolean> {
+    if (attemptId !== null && (typeof attemptId !== 'string' || !attemptId)) return false;
+    // A late receipt belongs to one claim, never to a later attempt.
+    const result = await update(this.db, notifications)
       .set({
         status: 'delivered',
         platform_message_id: messageId,
@@ -184,15 +194,29 @@ export class ScheduleFailureNotificationRepository {
       .where(
         and(
           eq(notifications.task_id, taskId),
+          attemptId === null
+            ? isNull(notifications.attempt_id)
+            : eq(notifications.attempt_id, attemptId),
           or(eq(notifications.status, 'sending'), eq(notifications.status, 'uncertain'))
         )
       )
       .run();
+    return result.rowsAffected === 1;
   }
-  async uncertain(taskId: string): Promise<void> {
-    await update(this.db, notifications)
+  async uncertain(taskId: string, attemptId: string | null): Promise<boolean> {
+    if (attemptId !== null && (typeof attemptId !== 'string' || !attemptId)) return false;
+    const result = await update(this.db, notifications)
       .set({ status: 'uncertain', last_error_code: 'delivery_unconfirmed', updated_at: new Date() })
-      .where(and(eq(notifications.task_id, taskId), eq(notifications.status, 'sending')))
+      .where(
+        and(
+          eq(notifications.task_id, taskId),
+          attemptId === null
+            ? isNull(notifications.attempt_id)
+            : eq(notifications.attempt_id, attemptId),
+          eq(notifications.status, 'sending')
+        )
+      )
       .run();
+    return result.rowsAffected === 1;
   }
 }

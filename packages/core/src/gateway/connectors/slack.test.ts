@@ -1,4 +1,18 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { assertNoEgress } from '../../test/no-egress';
+
+vi.mock('@slack/web-api', () => ({
+  default: { retryPolicies: { fiveRetriesInFiveMinutes: { retries: 5 } } },
+  WebClient: class {
+    retryConfig: unknown;
+    axios: { defaults: { timeout?: number } };
+    constructor(_token: string, options: { retryConfig: unknown; timeout?: number }) {
+      this.retryConfig = options.retryConfig;
+      this.axios = { defaults: { timeout: options.timeout } };
+    }
+  },
+}));
+beforeEach(() => assertNoEgress());
 
 const socketModeMocks = vi.hoisted(() => ({
   instances: [] as Array<{
@@ -2630,6 +2644,7 @@ describe('schedule failure receipt verification (read only)', () => {
     'schedule',
     'timestamp',
     'metadata',
+    'attempt',
     'allowlist',
   ] as const) {
     it(`verifies only an exact own-bot failure receipt: ${mismatch}`, async () => {
@@ -2645,6 +2660,7 @@ describe('schedule failure receipt verification (read only)', () => {
               event_payload: {
                 task_id: mismatch === 'task' ? 'other' : 'task',
                 schedule_id: mismatch === 'schedule' ? 'other' : 'schedule',
+                attempt_id: mismatch === 'attempt' ? 'other' : 'attempt',
               },
             },
           },
@@ -2660,6 +2676,7 @@ describe('schedule failure receipt verification (read only)', () => {
           messageId: '123.456',
           taskId: 'task',
           scheduleId: 'schedule',
+          attemptId: 'attempt',
         })
       ).toBe(mismatch === 'none');
       expect(history).toHaveBeenCalledTimes(mismatch === 'allowlist' ? 0 : 1);

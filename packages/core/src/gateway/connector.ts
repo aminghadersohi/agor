@@ -242,6 +242,7 @@ export interface GatewayConnector {
     singleAttempt?: boolean;
     failureTaskId?: string;
     failureScheduleId?: string;
+    failureAttemptId?: string;
     target: string;
     text: string;
     blocks?: unknown[];
@@ -254,6 +255,7 @@ export interface GatewayConnector {
     messageId: string;
     taskId: string;
     scheduleId: string;
+    attemptId: string | null;
   }): Promise<boolean>;
 
   /** Recover one provider message after an ambiguous nonce-protected send. */

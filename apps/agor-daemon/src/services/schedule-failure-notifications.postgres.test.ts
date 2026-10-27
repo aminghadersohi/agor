@@ -194,5 +194,71 @@ describe.skipIf(!url || !pg)(
         })
       );
     });
+
+    it('durable attempt CAS rejects lost-ACK old results on a newer independent-connection claim and across tenants', async () => {
+      const tenant = `attempt-a-${generateId()}`,
+        foreign = `attempt-b-${generateId()}`,
+        id = generateId();
+      const seeded = await seed(tenant, [id]);
+      await seed(foreign, []);
+      const attemptA = await scoped(tenant, (db) =>
+        new ScheduleFailureNotificationRepository(db).beginSend(
+          id,
+          seeded.channel.id,
+          'channel:C123'
+        )
+      );
+      expect(attemptA).toBeTruthy();
+      const loseAck = async () => {
+        await scoped(tenant, (db) =>
+          new ScheduleFailureNotificationRepository(db).notDispatched(id, attemptA!)
+        );
+        throw new Error('committed release, lost ACK');
+      };
+      await expect(loseAck()).rejects.toThrow('lost ACK');
+      const other = createDatabase({ dialect: 'postgresql', url: url! });
+      try {
+        const attemptB = await runWithTenantDatabaseScope(other, tenant, (db) =>
+          new ScheduleFailureNotificationRepository(db).beginSend(
+            id,
+            seeded.channel.id,
+            'channel:C123'
+          )
+        );
+        expect(attemptB).toBeTruthy();
+        expect(attemptB).not.toBe(attemptA);
+        await scoped(tenant, async (db) => {
+          const repo = new ScheduleFailureNotificationRepository(db);
+          expect(await repo.notDispatched(id, attemptA!)).toBe(false);
+          expect(await repo.finish(id, attemptA!, 'old')).toBe(false);
+          expect(await repo.finish(id, null, 'legacy')).toBe(false);
+          expect(await repo.uncertain(id, attemptA!)).toBe(false);
+          expect(await repo.findById(id)).toMatchObject({
+            status: 'sending',
+            attempt_id: attemptB,
+          });
+        });
+        await scoped(foreign, async (db) => {
+          const repo = new ScheduleFailureNotificationRepository(db);
+          expect(await repo.notDispatched(id, attemptB!)).toBe(false);
+          expect(await repo.finish(id, attemptB, 'foreign')).toBe(false);
+          expect(await repo.uncertain(id, attemptB)).toBe(false);
+        });
+        await scoped(tenant, async (db) => {
+          const repo = new ScheduleFailureNotificationRepository(db);
+          expect(await repo.uncertain(id, attemptB)).toBe(true);
+          expect(await repo.beginSend(id, seeded.channel.id, 'channel:C123')).toBeNull();
+          expect(await repo.finish(id, attemptB, '123.456')).toBe(true);
+          expect(await repo.notDispatched(id, attemptB!)).toBe(false);
+          expect(await repo.findById(id)).toMatchObject({
+            status: 'delivered',
+            attempt_id: attemptB,
+          });
+        });
+      } finally {
+        if (isPostgresDatabase(other))
+          await (other as Database & { $client: { end(): Promise<void> } }).$client.end();
+      }
+    });
   }
 );

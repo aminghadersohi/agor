@@ -31,6 +31,7 @@ const UPSTREAM_TAIL = [
   '0119_branch_deletion_failed_discovery',
   '9033_schedule_execution_policy',
   '9034_schedule_failure_notifications',
+  '9035_schedule_failure_attempt_fence',
 ];
 
 // Fork main journalled front desk at 1790129000214 and profile images at
@@ -45,7 +46,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
 
     beforeAll(async () => {
       db = createDatabase({ dialect: 'postgresql', url: postgresUrl! });
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       fresh = await ledger();
     });
     afterAll(async () => {
@@ -123,7 +124,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       ]);
       expect(status.pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
 
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       const after = await relations();
       // Existing tables are verified in place, not recreated; callback storage
       // is created with forced tenant isolation.
@@ -141,7 +142,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       await recordRetiredOrder(1);
       expect((await checkMigrationStatus(db)).pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
 
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       const after = await relations();
       for (const table of [
         'profile_images',

@@ -145,7 +145,7 @@ describe('retired fork-main front desk / profile image order', () => {
     const db = createDatabase({ url: `file:${join(directory, 'migration.db')}` });
     const { from } = RETIRED_FORK_MAIN_ORDER.sqlite;
     try {
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       await run(db, {
         ledger: async () =>
           rawRows(
@@ -197,6 +197,7 @@ describe('retired fork-main front desk / profile image order', () => {
     '0118_branch_deletion_failed_discovery',
     '9033_schedule_execution_policy',
     '9034_schedule_failure_notifications',
+    '9035_schedule_failure_attempt_fence',
   ];
   const dropUpstreamTail = async (db: ReturnType<typeof createDatabase>) => {
     await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
@@ -235,9 +236,11 @@ describe('retired fork-main front desk / profile image order', () => {
         retired: ['9028_branch_front_desk_sessions', '9029_profile_image_galleries'],
       });
       expect(status.pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
-      expect(pendingOfflineCutoverMigrations('sqlite', status)).toEqual([]);
+      expect(pendingOfflineCutoverMigrations('sqlite', status)).toEqual([
+        '9035_schedule_failure_attempt_fence',
+      ]);
 
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       expect(await objects()).toEqual(ALL_OBJECTS);
       // The repaired ledger is the deployed history, row for row.
       expect(await ledger()).toEqual(fresh);
@@ -259,7 +262,7 @@ describe('retired fork-main front desk / profile image order', () => {
       // Without the repair the new journal would read profile images as applied.
       expect((await checkMigrationStatus(db)).pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
 
-      await runMigrations(db);
+      await runMigrations(db, { allowOfflineCutover: true });
       expect(await objects()).toEqual(ALL_OBJECTS);
       expect(await ledger()).toEqual(fresh);
     });

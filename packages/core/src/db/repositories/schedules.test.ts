@@ -511,6 +511,26 @@ async function failureFixture(db: Database) {
 
 describe('authentic scheduled failure outbox', () => {
   dbTest(
+    'legacy null attempt receipts remain confirmable, but never settle a newly claimed generation',
+    async ({ db }) => {
+      const { occurrence, tasks, notices } = await failureFixture(db);
+      const task = await occurrence();
+      await tasks.update(task.task_id, { status: TaskStatus.FAILED });
+      await executeRaw(
+        db,
+        sql`UPDATE schedule_failure_notifications SET status = 'sending' WHERE task_id = ${task.task_id}`
+      );
+      expect(await notices.finish(task.task_id, null, 'legacy-positive')).toBe(true);
+      expect(await notices.notDispatched(task.task_id, undefined as unknown as string)).toBe(false);
+      expect(await notices.findById(task.task_id)).toMatchObject({
+        status: 'delivered',
+        attempt_id: null,
+        platform_message_id: 'legacy-positive',
+      });
+    }
+  );
+
+  dbTest(
     'discovery advances a stable keyset within a finite cycle and wraps without mutating rows',
     async ({ db }) => {
       const { occurrence, tasks, notices } = await failureFixture(db);
@@ -608,8 +628,12 @@ describe('authentic scheduled failure outbox', () => {
           ])
         ).filter(Boolean)
       ).toHaveLength(1);
-      await replacement.finish(task.task_id, 'provider-message');
-      expect(await notices.beginSend(task.task_id, generateId(), 'channel:C123')).toBe(false);
+      await replacement.finish(
+        task.task_id,
+        (await replacement.findById(task.task_id))!.attempt_id,
+        'provider-message'
+      );
+      expect(await notices.beginSend(task.task_id, generateId(), 'channel:C123')).toBeNull();
       await new SessionRepository(db).delete(task.session_id);
       await new ScheduleRepository(db).delete(schedule.schedule_id);
       expect(await replacement.findById(task.task_id)).toMatchObject({

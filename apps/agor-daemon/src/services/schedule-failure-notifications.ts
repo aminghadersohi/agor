@@ -6,6 +6,7 @@ import {
   runWithSystemDatabaseScope,
   runWithTenantContext,
   runWithTenantDatabaseScope,
+  runWithTenantDatabaseTransaction,
   ScheduleFailureNotificationRepository,
   type TenantScopeAwareDatabase,
   UsersRepository,
@@ -108,6 +109,7 @@ export class ScheduleFailureNotificationsService {
     try {
       verified = await gateway?.confirmScheduleFailureReceipt(
         row.task_id,
+        row.attempt_id,
         messageId,
         params.user.user_id as UserID
       );
@@ -117,9 +119,16 @@ export class ScheduleFailureNotificationsService {
     if (verified !== messageId)
       throw new BadRequest('Delivery could not be verified; notification remains unresolved');
     await this.data.write((db) =>
-      new ScheduleFailureNotificationRepository(db).finish(row.task_id, messageId)
+      new ScheduleFailureNotificationRepository(db).finish(row.task_id, row.attempt_id, messageId)
     );
-    return this.get(id);
+    const confirmed = await this.get(id);
+    if (
+      confirmed.status !== 'delivered' ||
+      confirmed.attempt_id !== row.attempt_id ||
+      confirmed.platform_message_id !== messageId
+    )
+      throw new BadRequest('Notification attempt changed; receipt was not applied');
+    return confirmed;
   }
 }
 
@@ -137,6 +146,7 @@ export class ScheduleFailureNotificationWorker {
     {
       tenantId: string;
       taskId: string;
+      attemptId: string;
       outcome: 'receipt' | 'not_dispatched' | 'uncertain';
       messageId?: string;
     }
@@ -171,7 +181,7 @@ export class ScheduleFailureNotificationWorker {
         await runWithTenantContext(settlement.tenantId, () =>
           this.persistSettlement(settlement, now)
         );
-        this.settlements.delete(key);
+        if (this.settlements.get(key) === settlement) this.settlements.delete(key);
       } catch {
         /* Write gate / transient DB failure: preserve the evidence, not another send. */
       }
@@ -209,15 +219,15 @@ export class ScheduleFailureNotificationWorker {
     return refs.length;
   }
   private async processOne(tenantId: string, taskId: string, now: Date): Promise<void> {
-    const ready = await runWithTenantDatabaseScope(this.db, tenantId, async (db) => {
+    const ready = await runWithTenantDatabaseTransaction(this.db, tenantId, async (db) => {
       await assertTenantWritable(db, tenantId);
       const repo = new ScheduleFailureNotificationRepository(db);
       const row = await repo.findById(taskId);
       if (!row || row.status === 'delivered' || row.status === 'uncertain') return null;
       if (row.status === 'sending') {
         if (Date.parse(row.next_attempt_at) <= now.getTime()) {
-          await repo.uncertain(taskId);
-          if (await new BranchRepository(db).findById(row.branch_id))
+          const changed = await repo.uncertain(taskId, row.attempt_id);
+          if (changed && (await new BranchRepository(db).findById(row.branch_id)))
             await new BranchRepository(db).update(row.branch_id, { needs_attention: true });
         }
         return null;
@@ -274,7 +284,7 @@ export class ScheduleFailureNotificationWorker {
       return { channelId: channel.id, target, text, sender, row };
     });
     if (!ready) return;
-    const began = await runWithTenantDatabaseScope(this.db, tenantId, async (db) => {
+    const attemptId = await runWithTenantDatabaseTransaction(this.db, tenantId, async (db) => {
       await assertTenantWritable(db, tenantId);
       return new ScheduleFailureNotificationRepository(db).beginSend(
         taskId,
@@ -283,10 +293,11 @@ export class ScheduleFailureNotificationWorker {
         now
       );
     });
-    if (!began) return;
+    if (!attemptId) return;
     let settlement: {
       tenantId: string;
       taskId: string;
+      attemptId: string;
       outcome: 'receipt' | 'not_dispatched' | 'uncertain';
       messageId?: string;
     };
@@ -300,13 +311,21 @@ export class ScheduleFailureNotificationWorker {
         emittedByUserId: ready.sender.user_id,
         userRole: ready.sender.role,
         emittedByTaskId: taskId,
+        emittedByScheduleAttemptId: attemptId,
         emittedByScheduleId: ready.row.schedule_id,
       });
-      settlement = { tenantId, taskId, outcome: 'receipt', messageId: sent.platform_message_id };
+      settlement = {
+        tenantId,
+        taskId,
+        attemptId,
+        outcome: 'receipt',
+        messageId: sent.platform_message_id,
+      };
     } catch (error) {
       settlement = {
         tenantId,
         taskId,
+        attemptId,
         outcome: error instanceof GatewayNotDispatchedError ? 'not_dispatched' : 'uncertain',
       };
     }
@@ -318,7 +337,7 @@ export class ScheduleFailureNotificationWorker {
     this.settlements.set(key, settlement);
     try {
       await this.persistSettlement(settlement, now);
-      this.settlements.delete(key);
+      if (this.settlements.get(key) === settlement) this.settlements.delete(key);
     } catch {
       console.warn('[schedule-failure-notifications] settlement_deferred');
     }
@@ -327,22 +346,27 @@ export class ScheduleFailureNotificationWorker {
     settlement: {
       tenantId: string;
       taskId: string;
+      attemptId: string;
       outcome: 'receipt' | 'not_dispatched' | 'uncertain';
       messageId?: string;
     },
     now: Date
   ): Promise<void> {
-    await runWithTenantDatabaseScope(this.db, settlement.tenantId, async (db) => {
+    await runWithTenantDatabaseTransaction(this.db, settlement.tenantId, async (db) => {
       await assertTenantWritable(db, settlement.tenantId);
       const repo = new ScheduleFailureNotificationRepository(db);
       if (settlement.outcome === 'receipt')
-        await repo.finish(settlement.taskId, settlement.messageId!);
+        await repo.finish(settlement.taskId, settlement.attemptId, settlement.messageId!);
       else if (settlement.outcome === 'not_dispatched')
-        await repo.notDispatched(settlement.taskId, now);
+        await repo.notDispatched(settlement.taskId, settlement.attemptId, now);
       else {
-        await repo.uncertain(settlement.taskId);
+        await repo.uncertain(settlement.taskId, settlement.attemptId);
         const row = await repo.findById(settlement.taskId);
-        if (row && (await new BranchRepository(db).findById(row.branch_id))) {
+        if (
+          row?.status === 'uncertain' &&
+          row.attempt_id === settlement.attemptId &&
+          (await new BranchRepository(db).findById(row.branch_id))
+        ) {
           await new BranchRepository(db).update(row.branch_id, { needs_attention: true });
         }
       }

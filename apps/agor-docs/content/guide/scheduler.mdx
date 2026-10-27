@@ -143,6 +143,11 @@ binding is configured.
 
 ### Reconciling an uncertain alert
 
+Each dispatch claim stores a new opaque attempt ID. Releases, uncertain outcomes and
+receipt confirmations must match that exact attempt; replaying an older settlement after
+a lost database acknowledgement cannot reopen or complete a newer claim. Uncertainty
+and branch attention commit together in a short transaction on both SQLite and PostgreSQL.
+
 A returned receipt is retried as a database settlement, never as another Slack post.
 If a write gate or database outage blocks settlement, the worker retains up to 256
 content-free outcomes in memory. That cache does not survive a daemon restart; the
@@ -159,7 +164,9 @@ message is present, take its Slack timestamp and submit:
 to `PATCH /schedule-failure-notifications/<EXACT_TASK_ID>`. The service rechecks the
 operator's and gateway creator's branch access, current target binding, and allowlist,
 then reads only that exact Slack message. It confirms delivery only when the original
-bot identity and Task/Schedule metadata match. A tenant write gate is checked again
+bot identity and Task/Schedule/attempt metadata match the currently observed claim.
+A claim that changes during verification rejects the stale confirmation. Legacy messages
+without attempt metadata are confirmable only for an unchanged legacy attempt. A tenant write gate is checked again
 before persisting the verified receipt. Repeating the same confirmation is idempotent.
 No lookup or confirmation sends a message or replays the scheduled job.
 
@@ -168,6 +175,13 @@ the intent remains unresolved and the branch stays marked for attention. Absence
 not proof of non-delivery: there is deliberately no blind-resend API. Keep the attention
 flag until an operator has investigated; confirming delivery never automatically clears
 an existing human attention flag.
+
+### Upgrading attempt fencing
+
+The attempt-fencing migration requires an offline cutover using the existing migration
+workflow: stop all daemons writing this database before applying it, then start only
+the updated version. Do not mix or roll back to unfenced notification writers while
+notifications are active. Existing intents and human schedule holds are preserved.
 
 ## Best Practices
 

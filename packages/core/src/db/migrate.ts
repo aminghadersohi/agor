@@ -136,6 +136,19 @@ export function createMigrationImpactRegistry(
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   [
+    '9035_schedule_failure_attempt_fence',
+    {
+      requiresOfflineCutover: true,
+      impact: defineMigrationImpact({
+        classification: 'protocol',
+        userAction: 'required',
+        rollbackCompatibility: 'incompatible',
+        summary:
+          'Fences failure-notification attempts. Stop all writers before upgrading; never roll back to unfenced writers while notifications are active.',
+      }),
+    },
+  ],
+  [
     '9034_schedule_failure_notifications',
     {
       requiresOfflineCutover: false,

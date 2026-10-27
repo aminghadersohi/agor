@@ -2050,6 +2050,7 @@ export class SlackConnector implements GatewayConnector {
     singleAttempt?: boolean;
     failureTaskId?: string;
     failureScheduleId?: string;
+    failureAttemptId?: string;
     channel: string;
     text: string;
     blocks?: unknown[];
@@ -2078,6 +2079,7 @@ export class SlackConnector implements GatewayConnector {
                 event_payload: {
                   task_id: req.failureTaskId ?? '',
                   schedule_id: req.failureScheduleId ?? '',
+                  ...(req.failureAttemptId ? { attempt_id: req.failureAttemptId } : {}),
                 },
               },
             }
@@ -2155,6 +2157,7 @@ export class SlackConnector implements GatewayConnector {
     singleAttempt?: boolean;
     failureTaskId?: string;
     failureScheduleId?: string;
+    failureAttemptId?: string;
     target: string;
     text: string;
     blocks?: unknown[];
@@ -2213,6 +2216,7 @@ export class SlackConnector implements GatewayConnector {
       singleAttempt: req.singleAttempt,
       failureTaskId: req.failureTaskId,
       failureScheduleId: req.failureScheduleId,
+      failureAttemptId: req.failureAttemptId,
       channel: resolvedChannel,
       text: req.text,
       blocks: req.blocks,
@@ -2235,6 +2239,7 @@ export class SlackConnector implements GatewayConnector {
     messageId: string;
     taskId: string;
     scheduleId: string;
+    attemptId: string | null;
   }): Promise<boolean> {
     if (
       !/^[CG][A-Z0-9]+$/.test(req.channel) ||
@@ -2263,7 +2268,8 @@ export class SlackConnector implements GatewayConnector {
           message.user === botUserId &&
           meta?.event_type === SCHEDULE_FAILURE_ALERT_EVENT_TYPE &&
           meta.event_payload?.task_id === req.taskId &&
-          meta.event_payload?.schedule_id === req.scheduleId
+          meta.event_payload?.schedule_id === req.scheduleId &&
+          (meta.event_payload?.attempt_id ?? null) === req.attemptId
         );
       })
     );

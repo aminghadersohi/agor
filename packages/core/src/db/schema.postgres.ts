@@ -4364,6 +4364,7 @@ export const scheduleFailureNotifications = pgTable(
     created_by: text('created_by').notNull(),
     scheduled_run_at: bigint('scheduled_run_at', { mode: 'number' }).notNull(),
     status: text('status').notNull().default('pending'),
+    attempt_id: text('attempt_id'),
     next_attempt_at: t.timestamp('next_attempt_at').notNull(),
     created_at: t.timestamp('created_at').notNull(),
     updated_at: t.timestamp('updated_at').notNull(),

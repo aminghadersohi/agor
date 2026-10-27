@@ -11,6 +11,8 @@ export interface ScheduleFailureNotification {
   created_by: UserID;
   scheduled_run_at: number;
   status: 'pending' | 'sending' | 'delivered' | 'uncertain';
+  /** Rotated at each claim. Null only for intents/legacy attempts predating fencing. */
+  attempt_id: string | null;
   next_attempt_at: string;
   created_at: string;
   updated_at: string;

@@ -1,6 +1,11 @@
+import { assertNoEgress } from '../../../../packages/core/src/test/no-egress';
+
+assertNoEgress();
+
 import {
   BranchRepository,
   createTenantScopedDatabaseProxy,
+  executeRaw,
   GatewayChannelRepository,
   generateId,
   getCurrentTenantDatabaseScope,
@@ -11,6 +16,7 @@ import {
   ScheduleFailureNotificationRepository,
   ScheduleRepository,
   SessionRepository,
+  sql,
   TaskRepository,
   UsersRepository,
 } from '@agor/core/db';
@@ -31,17 +37,31 @@ import {
 } from './schedule-failure-notifications';
 
 const frozen = vi.hoisted(() => new Set<string>());
+const commitFault = vi.hoisted(() => ({ loseAck: false }));
 vi.mock('@agor/core/db', async (importOriginal) => {
   const original = await importOriginal<typeof import('@agor/core/db')>();
   return {
     ...original,
+    runWithTenantDatabaseTransaction: vi.fn(
+      async (...args: Parameters<typeof original.runWithTenantDatabaseTransaction>) => {
+        const result = await original.runWithTenantDatabaseTransaction(...args);
+        if (commitFault.loseAck) {
+          commitFault.loseAck = false;
+          throw new Error('fixture committed, acknowledgement lost');
+        }
+        return result;
+      }
+    ),
     assertTenantWritable: vi.fn(async (db, tenantId) => {
       if (frozen.has(tenantId)) throw new Error('fixture tenant frozen');
       return original.assertTenantWritable(db, tenantId);
     }),
   };
 });
-afterEach(() => frozen.clear());
+afterEach(() => {
+  frozen.clear();
+  commitFault.loseAck = false;
+});
 
 vi.mock('@agor/core/config', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@agor/core/config')>()),
@@ -139,7 +159,8 @@ async function fixture(raw: Database) {
     };
   });
   const confirmScheduleFailureReceipt = vi.fn(
-    async (_task: string, message: string, _operator: string) => message as string | null
+    async (_task: string, _attempt: string | null, message: string, _operator: string) =>
+      message as string | null
   );
   const app = {
     service: () => ({ emitMessage, confirmScheduleFailureReceipt }),
@@ -166,6 +187,197 @@ async function fixture(raw: Database) {
 }
 
 describe('schedule failure notifications (offline gateway)', () => {
+  dbTest(
+    'committed release with lost ACK cannot reopen a concurrently claimed newer attempt',
+    async ({ db }) => {
+      const f = await fixture(db);
+      const task = await f.fail();
+      const workerA = f.worker();
+      const release = ScheduleFailureNotificationRepository.prototype.notDispatched;
+      const released = vi
+        .spyOn(ScheduleFailureNotificationRepository.prototype, 'notDispatched')
+        .mockImplementationOnce(async function (
+          this: ScheduleFailureNotificationRepository,
+          ...args
+        ) {
+          const changed = await release.apply(this, args);
+          commitFault.loseAck = true; // Wrapper throws only AFTER the actual transaction commits.
+          return changed;
+        });
+      let rejectAccepted!: (error: Error) => void;
+      let runningB: Promise<number> | undefined;
+      const accepted = new Promise<never>((_resolve, reject) => {
+        rejectAccepted = reject;
+      });
+      let acceptedEffects = 0;
+      f.emitMessage.mockImplementation(async () => {
+        acceptedEffects++;
+        return { delivered: true, recorded: true, platform_message_id: 'inert-extra-effect' };
+      });
+      f.emitMessage.mockRejectedValueOnce(new GatewayNotDispatchedError());
+      f.emitMessage.mockImplementationOnce(() => {
+        acceptedEffects++;
+        return accepted;
+      });
+      try {
+        await workerA.checkOnce();
+        expect(await f.read(task.task_id)).toMatchObject({ status: 'pending', attempt_id: null });
+        const attemptA = released.mock.calls[0][1];
+        f.advance(31_000);
+        const workerB = f.worker();
+        runningB = workerB.checkOnce();
+        await vi.waitFor(() => expect(f.emitMessage).toHaveBeenCalledTimes(2));
+        const attemptB = (await f.read(task.task_id))!.attempt_id!;
+        expect(attemptB).not.toBe(attemptA);
+        await workerA.checkOnce(); // Cached A retries after B has been accepted, but before B's receipt.
+        const stateAfterOldRelease = await f.read(task.task_id);
+        // Settle within the same clock instant, not after the real transport deadline.
+        rejectAccepted(new Error('inert accepted but receipt lost'));
+        await runningB;
+        f.advance(31_000);
+        await f.worker().checkOnce();
+        expect(acceptedEffects).toBe(1); // Real committed A release + lost ACK must not permit a second accepted B/C effect.
+        expect(f.emitMessage).toHaveBeenCalledTimes(2);
+        expect(stateAfterOldRelease).toMatchObject({ status: 'sending', attempt_id: attemptB });
+        expect(await f.read(task.task_id)).toMatchObject({
+          status: 'uncertain',
+          attempt_id: attemptB,
+        });
+        await f.scoped(async (unit) => {
+          const repo = new ScheduleFailureNotificationRepository(unit);
+          expect(await repo.finish(task.task_id, attemptB, '123.456')).toBe(true);
+          expect(await repo.notDispatched(task.task_id, attemptA)).toBe(false);
+          expect(await repo.uncertain(task.task_id, attemptA)).toBe(false);
+        });
+        expect(await f.read(task.task_id)).toMatchObject({
+          status: 'delivered',
+          attempt_id: attemptB,
+          platform_message_id: '123.456',
+        });
+      } finally {
+        if (runningB) {
+          rejectAccepted(new Error('inert cleanup'));
+          await runningB;
+        }
+        released.mockRestore();
+      }
+    }
+  );
+
+  dbTest(
+    'stale settlement generations cannot mutate any terminal or release boundary',
+    async ({ db }) => {
+      const f = await fixture(db);
+      const task = await f.fail();
+      await f.scoped(async (unit) => {
+        const repo = new ScheduleFailureNotificationRepository(unit);
+        const a = (await repo.beginSend(task.task_id, f.channel.id, 'channel:C123'))!;
+        expect(await repo.notDispatched(task.task_id, a)).toBe(true);
+        const b = (await repo.beginSend(task.task_id, f.channel.id, 'channel:C123'))!;
+        expect(b).not.toBe(a);
+        expect(await repo.uncertain(task.task_id, a)).toBe(false);
+        expect(await repo.finish(task.task_id, a, 'old')).toBe(false);
+        expect(await repo.finish(task.task_id, null, 'legacy')).toBe(false);
+        expect(await repo.notDispatched(task.task_id, a)).toBe(false);
+        expect(await repo.findById(task.task_id)).toMatchObject({
+          status: 'sending',
+          attempt_id: b,
+        });
+        expect(await repo.uncertain(task.task_id, b)).toBe(true);
+        expect(await repo.finish(task.task_id, b, '123.456')).toBe(true);
+        expect(await repo.notDispatched(task.task_id, a)).toBe(false);
+        expect(await repo.findById(task.task_id)).toMatchObject({
+          status: 'delivered',
+          attempt_id: b,
+        });
+      });
+      expect(f.emitMessage).not.toHaveBeenCalled();
+    }
+  );
+  for (const phase of ['ambiguous-outcome', 'expired-lease'] as const) {
+    dbTest(
+      `SQLite attention abort rolls back uncertainty and a replacement worker repairs ${phase} without resend`,
+      async ({ db }) => {
+        const f = await fixture(db);
+        const task = await f.fail();
+        await f.scoped((unit) =>
+          new BranchRepository(unit).update(f.branch.branch_id, { needs_attention: false })
+        );
+        await executeRaw(
+          db,
+          sql`CREATE TRIGGER attention_abort BEFORE UPDATE OF needs_attention ON branches WHEN NEW.needs_attention = 1 BEGIN SELECT RAISE(ABORT, 'injected attention abort'); END`
+        );
+        if (phase === 'expired-lease') {
+          await f.scoped((unit) =>
+            new ScheduleFailureNotificationRepository(unit).beginSend(
+              task.task_id,
+              f.channel.id,
+              'channel:C123'
+            )
+          );
+          f.advance(150_000);
+        } else f.emitMessage.mockRejectedValueOnce(new Error('inert lost receipt'));
+        await f.worker().checkOnce(); // Its cache is intentionally discarded on replacement.
+        expect(await f.read(task.task_id)).toMatchObject({ status: 'sending' });
+        expect(
+          await f.scoped((unit) => new BranchRepository(unit).findById(f.branch.branch_id))
+        ).toMatchObject({ needs_attention: false });
+        await executeRaw(db, sql`DROP TRIGGER attention_abort`);
+        f.advance(150_000);
+        await f.worker().checkOnce();
+        expect(await f.read(task.task_id)).toMatchObject({ status: 'uncertain' });
+        expect(
+          await f.scoped((unit) => new BranchRepository(unit).findById(f.branch.branch_id))
+        ).toMatchObject({ needs_attention: true });
+        expect(f.emitMessage).toHaveBeenCalledTimes(phase === 'expired-lease' ? 0 : 1);
+        expect(
+          await f.scoped((unit) => new ScheduleRepository(unit).findById(f.schedule.schedule_id))
+        ).toMatchObject({ enabled: true });
+      }
+    );
+  }
+
+  dbTest(
+    'operator reconciliation is fenced to its pre-read attempt, including a concurrent new claim',
+    async ({ db }) => {
+      const f = await fixture(db);
+      const task = await f.fail();
+      const old = await f.scoped((unit) =>
+        new ScheduleFailureNotificationRepository(unit).beginSend(
+          task.task_id,
+          f.channel.id,
+          'channel:C123'
+        )
+      );
+      let newer: string | null = null;
+      f.confirmScheduleFailureReceipt.mockImplementationOnce(async (_task, expected, message) => {
+        expect(expected).toBe(old);
+        await f.scoped(async (unit) => {
+          const repo = new ScheduleFailureNotificationRepository(unit);
+          await repo.notDispatched(task.task_id, old!);
+          newer = await repo.beginSend(task.task_id, f.channel.id, 'channel:C123');
+        });
+        return message; // An old positive lookup cannot settle the newer attempt.
+      });
+      const service = new ScheduleFailureNotificationsService(f.db, f.app);
+      await runWithTenantContext('default', () =>
+        expect(
+          service.patch(
+            task.task_id,
+            { action: 'confirm_delivery', platform_message_id: '123.456' },
+            { user: f.user } as unknown as AuthenticatedParams
+          )
+        ).rejects.toThrow('attempt changed')
+      );
+      expect(await f.read(task.task_id)).toMatchObject({
+        status: 'sending',
+        attempt_id: newer,
+        platform_message_id: null,
+      });
+      expect(f.emitMessage).not.toHaveBeenCalled();
+    }
+  );
+
   dbTest(
     'a saturated frozen discovery page cannot starve the next healthy tenant and cycle wraps',
     async ({ db }) => {
@@ -213,7 +425,7 @@ describe('schedule failure notifications (offline gateway)', () => {
       f.emitMessage.mockRejectedValueOnce(new Error('lost receipt'));
       await f.worker().checkOnce();
       const service = new ScheduleFailureNotificationsService(f.db, f.app);
-      f.confirmScheduleFailureReceipt.mockImplementationOnce(async (_task, id) => {
+      f.confirmScheduleFailureReceipt.mockImplementationOnce(async (_task, _attempt, id) => {
         expect(getCurrentTenantDatabaseScope()).toBeUndefined();
         frozen.add('default');
         return id;
@@ -234,6 +446,7 @@ describe('schedule failure notifications (offline gateway)', () => {
       expect(f.emitMessage).toHaveBeenCalledTimes(1);
       expect(f.confirmScheduleFailureReceipt).toHaveBeenCalledWith(
         task.task_id,
+        expect.any(String),
         '123.456',
         f.user.user_id
       );
@@ -542,8 +755,11 @@ describe('schedule failure notifications (offline gateway)', () => {
       f.advance(31_000);
       await worker.checkOnce();
       expect(await f.read(task.task_id)).toMatchObject({ status: 'delivered' });
-      await f.scoped((unit) =>
-        new ScheduleFailureNotificationRepository(unit).notDispatched(task.task_id)
+      await f.scoped(async (unit) =>
+        new ScheduleFailureNotificationRepository(unit).notDispatched(
+          task.task_id,
+          (await f.read(task.task_id))!.attempt_id!
+        )
       );
       expect(await f.read(task.task_id)).toMatchObject({ status: 'delivered' });
     }

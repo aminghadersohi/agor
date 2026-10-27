@@ -3829,6 +3829,7 @@ export const scheduleFailureNotifications = sqliteTable(
     created_by: text('created_by').notNull(),
     scheduled_run_at: integer('scheduled_run_at').notNull(),
     status: text('status').notNull().default('pending'),
+    attempt_id: text('attempt_id'),
     next_attempt_at: t.timestamp('next_attempt_at').notNull(),
     created_at: t.timestamp('created_at').notNull(),
     updated_at: t.timestamp('updated_at').notNull(),

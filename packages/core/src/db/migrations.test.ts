@@ -1882,3 +1882,46 @@ describe('front desk / profile image watermark reconciliation', () => {
     }
   }, 30000);
 });
+
+describe('schedule failure attempt-fence migration', () => {
+  it('requires an explicit offline cutover rather than mixing unfenced writers', () => {
+    for (const dialect of ['sqlite', 'postgresql'] as const)
+      expect(
+        pendingOfflineCutoverMigrations(dialect, {
+          applied: ['9034_schedule_failure_notifications'],
+          pending: ['9035_schedule_failure_attempt_fence'],
+        })
+      ).toEqual(['9035_schedule_failure_attempt_fence']);
+  });
+  it('adds only nullable legacy-attempt storage without rewriting held schedules or unresolved intents', async () => {
+    const client = createClient({ url: ':memory:' });
+    try {
+      const original = await readFile(
+        new URL('../../drizzle/sqlite/9034_schedule_failure_notifications.sql', import.meta.url),
+        'utf8'
+      );
+      await client.executeMultiple(original);
+      await client.executeMultiple(`CREATE TABLE held_fixture (enabled INTEGER, needs_attention INTEGER);
+        INSERT INTO held_fixture VALUES (0,0);
+        INSERT INTO schedule_failure_notifications (task_id,session_id,schedule_id,branch_id,created_by,scheduled_run_at,status,next_attempt_at,created_at,updated_at)
+        VALUES ('legacy-task','legacy-session','legacy-schedule','legacy-branch','legacy-owner',1,'uncertain',1,1,1);`);
+      const migration = await readFile(
+        new URL('../../drizzle/sqlite/9035_schedule_failure_attempt_fence.sql', import.meta.url),
+        'utf8'
+      );
+      await client.executeMultiple(migration);
+      expect(
+        (
+          await client.execute(
+            'SELECT task_id,status,attempt_id FROM schedule_failure_notifications'
+          )
+        ).rows
+      ).toEqual([{ task_id: 'legacy-task', status: 'uncertain', attempt_id: null }]);
+      expect((await client.execute('SELECT * FROM held_fixture')).rows).toEqual([
+        { enabled: 0, needs_attention: 0 },
+      ]);
+    } finally {
+      client.close();
+    }
+  });
+});

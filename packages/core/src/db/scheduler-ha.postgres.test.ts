@@ -370,7 +370,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('scheduler HA (PostgreSQL)'
       const outbox = new ScheduleFailureNotificationRepository(scoped);
       expect(await outbox.findById(taskA)).toMatchObject({ status: 'pending' });
       expect(await outbox.findById(taskB)).toBeNull();
-      expect(await outbox.beginSend(taskB, generateId(), 'channel:C123')).toBe(false);
+      expect(await outbox.beginSend(taskB, generateId(), 'channel:C123')).toBeNull();
       expect(await outbox.findAll()).toHaveLength(2);
       expect(JSON.stringify(await outbox.findAll())).not.toContain('PRIVATE');
     });
@@ -406,7 +406,11 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)('scheduler HA (PostgreSQL)'
       );
       expect(claims.filter(Boolean)).toHaveLength(1);
       await runWithTenantDatabaseScope(other, a.tenantId, (scoped) =>
-        new ScheduleFailureNotificationRepository(scoped).finish(taskA, 'receipt')
+        new ScheduleFailureNotificationRepository(scoped).finish(
+          taskA,
+          claims.find(Boolean)!,
+          'receipt'
+        )
       );
       await runWithTenantDatabaseScope(db, b.tenantId, async (scoped) => {
         const outbox = new ScheduleFailureNotificationRepository(scoped);

@@ -1,3 +1,7 @@
+import { assertNoEgress } from '../../../../packages/core/src/test/no-egress';
+
+assertNoEgress();
+
 import { materializeAgenticToolConfiguration } from '@agor/agentic-tools/config';
 import type { TenantScopeAwareDatabase } from '@agor/core/db';
 import {
@@ -6353,6 +6357,7 @@ describe('GatewayService outbound emit session branch binding', () => {
     'already-delivered',
     'role-revoked',
     'construction-failed',
+    'stale-attempt',
     'audit-gated',
     'last-message-gated',
   ] as const) {
@@ -6373,6 +6378,7 @@ describe('GatewayService outbound emit session branch binding', () => {
       internals.scheduleFailureRepo = {
         findById: vi.fn(async () => ({
           status: scenario === 'already-delivered' ? 'delivered' : 'sending',
+          attempt_id: scenario === 'stale-attempt' ? 'newer-attempt' : 'attempt-1',
           gateway_channel_id: outboundChannel.id,
           target: 'channel:C123',
           schedule_id: 'schedule-1',
@@ -6413,6 +6419,7 @@ describe('GatewayService outbound emit session branch binding', () => {
           purpose: 'schedule_failure',
           target: 'channel:C123',
           emittedByTaskId: 'task-1',
+          emittedByScheduleAttemptId: 'attempt-1',
           emittedByScheduleId: 'schedule-1',
         })
       );
@@ -6433,6 +6440,7 @@ describe('GatewayService outbound emit session branch binding', () => {
             singleAttempt: true,
             failureTaskId: 'task-1',
             failureScheduleId: 'schedule-1',
+            failureAttemptId: 'attempt-1',
           })
         );
       } else {
@@ -6449,6 +6457,7 @@ describe('GatewayService outbound emit session branch binding', () => {
     'binding-changed',
     'wrong-tenant-task',
     'receipt-mismatch',
+    'stale-confirmation',
   ] as const) {
     it(`receipt reconciliation reauthorizes the real operator and original binding: ${scenario}`, async () => {
       const { service, sendDirectMessage } = makeEmitHarness({});
@@ -6469,6 +6478,7 @@ describe('GatewayService outbound emit session branch binding', () => {
                 schedule_id: 'schedule-1',
                 branch_id: 'branch-2',
                 status: 'uncertain',
+                attempt_id: scenario === 'stale-confirmation' ? 'newer-attempt' : 'attempt-1',
                 gateway_channel_id: outboundChannel.id,
                 target: 'channel:C123',
               }
@@ -6503,6 +6513,7 @@ describe('GatewayService outbound emit session branch binding', () => {
       expect(
         await service.confirmScheduleFailureReceipt(
           'task-1',
+          'attempt-1',
           '123.456',
           'actual-operator' as UserID
         )
@@ -6518,6 +6529,7 @@ describe('GatewayService outbound emit session branch binding', () => {
           messageId: '123.456',
           taskId: 'task-1',
           scheduleId: 'schedule-1',
+          attemptId: 'attempt-1',
         });
       } else expect(verify).not.toHaveBeenCalled();
     });

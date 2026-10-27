@@ -504,6 +504,7 @@ interface EmitGatewayMessageData {
   emittedBySessionId?: SessionID;
   emittedByTaskId?: string;
   emittedByScheduleId?: string;
+  emittedByScheduleAttemptId?: string;
   userRole?: string;
 }
 
@@ -5047,12 +5048,14 @@ export class GatewayService {
 
   async confirmScheduleFailureReceipt(
     taskId: string,
+    attemptId: string | null,
     messageId: string,
     operatorId: UserID
   ): Promise<string | null> {
     const row = await this.scheduleFailureRepo.findById(taskId);
     if (
       !row ||
+      row.attempt_id !== attemptId ||
       !['sending', 'uncertain', 'delivered'].includes(row.status) ||
       !row.gateway_channel_id ||
       !row.target
@@ -5090,6 +5093,7 @@ export class GatewayService {
       messageId,
       taskId: row.task_id,
       scheduleId: row.schedule_id,
+      attemptId,
     }))
       ? messageId
       : null;
@@ -5142,6 +5146,8 @@ export class GatewayService {
       const failedBranch = notice ? await this.branchRepo.findById(notice.branch_id) : null;
       if (
         notice?.status !== 'sending' ||
+        !data.emittedByScheduleAttemptId ||
+        notice.attempt_id !== data.emittedByScheduleAttemptId ||
         notice.gateway_channel_id !== channel.id ||
         notice.target !== target ||
         notice.schedule_id !== data.emittedByScheduleId ||
@@ -5193,6 +5199,7 @@ export class GatewayService {
                 singleAttempt: true,
                 failureTaskId: data.emittedByTaskId,
                 failureScheduleId: data.emittedByScheduleId,
+                failureAttemptId: data.emittedByScheduleAttemptId,
               }
             : {}),
           target,
