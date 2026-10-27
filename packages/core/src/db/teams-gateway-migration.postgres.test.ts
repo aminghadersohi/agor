@@ -5,20 +5,21 @@ import { expect, it } from 'vitest';
 import { generateId } from '../lib/ids';
 import { createDatabase } from './client';
 import { executeRaw, isPostgresDatabase, rawRows } from './database-wrapper';
-import { checkMigrationStatus, runMigrations } from './migrate';
+import { checkMigrationStatus, pendingOfflineCutoverMigrations, runMigrations } from './migrate';
 import { proveTeamsDiscoveryPlans } from './teams-discovery-plans.test-support';
 import {
   beforeTeamsMigrations,
   insertLegacyInbound,
   seedLegacyGateway,
   stageFailingTeamsMigration,
+  stageOnlineTeamsMigration,
   teamsMigration,
 } from './teams-gateway-migration.test-support';
 import { runWithTenantDatabaseScope } from './tenant-scope';
 
 const url = process.env.AGOR_TEST_POSTGRES_URL;
 it.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
-  'upgrades current-main online under FORCE RLS with tenant uniqueness, FK fences and old-writer defaults',
+  'applies Teams online then an explicit offline tail under FORCE RLS with tenant and old-writer fences',
   async () => {
     const folder = await beforeTeamsMigrations('postgres');
     const db = createDatabase({ dialect: 'postgresql', url: url! });
@@ -58,7 +59,18 @@ it.skipIf(!url || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         )
       ).toEqual([]);
       // No offline cutover: the default runner applies it while other daemons keep serving.
-      await runMigrations(db);
+      // The online Teams proof ends at Teams, not at later offline protocols.
+      await stageOnlineTeamsMigration(folder, 'postgres');
+      expect(
+        pendingOfflineCutoverMigrations('postgresql', {
+          applied: [],
+          pending: [teamsMigration('postgres')],
+        })
+      ).toEqual([]);
+      await migrate(db, { migrationsFolder: folder });
+      expect((await checkMigrationStatus(db)).pending).not.toContain(teamsMigration('postgres'));
+      await expect(runMigrations(db)).rejects.toThrow('Offline migration cutover required');
+      await runMigrations(db, { allowOfflineCutover: true });
       expect((await checkMigrationStatus(db)).pending).toEqual([]);
       for (const [tenant, fixture] of [
         ['teams-a', a],

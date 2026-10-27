@@ -158,7 +158,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       await executeRaw(db, sql`ALTER TABLE branch_front_desk_sessions DROP COLUMN retired_reason`);
       await dropUpstreamTail();
       await recordRetiredOrder(2);
-      await expect(runMigrations(db)).rejects.toMatchObject({
+      await expect(runMigrations(db, { allowOfflineCutover: true })).rejects.toMatchObject({
         cause: { cause: { message: expect.stringContaining('retired_reason') } },
       });
       // The batch rolled back; the rewound ledger keeps reporting the replay.
