@@ -23,7 +23,10 @@ import type {
 import { describe, expect } from 'vitest';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { capabilityPolicyPresetCapabilities } from '../../../../packages/core/src/types/capability-policy';
-import { classifyRealtimeAuthorizationInvalidation } from '../register-hooks';
+import {
+  authorizationInvalidationBranchId,
+  classifyRealtimeAuthorizationInvalidation,
+} from '../register-hooks';
 import {
   isUnchangedCapabilityPolicyResult,
   setupCapabilityPolicyServices,
@@ -123,6 +126,55 @@ async function fixture(db: Database) {
 }
 
 describe('capability policy services', () => {
+  dbTest(
+    'retains real branch eviction scope when inheritance becomes an equivalent override',
+    async ({ db }) => {
+      const value = await fixture(db);
+      const policies = new CapabilityPolicyRepository(db);
+      await policies.replaceBranchPolicy(
+        value.branchId,
+        {
+          ...(await policies.getBranchPolicy(value.branchId)),
+          binding_mode: 'inherit',
+        },
+        value.owner
+      );
+      const app = feathers();
+      setupCapabilityPolicyServices(app, db as never);
+      const service = app.service('branches/:id/permissions');
+      const ownerParams = { ...params(value.owner), route: { id: value.branchId } };
+      const before = await policies.getBranchPolicy(value.branchId);
+      const saved = await service.patch(
+        null,
+        {
+          primary_owner_user_id: before.primary_owner_user_id,
+          revision: before.revision,
+          binding_mode: 'override',
+          override_config: before.inherited_config,
+        },
+        ownerParams
+      );
+      const context = {
+        path: 'branches/:id/permissions',
+        method: 'patch' as const,
+        params: ownerParams,
+        result: saved,
+        data: {},
+      };
+      expect(classifyRealtimeAuthorizationInvalidation(context)).toBe('evict');
+      expect(authorizationInvalidationBranchId(context)).toBe(value.branchId);
+      expect(saved).toMatchObject({
+        binding_mode: 'override',
+        override_config: {
+          access: {
+            sharing_mode: before.inherited_config!.access.sharing_mode,
+            others: before.inherited_config!.access.others,
+          },
+        },
+      });
+    }
+  );
+
   dbTest(
     'does not let another tenant reuse an unchanged policy or its resource IDs',
     async ({ db }) => {

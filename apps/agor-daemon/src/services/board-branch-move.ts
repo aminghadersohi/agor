@@ -23,7 +23,11 @@ export function createBoardBranchMover(
       deferWithTenantContext(
         params,
         async () => {
-          app.emit('realtime:authorization-invalidated', { tenantId, disconnectSockets: true });
+          app.emit('realtime:authorization-invalidated', {
+            tenantId,
+            disconnectSockets: true,
+            affectedBranchId: branchId,
+          });
         },
         () => console.warn('[realtime] Failed to schedule authorization eviction')
       );

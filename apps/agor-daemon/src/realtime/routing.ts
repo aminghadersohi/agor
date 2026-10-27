@@ -59,6 +59,13 @@ export const HA_AUTHORIZATION_INVALIDATION_EVENT = 'agor:authorization-invalidat
 export interface RealtimeAuthorizationInvalidation {
   tenantId?: unknown;
   disconnectSockets?: boolean;
+  /**
+   * Validated single-branch mutation target. Only already-authenticated Task
+   * executors bound to a different branch can retain their task-only channel.
+   * Caches and all other socket principals still receive full invalidation.
+   * Missing/invalid scope retains tenant-wide eviction.
+   */
+  affectedBranchId?: unknown;
 }
 
 /** Internal exact executor-token revocation signal. */

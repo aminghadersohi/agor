@@ -22,6 +22,7 @@ import {
 } from '@agor/core/config';
 import { shortId } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
+import { isValidUUID } from '@agor/core/ids';
 import {
   type Board,
   type BoardID,
@@ -32,6 +33,7 @@ import {
   type CursorMoveEvent,
   MAX_PRESENCE_BOARD_SUBSCRIPTIONS,
   MAX_TENANT_ID_LENGTH,
+  type Params,
   PRESENCE_SOCKET_EVENTS,
   type PresenceHeartbeatEvent,
   type PresenceLeftEvent,
@@ -47,6 +49,7 @@ import {
   retireAuthenticatedConnectionAuthority,
 } from '../auth/authenticated-connection-authority.js';
 import { getOrCreateExecutorConnectionRevocationFence } from '../auth/executor-connection-admission.js';
+import { authenticatedTaskExecutorRuntimeAuthority } from '../auth/executor-runtime-scope.js';
 import type { ExecutorSessionTokenRevocation } from '../auth/executor-session-token.js';
 import { getDaemonOperationalMetrics } from '../metrics/operational.js';
 import {
@@ -888,8 +891,40 @@ export function createSocketIOConfig(
       // A reconnect can land on this same replica immediately and must not
       // inherit a warmed pre-revocation ACL cache or terminal allocation.
       app.emit(LOCAL_AUTHORIZATION_INVALIDATION_EVENT, { tenantId: data.tenantId });
+      const affectedBranchId =
+        typeof data.affectedBranchId === 'string' && isValidUUID(data.affectedBranchId)
+          ? data.affectedBranchId.toLowerCase()
+          : undefined;
       for (const socket of io.sockets.sockets.values()) {
         if (getSocketAuthState(socket).tenant?.tenant_id === data.tenantId) {
+          const connection = (socket as FeathersSocket).feathers;
+          const authority = getAuthenticatedConnectionAuthority(connection);
+          if (
+            affectedBranchId &&
+            authority?.principal.kind === 'executor' &&
+            (authority.expiresAt === undefined || authority.expiresAt > Date.now())
+          ) {
+            let task: ReturnType<typeof authenticatedTaskExecutorRuntimeAuthority> = null;
+            try {
+              task = authenticatedTaskExecutorRuntimeAuthority({
+                ...connection,
+                provider: 'socketio',
+                connection,
+              } as Params);
+            } catch {
+              /* Invalid legacy projections never exempt eviction. */
+            }
+            // Task executors join only their exact Task channel, not passive
+            // board/user rooms. A branch-local ACL change cannot stale another
+            // branch's lease. Every service still checks current authorization;
+            // token retirement and broad identity changes still evict normally.
+            if (
+              task?.tenantId === data.tenantId &&
+              isValidUUID(task.branchId) &&
+              task.branchId.toLowerCase() !== affectedBranchId
+            )
+              continue;
+          }
           socket.disconnect(true);
         }
       }

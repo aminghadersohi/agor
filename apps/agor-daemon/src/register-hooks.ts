@@ -61,6 +61,7 @@ import {
   Unavailable,
 } from '@agor/core/feathers';
 import { redactGatewayChannelSecrets } from '@agor/core/gateway';
+import { isValidUUID } from '@agor/core/ids';
 import {
   boardCommentQueryValidator,
   boardObjectQueryValidator,
@@ -1136,6 +1137,21 @@ export function redactGatewayChannelResultsForTransport(context: HookContext): H
 
 export type RealtimeAuthorizationInvalidationMode = 'none' | 'cache' | 'evict';
 
+/** Only successful single-branch writes can narrow Task-executor eviction. */
+export function authorizationInvalidationBranchId(
+  context: Pick<HookContext, 'path' | 'params' | 'result'>
+): string | undefined {
+  // These are the service's validated mutation target, never a caller's
+  // proposed scope field. Bulk/unknown results deliberately stay tenant-wide.
+  const id =
+    context.path === 'branches/:id/permissions'
+      ? context.params.route?.id
+      : context.path === 'branches' && context.result && !Array.isArray(context.result)
+        ? context.result.branch_id
+        : undefined;
+  return typeof id === 'string' && isValidUUID(id) ? id.toLowerCase() : undefined;
+}
+
 const PRIMARY_TEAMMATE_INVALIDATION_MODE = Symbol('primaryTeammateInvalidationMode');
 
 type PrimaryTeammateAuthorizationState = Pick<Board, 'board_id' | 'primary_teammate_id'>;
@@ -1863,12 +1879,15 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     context: HookContext,
     mode: Exclude<RealtimeAuthorizationInvalidationMode, 'none'>
   ): HookContext => {
+    const affectedBranchId =
+      mode === 'evict' ? authorizationInvalidationBranchId(context) : undefined;
     deferWithTenantContext(
       context.params,
       async () => {
         app.emit('realtime:authorization-invalidated', {
           tenantId: requireCurrentTenantId(),
           disconnectSockets: mode === 'evict',
+          ...(affectedBranchId ? { affectedBranchId } : {}),
         });
       },
       () => console.warn('[realtime] Failed to schedule authorization eviction')

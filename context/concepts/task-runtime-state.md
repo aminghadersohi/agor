@@ -495,6 +495,16 @@ does not exempt executors from authorization or replay uncertain writes:
 transcript/tool mutations with lost acknowledgements still fail explicitly,
 and durable terminal state remains first-writer-wins.
 
+Single-branch invalidations still clear all tenant authorization caches and
+evict passive user/terminal capabilities. Their validated branch scope only
+spares an already-authenticated Task executor bound to a different branch:
+these executors subscribe exclusively to their exact Task channel, not board
+or user rooms. The affected branch's executors, taskless commands, missing or
+malformed scope, expired authority and tenant-wide identity/policy changes
+retain eviction. Exact token retirement remains independent. Preserving an
+unrelated Task's socket prevents losing its in-flight transcript/terminal RPC
+acknowledgements; it does not authorize replay or relax per-request RBAC.
+
 ## Code map
 
 | Responsibility                                         | Primary code                                                                                   |
