@@ -2,7 +2,7 @@ import type { Server as HttpServer } from 'node:http';
 import { type AgorClient, createClient } from '@agor/core/api';
 import { getCurrentTenantId, runWithTenantContext } from '@agor/core/db';
 import { AuthenticationService, feathers, feathersExpress, socketio } from '@agor/core/feathers';
-import { type Params, ROLES } from '@agor/core/types';
+import { MessageRole, type Params, ROLES } from '@agor/core/types';
 import jwt from 'jsonwebtoken';
 import { afterEach, describe, expect, it } from 'vitest';
 import { getAuthenticatedConnectionAuthority } from '../auth/authenticated-connection-authority.js';
@@ -242,6 +242,9 @@ async function startHarness(
   app.use(
     'messages',
     {
+      async create(data: unknown) {
+        return data;
+      },
       async get(id: string) {
         return { message_id: id };
       },
@@ -459,6 +462,139 @@ describe('executor Socket.IO connection capability', () => {
     expect(other.client.io.connected).toBe(false);
   });
 
+  it('preserves an unrelated Task RPC across branch-scoped permission and board eviction', async () => {
+    const harness = await startHarness();
+    harnesses.push(harness);
+    const serverSocket = harness.socketConfig
+      .getSocketServer()
+      ?.sockets.sockets.get(harness.client.io.id!);
+    if (!serverSocket) throw new Error('Expected executor socket');
+    let entered!: () => void;
+    let release!: () => void;
+    let reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let finishes = 0;
+    harness.app.service('tasks' as never).hooks({
+      before: {
+        all: [
+          async (context) => {
+            if (context.params.provider) {
+              if (String(context.method) === 'finish') finishes += 1;
+              entered();
+              await gate;
+            }
+            return context;
+          },
+        ],
+      },
+    });
+    const read = harness.client.service('tasks').get(TASK_ID);
+    void read.catch(() => undefined);
+    try {
+      await reached;
+      harness.app.emit('realtime:authorization-invalidated', {
+        tenantId: TENANT_ID,
+        affectedBranchId: '018f0000-0000-7000-8000-0000000000b4',
+      });
+      expect(serverSocket.connected).toBe(true);
+    } finally {
+      release();
+    }
+    await expect(read).resolves.toMatchObject({ task_id: TASK_ID, tenant_id: TENANT_ID });
+    expect(executorRoomConnections(harness)).toHaveLength(1);
+
+    reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let outputWrites = 0;
+    harness.app.service('messages' as never).hooks({
+      before: {
+        create: [
+          async (context) => {
+            outputWrites += 1;
+            entered();
+            await gate;
+            return context;
+          },
+        ],
+      },
+    });
+    const output = harness.client.service('messages').create({
+      session_id: SESSION_ID,
+      task_id: TASK_ID,
+      type: 'assistant',
+      role: MessageRole.ASSISTANT,
+      index: 0,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      content: 'Acknowledged tool output',
+      content_preview: 'Acknowledged tool output',
+    });
+    void output.catch(() => undefined);
+    try {
+      await reached;
+      harness.app.emit('realtime:authorization-invalidated', {
+        tenantId: TENANT_ID,
+        affectedBranchId: '018f0000-0000-7000-8000-0000000000b4',
+      });
+      expect(serverSocket.connected).toBe(true);
+    } finally {
+      release();
+    }
+    await expect(output).resolves.toMatchObject({ content: 'Acknowledged tool output' });
+    expect(outputWrites).toBe(1);
+
+    reached = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tasks = harness.client.service('tasks') as unknown as {
+      methods(...names: string[]): void;
+      finish(data: { task_id: string; status: 'completed' }): Promise<unknown>;
+    };
+    tasks.methods('finish');
+    const finish = tasks.finish({ task_id: TASK_ID, status: 'completed' });
+    void finish.catch(() => undefined);
+    try {
+      await reached;
+      harness.app.emit('realtime:authorization-invalidated', {
+        tenantId: TENANT_ID,
+        affectedBranchId: '018f0000-0000-7000-8000-0000000000b4',
+      });
+      expect(serverSocket.connected).toBe(true);
+    } finally {
+      release();
+    }
+    const disconnected = waitForDisconnect(harness.client);
+    await expect(finish).resolves.toMatchObject({ accepted: true, status: 'completed' });
+    await disconnected; // exact token retirement still closes the preserved socket
+    expect(finishes).toBe(1);
+  });
+
+  it.each([undefined, null, '', 'not-a-branch', { branchId: BRANCH_ID }, BRANCH_ID.toUpperCase()])(
+    'still evicts affected Task executors or unscoped/malformed invalidations (%j)',
+    async (affectedBranchId) => {
+      const harness = await startHarness();
+      harnesses.push(harness);
+      const disconnected = waitForDisconnect(harness.client);
+      harness.app.emit('realtime:authorization-invalidated', {
+        tenantId: TENANT_ID,
+        affectedBranchId,
+      });
+      await disconnected;
+      expect(harness.client.io.connected).toBe(false);
+      expect(executorRoomConnections(harness)).toHaveLength(0);
+    }
+  );
+
   it('projects a taskless command as the initiating user without granting a task room', async () => {
     const harness = await startHarness();
     harnesses.push(harness);
@@ -496,6 +632,14 @@ describe('executor Socket.IO connection capability', () => {
         tenant_id: TENANT_ID,
         user_id: USER_ID,
       });
+      const disconnected = waitForDisconnect(commandClient);
+      harness.app.emit('realtime:authorization-invalidated', {
+        tenantId: TENANT_ID,
+        affectedBranchId: '018f0000-0000-7000-8000-0000000000b4',
+      });
+      await disconnected;
+      expect(commandClient.io.connected).toBe(false); // taskless capabilities are not exempt
+      expect(harness.client.io.connected).toBe(true); // the exact, unrelated Task lease is
     } finally {
       commandClient.io.close();
     }

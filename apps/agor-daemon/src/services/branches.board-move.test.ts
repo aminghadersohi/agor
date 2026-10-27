@@ -380,7 +380,11 @@ dbTest(
       socketio({}, (io) => {
         // Match the production invalidation listener's synchronous disconnection.
         f.app.on('realtime:authorization-invalidated', (data) => {
-          expect(data).toEqual({ tenantId, disconnectSockets: true });
+          expect(data).toEqual({
+            tenantId,
+            disconnectSockets: true,
+            affectedBranchId: f.branch.branch_id,
+          });
           order.push('evicted');
           io.disconnectSockets(true);
         });

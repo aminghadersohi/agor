@@ -36,6 +36,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   AUTHENTICATED_RBAC_SERVICE_PATHS,
+  authorizationInvalidationBranchId,
   CLAUDE_CREDENTIAL_WRITE_ADMISSION_SERVICE_PATHS,
   CONSTRAINED_HA_PROCESS_AFFINE_SERVICE_GATES,
   classifyPrimaryTeammateAuthorizationInvalidation,
@@ -78,6 +79,49 @@ const makeSession = (sessionId: string): import('@agor/core/types').Session =>
     ready_for_prompt: false,
     archived: false,
   }) as import('@agor/core/types').Session;
+
+describe('single-branch authorization invalidation scope', () => {
+  const branchId = '018f0000-0000-7000-8000-0000000000a4';
+  it('uses only the successful branch result or permission route, never proposed scope fields', () => {
+    expect(
+      authorizationInvalidationBranchId({
+        path: 'branches',
+        params: { query: { affectedBranchId: 'forged' } },
+        result: { branch_id: branchId },
+      })
+    ).toBe(branchId);
+    expect(
+      authorizationInvalidationBranchId({
+        path: 'branches/:id/permissions',
+        params: { route: { id: branchId.toUpperCase() } },
+        result: { affectedBranchId: 'forged' },
+      })
+    ).toBe(branchId);
+  });
+  it.each([
+    'users',
+    'boards',
+    'boards/:id/permissions',
+    'group-memberships',
+    OWNERSHIP_TRANSFER_SERVICES.branch,
+  ])('keeps %s invalidations tenant-wide even with a branch-looking result', (path) => {
+    expect(
+      authorizationInvalidationBranchId({
+        path,
+        params: { route: { id: branchId } },
+        result: { branch_id: branchId },
+      })
+    ).toBeUndefined();
+  });
+  it.each([undefined, null, {}, [], [{ branch_id: branchId }], { branch_id: 'bad' }])(
+    'does not narrow unknown or bulk branch results',
+    (result) => {
+      expect(
+        authorizationInvalidationBranchId({ path: 'branches', params: {}, result })
+      ).toBeUndefined();
+    }
+  );
+});
 
 describe('classifyRealtimeAuthorizationInvalidation', () => {
   const classify = (path: string, method: HookContext['method'], data: unknown = {}) =>
