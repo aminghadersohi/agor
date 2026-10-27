@@ -42,6 +42,8 @@ export * from './encryption';
 // First-run admin bootstrap (creates default admin if no users exist; also
 // re-attributes legacy 'anonymous' created_by rows from removed anonymous mode)
 export * from './first-run-bootstrap';
+// Explicit DB-owner CLI maintenance; never registered as a tenant service.
+export * from './maintenance-admission';
 // Migrations
 export * from './migrate';
 export * from './oauth-secret-envelope';

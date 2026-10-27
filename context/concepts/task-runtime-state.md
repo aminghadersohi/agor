@@ -610,3 +610,18 @@ Uncertainty marks the failed branch for attention, without automatically clearin
 human flag. Stable-key bounded discovery advances past frozen tenants and wraps at a
 finite-cycle watermark. Target/access failures before the fence remain `pending`. None of these
 states modifies schedule enabled state, cadence, budgets, permissions, or replays work.
+
+### Operator maintenance admission
+
+The explicit PostgreSQL operator CLI can install/acquire a database-level
+maintenance admission fence independently of daemon startup. New Task/Session
+admission is held across all tenants; previously admitted Tasks drain normally,
+and sealing requires stable global zero without launcher/coordinator exclusions.
+Expiry invalidates readiness but never silently reopens ingress. Authorization,
+revocation, terminal immutability and no-replay rules stay in force.
+
+Database admission drain is not executor/process quiescence. In particular,
+old read-only terminal launch paths are not covered by write triggers, so this
+alone does not establish an all-ingress first-bootstrap gate. See the operator
+contract and explicit bootstrap limitation in
+[`maintenance-admission.mdx`](../../apps/agor-docs/content/guide/maintenance-admission.mdx).
