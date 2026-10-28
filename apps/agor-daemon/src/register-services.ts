@@ -394,6 +394,7 @@ import { requireMinimumRole } from './utils/authorization.js';
 import { scopeFindToAccessibleBranchesSql } from './utils/branch-authorization.js';
 import { emitServiceEvent } from './utils/emit-service-event.js';
 import { renderOAuthResultPage } from './utils/html.js';
+import { assertManagedBranchPath } from './utils/managed-branch-path.js';
 import { emitMarketplaceChanged } from './utils/marketplace-invalidation.js';
 import { createAuthorityGuardedMCPFetch } from './utils/mcp-authority-fetch.js';
 import {
@@ -1477,7 +1478,11 @@ export function createExecuteHandler(
           const repo = await new RepoRepository(tenantDb).findById(branch.repo_id);
           baseRepoPath = repo?.local_path ?? undefined;
         }
-        return { path: branch.path, baseRepoPath, sdkHome: branch.sdk_home ?? null };
+        return {
+          path: assertManagedBranchPath(branch.path, tenantId),
+          baseRepoPath,
+          sdkHome: branch.sdk_home ?? null,
+        };
       });
       if (!branchMounts)
         throw new Error(`Branch ${session.branch_id} not found for executor startup`);

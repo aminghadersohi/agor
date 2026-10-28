@@ -2550,7 +2550,75 @@ export function getBranchesDir(tenantId?: string): string {
  * @returns Absolute path to the branch
  */
 export function getBranchPath(repoSlug: string, branchName: string, tenantId?: string): string {
+  assertSafeWorkspaceSegments(repoSlug, 'Repository slug');
+  assertSafeWorkspaceSegments(branchName, 'Branch name');
   return path.join(getBranchesDir(tenantId), repoSlug, branchName);
+}
+
+/**
+ * Reject a relative path component sequence that could leave its parent once
+ * joined: absolute values, backslashes, NULs, and empty, `.` or `..` segments.
+ */
+export function assertSafeWorkspaceSegments(value: string, label: string): void {
+  if (
+    typeof value !== 'string' ||
+    !value ||
+    value.startsWith('/') ||
+    value.includes('\\') ||
+    value.includes('\0') ||
+    value.split('/').some((segment) => !segment || segment === '.' || segment === '..')
+  ) {
+    throw new Error(`${label} ${JSON.stringify(value)} is not a valid workspace path segment`);
+  }
+}
+
+/**
+ * Pure containment rule for a stored branch path: an absolute, normalized
+ * directory at least `<repoSlug>/<branchName>` deep below `branchesRoot`.
+ */
+export function isManagedBranchPath(branchPath: unknown, branchesRoot: string): boolean {
+  if (typeof branchPath !== 'string' || !path.isAbsolute(branchPath)) return false;
+  if (
+    branchPath.includes('\0') ||
+    branchPath.endsWith(path.sep) ||
+    path.normalize(branchPath) !== branchPath
+  )
+    return false;
+  const relative = path.relative(path.resolve(branchesRoot), branchPath);
+  if (!relative || path.isAbsolute(relative)) return false;
+  const segments = relative.split(path.sep);
+  // `<org>/<repo>/<branch...>`: a repo directory holds every branch of that repo.
+  return segments.length >= 3 && segments.every((segment) => segment && segment !== '..');
+}
+
+/**
+ * The pre-`data_home` branches location. The documented local-to-containerized
+ * migration leaves it as a symlink to the new root, so older rows still name it.
+ */
+export function getLegacyBranchesDir(): string {
+  return path.join(getAgorHome(), 'worktrees');
+}
+
+/**
+ * Every stored spelling of one workspace: `branchPath` under the tenant root
+ * and under the legacy alias. Overlap checks compare strings, so they must try
+ * both; an alias that does not resolve to the root only over-refuses.
+ */
+export function branchPathSpellings(branchPath: string, tenantId?: string): string[] {
+  const roots = [getLegacyBranchesDir()];
+  try {
+    roots.unshift(getBranchesDir(tenantId));
+  } catch {
+    // Filesystem isolation without a tenant derives no root; sinks refuse such rows.
+  }
+  const spellings = new Set([branchPath]);
+  for (const root of roots) {
+    const relative = path.relative(root, branchPath);
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`)) continue;
+    if (path.isAbsolute(relative)) continue;
+    for (const other of roots) spellings.add(path.join(other, relative));
+  }
+  return [...spellings];
 }
 
 /**

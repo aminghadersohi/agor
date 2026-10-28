@@ -94,6 +94,7 @@ import {
 import { ensureBranchWorkspaceAccess } from '../../utils/branch-workspace-path.js';
 import { resolveDelegatedExecutionHomeKey } from '../../utils/executor-delegated-home.js';
 import { ingestInboundAttachments, isIngestableFile } from '../../utils/gateway-attachments.js';
+import { assertManagedBranchPath } from '../../utils/managed-branch-path.js';
 import { getDaemonUrl, requestExecutor } from '../../utils/spawn-executor.js';
 import {
   listTeamsAnchoredChannels,
@@ -2121,7 +2122,10 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
             sessionId: ctx.sessionId,
             uploadRef: ref,
             filename: metadata.name,
-            cwd: workspace.branch.path,
+            cwd: assertManagedBranchPath(
+              workspace.branch.path,
+              ctx.baseServiceParams.tenant?.tenant_id
+            ),
             principalBranchAccess: workspace.fsAccess,
             ...(sandboxHomeStore ? { sandboxHomeStore } : {}),
           },
@@ -2980,7 +2984,7 @@ export function registerGatewayChannelTools(server: McpServer, ctx: McpContext):
               filename: args.filename,
               comment: args.comment,
               maxBytes: getUploadLimits().maxFileBytes,
-              cwd: branch.path,
+              cwd: assertManagedBranchPath(branch.path, ctx.baseServiceParams.tenant?.tenant_id),
               principalBranchAccess: branchFsAccess,
               ...sandboxMounts,
             },
