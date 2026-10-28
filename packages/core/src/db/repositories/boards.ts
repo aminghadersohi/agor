@@ -27,6 +27,7 @@ import type {
   EffectiveCapabilityPolicyAccess,
   UserID,
   UUID,
+  ZoneBoardObject,
   ZoneLayout,
 } from '@agor/core/types';
 import { EXECUTING_SESSION_STATUSES, isTeammate } from '@agor/core/types';
@@ -46,6 +47,7 @@ import {
 import * as yaml from 'js-yaml';
 import { getBaseUrl } from '../../config/config-manager';
 import { normalizeZoneLayoutPolicy, zoneLayoutBinding } from '../../layout/zone-layout.js';
+import { resolveZoneLayoutWrite } from '../../layout/zone-layout-arrangement.js';
 import { generateId, isValidUUID } from '../../lib/ids';
 import { generateSlug } from '../../lib/slugs';
 import { normalizeExactEmojiShortcode } from '../../utils/emoji-shortcodes';
@@ -303,6 +305,41 @@ function keepZoneArrangement(
     ...(incoming.order === undefined && existing.order !== undefined
       ? { order: existing.order }
       : {}),
+  };
+}
+
+/**
+ * Normalize a zone write at the persistence boundary. An arranged layout
+ * (row/column/grid) or `free` never erases the zone's policy (see
+ * `resolveZoneLayoutWrite`); any policy is normalized, and a new zone with no
+ * explicit policy inherits the board defaults, so UI and MCP paths can't drift.
+ */
+function normalizeZoneWrite(
+  board: Pick<Board, 'zone_layout_defaults'>,
+  existing: BoardObject | undefined,
+  objectData: ZoneBoardObject
+): ZoneBoardObject {
+  const zoneData = resolveZoneLayoutWrite(
+    existing?.type === 'zone' ? existing : undefined,
+    objectData,
+    board.zone_layout_defaults
+  );
+  if (typeof zoneData.layout === 'string') return zoneData;
+  const isNew = existing === undefined;
+  const binding = isNew
+    ? zoneData.layout_binding !== undefined
+      ? zoneLayoutBinding(zoneData)
+      : zoneData.layout !== undefined
+        ? 'override'
+        : 'inherit'
+    : zoneLayoutBinding(zoneData);
+  return {
+    ...zoneData,
+    layout_binding: binding,
+    layout:
+      binding === 'inherit'
+        ? normalizeZoneLayoutPolicy(board.zone_layout_defaults)
+        : normalizeZoneLayoutPolicy(zoneData.layout),
   };
 }
 
@@ -1347,23 +1384,8 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       }
 
       const existing = current.objects?.[objectId];
-      let normalizedObject = objectData;
-      if (objectData.type === 'zone' && typeof objectData.layout !== 'string') {
-        const defaults = normalizeZoneLayoutPolicy(current.zone_layout_defaults);
-        const isNew = existing === undefined;
-        const binding = isNew
-          ? objectData.layout_binding !== undefined
-            ? zoneLayoutBinding(objectData)
-            : objectData.layout !== undefined
-              ? 'override'
-              : 'inherit'
-          : zoneLayoutBinding(objectData);
-        normalizedObject = {
-          ...objectData,
-          layout_binding: binding,
-          layout: binding === 'inherit' ? defaults : normalizeZoneLayoutPolicy(objectData.layout),
-        };
-      }
+      const normalizedObject =
+        objectData.type === 'zone' ? normalizeZoneWrite(current, existing, objectData) : objectData;
 
       // Add or update the object. New zones with no explicit policy inherit the
       // board default here at the persistence boundary, so UI and MCP creation
@@ -1464,8 +1486,9 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
               (typeof object.layout === 'string' || zoneLayoutBinding(object) !== 'inherit')
             )
               continue;
+            const { suspended_layout: _parked, ...unparked } = object;
             const next = {
-              ...object,
+              ...unparked,
               layout_binding: 'inherit' as const,
               layout: normalizedDefaults,
             };
@@ -1746,16 +1769,19 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         if (typeof zIndex === 'number' && Number.isFinite(zIndex)) {
           merged.zIndex = Math.min(Z_MAX, Math.max(Z_MIN, zIndex));
         }
-        if (existing.type === 'zone' && ZONE_LAYOUTS.includes(layout as ZoneLayout)) {
-          merged.layout = layout as ZoneLayout;
-        }
+        const switchesLayout =
+          existing.type === 'zone' && ZONE_LAYOUTS.includes(layout as ZoneLayout);
+        if (switchesLayout) merged.layout = layout as ZoneLayout;
         const zoneOrder = existing.type === 'zone' ? sanitizeZoneOrder(order) : undefined;
         if (zoneOrder) merged.order = zoneOrder;
         if (existing.type === 'zone' && typeof width === 'number' && Number.isFinite(width)) {
           (merged as { width?: number }).width = Math.max(1, width);
         }
         if (Object.keys(merged).length === 0) continue;
-        updatedObjects[objectId] = { ...existing, ...merged } as BoardObject;
+        updatedObjects[objectId] =
+          switchesLayout && existing.type === 'zone'
+            ? normalizeZoneWrite(current, existing, { ...existing, ...merged } as typeof existing)
+            : ({ ...existing, ...merged } as BoardObject);
       }
 
       return this.update(fullId, { objects: updatedObjects });

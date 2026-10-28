@@ -142,6 +142,21 @@ describe('planBoardZoneArrangement', () => {
     }
   });
 
+  it('moves a fixed-frame zone as one rectangle and leaves its items in place', () => {
+    const plan = planBoardZoneArrangement([
+      zone('packed', 0, 0, [item('one', 380, 100)]),
+      {
+        ...zone('gridded', 900, 900, [item('note', 200, 100, 40, 120)]),
+        width: 1060,
+        height: 300,
+        fixedFrame: true,
+      },
+    ]);
+    const gridded = plan.zones.find(({ id }) => id === 'gridded');
+    expect(gridded).toMatchObject({ width: 1060, height: 300 });
+    expect(gridded?.items).toEqual([expect.objectContaining({ id: 'note', x: 40, y: 120 })]);
+  });
+
   it('keeps empty zones useful and compact lists single-column', () => {
     const plan = planBoardZoneArrangement([
       zone('empty', 0, 0, []),

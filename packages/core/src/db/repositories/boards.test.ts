@@ -2872,9 +2872,111 @@ describe('BoardRepository.batchUpsertBoardObjects zone arrangement', () => {
       order: ['b', 'a'],
     });
 
+    // With no policy to return to, free hands the zone to the board defaults.
     const freed = await repo.batchUpsertBoardObjects(board.board_id, {
       'zone-1': { type: 'zone', x: 0, y: 0, width: 1, height: 1, label: 'Renamed', layout: 'free' },
     });
-    expect(freed.objects?.['zone-1']).toMatchObject({ layout: 'free' });
+    expect(freed.objects?.['zone-1']).toMatchObject({
+      layout: normalizeZoneLayoutPolicy(undefined),
+      layout_binding: 'inherit',
+    });
+  });
+});
+
+describe('BoardRepository zone layouts never erase a zone policy', () => {
+  const autoPolicy = normalizeZoneLayoutPolicy({
+    mode: 'auto',
+    preset: 'compact_list',
+    sortBy: 'updated',
+    sortDirection: 'desc',
+    resize: 'height',
+    onOverflow: 'reflow_board',
+  });
+  const zoneWith = (layout: unknown) =>
+    ({ type: 'zone', x: 0, y: 0, width: 760, height: 400, label: 'Review', layout }) as Extract<
+      BoardObject,
+      { type: 'zone' }
+    >;
+
+  dbTest('a grid switch parks the policy and free restores it', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const board = await repo.create(createBoardData({ objects: {} }));
+    await repo.upsertBoardObject(board.board_id, 'zone-1', zoneWith(autoPolicy));
+
+    // The upstream layout picker writes only the layout string and order.
+    const gridded = await repo.mergeBoardObjectFields(board.board_id, {
+      'zone-1': { layout: 'grid', order: ['b', 'a'] } as Partial<BoardObject>,
+    });
+    expect(gridded.objects?.['zone-1']).toMatchObject({
+      layout: 'grid',
+      order: ['b', 'a'],
+      suspended_layout: { layout: autoPolicy, layout_binding: 'override' },
+    });
+
+    // A UI rename echoes the zone without the server-maintained field.
+    const renamed = await repo.upsertBoardObject(board.board_id, 'zone-1', {
+      ...zoneWith('grid'),
+      label: 'Renamed',
+    });
+    expect(renamed.objects?.['zone-1']).toMatchObject({
+      label: 'Renamed',
+      layout: 'grid',
+      suspended_layout: { layout: autoPolicy },
+    });
+
+    // Switching to free (placeZoneEntities) upserts the zone with layout 'free'.
+    const freed = await repo.upsertBoardObject(board.board_id, 'zone-1', {
+      ...zoneWith('free'),
+      label: 'Renamed',
+      order: [],
+    } as BoardObject);
+    const zone = freed.objects?.['zone-1'];
+    expect(zone).toMatchObject({ layout: autoPolicy, layout_binding: 'override' });
+    expect(zone).not.toHaveProperty('suspended_layout');
+  });
+
+  dbTest('free keeps an existing policy and a new free zone inherits defaults', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const defaults = normalizeZoneLayoutPolicy({ mode: 'auto', preset: 'grid', columns: 2 });
+    const board = await repo.create(
+      createBoardData({ objects: {}, zone_layout_defaults: defaults })
+    );
+    await repo.upsertBoardObject(board.board_id, 'kept', zoneWith(autoPolicy));
+
+    // Agents echoing a zone with layout 'free' (the documented MCP value) must not reset it.
+    const echoed = await repo.batchUpsertBoardObjects(board.board_id, {
+      kept: { ...zoneWith('free'), label: 'Echoed' },
+      created: zoneWith('free'),
+    });
+    expect(echoed.objects?.kept).toMatchObject({ label: 'Echoed', layout: autoPolicy });
+    expect(echoed.objects?.created).toMatchObject({ layout: defaults, layout_binding: 'inherit' });
+
+    const merged = await repo.mergeBoardObjectFields(board.board_id, {
+      kept: { layout: 'free' } as Partial<BoardObject>,
+    });
+    expect(merged.objects?.kept).toMatchObject({ layout: autoPolicy });
+  });
+
+  dbTest('an inheriting zone comes back to the current board defaults', async ({ db }) => {
+    const repo = new BoardRepository(db);
+    const board = await repo.create(createBoardData({ objects: {} }));
+    await repo.upsertBoardObject(board.board_id, 'zone-1', {
+      ...zoneWith(undefined),
+      layout_binding: 'inherit',
+    } as BoardObject);
+    await repo.mergeBoardObjectFields(board.board_id, {
+      'zone-1': { layout: 'row' } as Partial<BoardObject>,
+    });
+
+    const defaults = normalizeZoneLayoutPolicy({ mode: 'auto', preset: 'compact_list' });
+    // Not applied to the row zone: it doesn't follow defaults while arranged.
+    await repo.setZoneLayoutDefaults(board.board_id, defaults);
+    const freed = await repo.mergeBoardObjectFields(board.board_id, {
+      'zone-1': { layout: 'free' } as Partial<BoardObject>,
+    });
+    expect(freed.objects?.['zone-1']).toMatchObject({
+      layout: defaults,
+      layout_binding: 'inherit',
+    });
   });
 });

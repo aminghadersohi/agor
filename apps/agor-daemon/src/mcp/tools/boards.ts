@@ -40,6 +40,10 @@ import {
   type ZoneLayoutSortItem,
   zoneLayoutBinding,
 } from '@agor/core/layout/zone-layout';
+import {
+  arrangedZoneLayout,
+  arrangedZoneShownSize,
+} from '@agor/core/layout/zone-layout-arrangement';
 import type {
   Board,
   BoardEntityObject,
@@ -89,6 +93,9 @@ const BOARD_ENTITY_TYPES = ['branch', 'card'] as const satisfies readonly BoardE
 // These match the rendered React Flow nodes.  Keeping the dimensions here is
 // important: a zone arrange must never blindly use the branch-card spacing for
 // every entity or it can place the last row below the zone.
+/** The canvas's height estimate for an unmeasured card in a row, column or grid zone. */
+const ARRANGED_CARD_FALLBACK_HEIGHT = 120;
+
 const ARRANGE_DIMENSIONS = {
   branch: { width: 500, height: 200 },
   // A card with only a title is roughly one header row. Content adds height
@@ -378,6 +385,56 @@ async function arrangeBoardZones(
     zoneEntries.map(async ([zoneId, zone]) => {
       const zonePolicy = normalizeZoneLayoutPolicy(zone.layout);
       const contents = visible.filter((entity) => entity.zone_id === zoneId);
+      const canvasById = new Map(
+        Object.entries(board.objects ?? {}).filter(
+          ([objectId]) => zoneForCanvasId.get(objectId) === zoneId
+        )
+      );
+      const canvasItems = [...canvasById]
+        .map(([id, object]) => ({
+          id,
+          position: { x: object.x - zone.x, y: object.y - zone.y },
+          ...getCanvasObjectDimensions(object),
+        }))
+        .sort(
+          (a, b) =>
+            a.position.y - b.position.y || a.position.x - b.position.x || a.id.localeCompare(b.id)
+        );
+      // A row, column or grid zone places its own cards: it moves as one
+      // rectangle at the height it is shown, and its cards are never written.
+      const shown = arrangedZoneLayout(zone)
+        ? arrangedZoneShownSize(
+            zone,
+            contents.map((entity) => ({
+              id: entity.branch_id ?? `card-${entity.card_id}`,
+              position: entity.position,
+              height:
+                measuredSize(entity)?.height ??
+                (entity.entity_type === 'card' ? ARRANGED_CARD_FALLBACK_HEIGHT : 200),
+            }))
+          )
+        : undefined;
+      if (shown) {
+        return {
+          id: zoneId,
+          zone,
+          itemCount: canvasItems.length,
+          entitiesById: new Map<string, BoardEntityObject>(),
+          canvasById,
+          x: zone.x,
+          y: zone.y,
+          width: zone.width,
+          height: shown.height,
+          fontSize: zone.fontSize,
+          status: zone.status,
+          layout: zonePolicy,
+          resizable: false,
+          fixedFrame: true,
+          minWidth: zone.width,
+          minHeight: shown.height,
+          items: canvasItems,
+        };
+      }
       // Sorting by anything other than position needs the card/branch records;
       // an unmeasured card needs them too, to estimate its rendered height.
       const metadata = await loadEntityLayoutMetadata(
@@ -469,22 +526,6 @@ async function arrangeBoardZones(
           ...ARRANGE_DIMENSIONS[entity.entity_type],
         };
       });
-      const canvasById = new Map(
-        Object.entries(board.objects ?? {}).filter(
-          ([objectId]) => zoneForCanvasId.get(objectId) === zoneId
-        )
-      );
-      const canvasItems = [...canvasById]
-        .map(([id, object]) => ({
-          id,
-          position: { x: object.x - zone.x, y: object.y - zone.y },
-          ...getCanvasObjectDimensions(object),
-        }))
-        .sort(
-          (a, b) =>
-            a.position.y - b.position.y || a.position.x - b.position.x || a.id.localeCompare(b.id)
-        );
-
       return {
         id: zoneId,
         zone,
@@ -1002,7 +1043,7 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     'agor_boards_update',
     {
       description:
-        'Update board metadata and manage zones/objects. Can update name, icon, background, and create/update zones for organizing branches. Unicode emoji is preferred for icons; common exact shortcodes like ":compass:" are accepted and normalized. Zone objects have: type="zone", x, y, width, height, label, borderColor, backgroundColor, borderStyle (optional), trigger (optional: "always_new" auto-creates sessions, "show_picker" shows agent selection), layout (optional: "free" keeps card positions; "row", "column" and "grid" arrange pinned branches and cards side by side, in one column, or in rows and columns; switch back to free from the UI to keep the shown positions). Text objects have: type="text", x, y, text, fontSize, color. Markdown objects have: type="markdown", x, y, width, height, content.',
+        'Update board metadata and manage zones/objects. Can update name, icon, background, and create/update zones for organizing branches. Unicode emoji is preferred for icons; common exact shortcodes like ":compass:" are accepted and normalized. Zone objects have: type="zone", x, y, width, height, label, borderColor, backgroundColor, borderStyle (optional), trigger (optional: "always_new" auto-creates sessions, "show_picker" shows agent selection), layout (optional; omit it to keep the current layout: "row", "column" and "grid" show pinned branches and cards side by side, in one column, or in rows and columns, parking the zone layout policy; "free" restores that policy, keeps an existing one, and otherwise gives the zone the board zone defaults. Set the arrange policy (manual/auto, preset, sort, resize) with agor_boards_set_zone_layout). Text objects have: type="text", x, y, text, fontSize, color. Markdown objects have: type="markdown", x, y, width, height, content.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         boardId: mcpRequiredId('boardId', 'Board'),
@@ -1565,6 +1606,17 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
 
       if (zone.locked === true)
         return textResult({ boardId, zoneId, applied: false, arranged: 0, updates: [] });
+      const arrangedLayout = arrangedZoneLayout(zone);
+      if (arrangedLayout) {
+        return textResult({
+          boardId,
+          zoneId,
+          applied: false,
+          arranged: 0,
+          updates: [],
+          note: `This zone uses the ${arrangedLayout} layout, which places its cards itself. Set its layout to "free" with agor_boards_update to arrange its contents with the zone policy.`,
+        });
+      }
 
       const zonePolicy = normalizeZoneLayoutPolicy({
         // Normalize the persisted base first so an override supplied by this
@@ -2190,7 +2242,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       if (args.mode === undefined && args.useBoardDefaults !== true) {
         throw new Error('mode is required when useBoardDefaults is not true');
       }
-      const modeTransition = setZoneLayoutMode(zone.layout, args.mode ?? 'manual');
+      // A row, column or grid zone keeps its policy parked; edit that one.
+      const currentPolicy = arrangedZoneLayout(zone) ? zone.suspended_layout?.layout : zone.layout;
+      const modeTransition = setZoneLayoutMode(currentPolicy, args.mode ?? 'manual');
       const layout =
         args.useBoardDefaults === true
           ? normalizeZoneLayoutPolicy(board.zone_layout_defaults)
@@ -2225,7 +2279,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const updatedZone = { ...zone, layout, layout_binding: layoutBinding };
       const changed =
         layoutBinding !== zoneLayoutBinding(zone) ||
-        JSON.stringify(layout) !== JSON.stringify(normalizeZoneLayoutPolicy(zone.layout));
+        JSON.stringify(layout) !== JSON.stringify(normalizeZoneLayoutPolicy(zone.layout)) ||
+        arrangedZoneLayout(zone) !== undefined;
       if (changed) {
         await boardsService.patch(
           boardId,

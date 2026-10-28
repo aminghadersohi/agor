@@ -138,6 +138,24 @@ describe('SessionCanvas zoom shortcuts', () => {
     expect(isCanvasSelectionControlTarget(gridControl)).toBe(true);
   });
 
+  it('does not start a canvas selection gesture from any menu a node opens in a portal', () => {
+    const canvas = document.createElement('div');
+    const menu = document.createElement('ul');
+    menu.className = 'ant-dropdown-menu';
+    const item = document.createElement('li');
+    item.setAttribute('role', 'menuitem');
+    menu.append(item);
+    document.body.append(canvas, menu);
+
+    // A zone's layout menu: React bubbles its pointerdown through the canvas.
+    expect(isCanvasSelectionControlTarget(item, canvas)).toBe(true);
+    const pane = document.createElement('div');
+    canvas.append(pane);
+    expect(isCanvasSelectionControlTarget(pane, canvas)).toBe(false);
+    canvas.remove();
+    menu.remove();
+  });
+
   it('does not capture a portaled modal segmented option as a canvas gesture', () => {
     const modal = document.createElement('div');
     modal.className = 'ant-modal-root';

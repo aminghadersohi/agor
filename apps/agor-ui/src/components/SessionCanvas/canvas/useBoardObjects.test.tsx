@@ -4237,6 +4237,74 @@ describe('arrangeBoardZones production path', () => {
     expect(expanded['p-header']?.compact).toBeUndefined();
   });
 
+  it('moves a grid zone as one rectangle at its shown size and never writes its cards', async () => {
+    const { client, boardsPatch } = makeRoutedClient();
+    const board = makeBoard({
+      // Stored height is stale: the canvas fits a grid zone to its cards.
+      grid: {
+        type: 'zone',
+        x: 900,
+        y: 900,
+        width: 1060,
+        height: 1400,
+        label: 'Grid',
+        layout: 'grid',
+      },
+    });
+    const nodes: Node[] = [
+      // As shown: the grid layout fits the zone to one row of cards.
+      {
+        id: 'grid',
+        type: 'zone',
+        position: { x: 900, y: 900 },
+        width: 1060,
+        height: 320,
+        data: {},
+      },
+      {
+        id: 'branch-a',
+        type: 'branchNode',
+        parentId: 'grid',
+        position: { x: 20, y: 80 },
+        width: 500,
+        height: 220,
+        data: {},
+      },
+    ];
+    const placements = [
+      {
+        object_id: 'p-a',
+        board_id: 'board-1',
+        entity_type: 'branch',
+        branch_id: 'branch-a',
+        zone_id: 'grid',
+        position: { x: 20, y: 80 },
+      },
+    ] as never;
+    const { result } = renderHook(
+      () =>
+        useBoardObjects({
+          board,
+          client,
+          boardObjectsForBoard: placements,
+          nodes,
+          setNodes: vi.fn(),
+          deletedObjectsRef: { current: new Set<string>() },
+          guard: useBoardMutationGuard('board-1', true),
+        }),
+      { wrapper }
+    );
+
+    await act(async () => result.current.arrangeWholeBoard(true));
+
+    const write = boardsPatch.mock.calls[0]?.[1] as {
+      objects: NonNullable<Board['objects']>;
+      placements: Record<string, unknown>;
+    };
+    expect(write.placements).toEqual({});
+    expect(write.objects.grid).toMatchObject({ width: 1060, height: 320, layout: 'grid' });
+  });
+
   it('packs an anchored protruding canvas child inside-out before placing its final zone frame', async () => {
     const { client, boardsPatch } = makeRoutedClient();
     const board = makeBoard({

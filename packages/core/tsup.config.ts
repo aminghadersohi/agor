@@ -15,6 +15,7 @@ export default defineConfig({
     'layout/rectangle-packing': 'src/layout/rectangle-packing.ts',
     'layout/zone-layout': 'src/layout/zone-layout.ts',
     'layout/zone-growth-reflow': 'src/layout/zone-growth-reflow.ts',
+    'layout/zone-layout-arrangement': 'src/layout/zone-layout-arrangement.ts',
     'realtime/index': 'src/realtime/index.ts',
     'executor-protocol': 'src/executor-protocol.ts',
     'oauth/rotating-grant-refresh': 'src/oauth/rotating-grant-refresh.ts',

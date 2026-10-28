@@ -4,6 +4,7 @@ import {
   type NormalizedZoneLayoutPolicy,
   resolveZoneLayoutPolicy,
 } from '@agor/core/layout/zone-layout';
+import { arrangedZoneLayout } from '@agor/core/layout/zone-layout-arrangement';
 import type {
   Board,
   BoardEntityObject,
@@ -279,6 +280,10 @@ export async function planZoneEntityPlacement(
     if (!rectanglesOverlap({ x: object.x, y: object.y, ...size }, zone)) continue;
     occupants.push({ x: object.x - zone.x, y: object.y - zone.y, ...size });
   }
+  // A row, column or grid zone shows its cards in computed slots and fits its
+  // own size on screen: a pin always fits, joins the end of the reading order,
+  // and never resizes the stored zone.
+  const arranged = arrangedZoneLayout(zone) !== undefined;
   const slot = planZoneSlot(zone, occupants, {
     entityWidth: options.entityWidth ?? BRANCH_CARD_WIDTH,
     entityHeight: options.entityHeight ?? BRANCH_CARD_HEIGHT,
@@ -286,17 +291,20 @@ export async function planZoneEntityPlacement(
     titleInset: frame.headerInset,
     gapX: policy.columnGap,
     gapY: policy.rowGap,
-    resize: zone.locked
-      ? 'fixed'
-      : (policy.resize ?? (policy.autoResizeHeight ? 'height' : 'fixed')),
+    resize: arranged
+      ? 'both'
+      : zone.locked
+        ? 'fixed'
+        : (policy.resize ?? (policy.autoResizeHeight ? 'height' : 'fixed')),
   });
   return {
     ...slot,
     boardId: board.board_id as BoardID,
     zoneId,
-    growth: slot.grew
-      ? planZoneGrowthObjects(board, zoneId, { width: slot.width, height: slot.height }, policy)
-      : null,
+    growth:
+      slot.grew && !arranged
+        ? planZoneGrowthObjects(board, zoneId, { width: slot.width, height: slot.height }, policy)
+        : null,
   };
 }
 

@@ -133,6 +133,34 @@ describe('ZoneConfigModal historical tool migration', () => {
     });
   });
 
+  it('holds the layout policy while a grid zone places its own cards', async () => {
+    render(
+      <AntdApp>
+        <ZoneConfigModal
+          open
+          onCancel={vi.fn()}
+          zoneName="Review"
+          objectId="zone-1"
+          onUpdate={vi.fn()}
+          zoneData={{
+            type: 'zone',
+            x: 0,
+            y: 0,
+            width: 620,
+            height: 900,
+            label: 'Review',
+            layout: 'grid',
+          }}
+        />
+      </AntdApp>
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Layout' }));
+    expect(await screen.findByText(/uses the grid layout/)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Use board defaults' })).toBeDisabled();
+    expect(screen.getByRole('spinbutton', { name: 'Horizontal gap' })).toBeDisabled();
+  });
+
   it('resets an explicit layout override to current board defaults only by intent', async () => {
     const onUpdate = vi.fn();
     render(

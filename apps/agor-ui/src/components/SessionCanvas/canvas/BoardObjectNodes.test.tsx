@@ -147,6 +147,26 @@ describe('ZoneNode compact toolbar', () => {
     expect(onSetContentsCompact).toHaveBeenCalledWith('zone-1', true);
   });
 
+  it('holds the zone policy actions while a grid places the cards itself', async () => {
+    const onArrangeContents = vi.fn();
+    const onUpdate = vi.fn();
+    renderZone(vi.fn(), CONNECTED, {
+      layout: 'grid',
+      onUpdate,
+      data: { positionableItemCount: 2, onArrangeContents },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'More zone actions' }));
+    for (const label of ['Tidy up contents', 'Enable Auto Zone', 'Align content cluster']) {
+      const item = (await screen.findByText(label)).closest('[role="menuitem"]');
+      expect(item).toHaveAttribute('aria-disabled', 'true');
+    }
+    fireEvent.click(await screen.findByText('Tidy up contents'));
+    fireEvent.click(await screen.findByText('Enable Auto Zone'));
+    expect(onArrangeContents).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
   it('switches the layout under a ticket captured when it is chosen', async () => {
     const ticket = { boardId: 'board-1' };
     const beginBoardWrite = vi.fn(() => ticket);
