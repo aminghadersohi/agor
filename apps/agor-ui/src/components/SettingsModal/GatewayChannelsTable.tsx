@@ -2135,7 +2135,7 @@ const DiscordSetupFields: React.FC<{
           </Form.Item>
           <Form.Item name="discord_files" valuePropName="checked" initialValue={false}>
             <Checkbox>
-              Enable inbound image, text and PDF attachments (<code>files:true</code>)
+              Enable inbound image and text attachments (<code>files:true</code>)
             </Checkbox>
           </Form.Item>
           <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
@@ -2233,7 +2233,7 @@ const DiscordSetupFields: React.FC<{
           <CompactAlert
             type="info"
             heading="Capabilities"
-            description={`Files: ${filesEnabled ? 'inbound image, text and PDF attachments enabled (files:true)' : 'disabled (files:false)'}. Agent tools: ${channelHistoryEnabled ? 'channel history enabled (agent_tools.channel_history:true)' : 'none'}.`}
+            description={`Files: ${filesEnabled ? 'inbound image and text attachments enabled (files:true)' : 'disabled (files:false)'}. Agent tools: ${channelHistoryEnabled ? 'channel history enabled (agent_tools.channel_history:true)' : 'none'}.`}
             style={{ marginTop: 12 }}
           />
         </div>
