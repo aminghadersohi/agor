@@ -447,12 +447,11 @@ for (const scenario of [
               ]);
               expect(executions).toHaveLength(1);
               await Promise.all(executions.splice(0));
-              // A board move intentionally evicts user sockets after commit.
-              // Move + creating arrive first; readiness is available on refresh.
-              await vi.waitFor(() =>
-                expect(observers.every((client) => !client.io.connected)).toBe(true)
-              );
-              expect(delivered).toHaveLength(2);
+              // A board move revokes only the moved branch's capabilities.
+              // Observers stay connected: the authorized owner sees readiness
+              // live and the outsider still receives nothing (asserted below).
+              await vi.waitFor(() => expect(delivered).toHaveLength(3));
+              expect(observers.every((client) => client.io.connected)).toBe(true);
               expect(patched.mock.calls.map(([value]) => value.filesystem_status)).toEqual([
                 'cleaned',
                 'creating',
@@ -461,6 +460,7 @@ for (const scenario of [
               expect(delivered.map((value) => value.filesystem_status)).toEqual([
                 'cleaned',
                 'creating',
+                'ready',
               ]);
               expect(delivered.every((value) => value.board_id === destination.board_id)).toBe(
                 true

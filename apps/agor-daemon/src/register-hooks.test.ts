@@ -61,6 +61,7 @@ import {
   TENANT_OWNED_SERVICE_PATHS,
   validateBranchEnvPolicyHook,
 } from './register-hooks';
+import { markBranchBoardChanged } from './utils/branch-board-move-invalidation';
 import { canReceiveMcpTokenForSession } from './utils/mcp-token-authorization';
 import { resolvePromptOrigin } from './utils/prompt-origin';
 
@@ -145,8 +146,6 @@ describe('classifyRealtimeAuthorizationInvalidation', () => {
   });
 
   it.each([
-    ['branches', 'patch', { board_id: 'board-2' }],
-    ['branches', 'patch', { permission_binding: 'inherit' }],
     ['branches', 'remove', {}],
     ['boards', 'patch', { access_mode: 'private' }],
     ['boards', 'patch', { archived: true }],
@@ -164,6 +163,46 @@ describe('classifyRealtimeAuthorizationInvalidation', () => {
     ['groups', 'patch', { archived: true }],
   ] as const)('evicts stale sockets for revoking %s.%s', (path, method, data) => {
     expect(classify(path, method, data)).toBe('evict');
+  });
+
+  it.each([
+    ['branches', 'patch', { board_id: 'board-2' }],
+    ['branches', 'patch', { permission_binding: 'inherit' }],
+    ['branches', 'update', { board_id: 'board-2', name: 'Moved' }],
+  ] as const)('revokes only the affected branch for %s.%s %j', (path, method, data) => {
+    expect(classify(path, method, data)).toBe('branch');
+  });
+
+  it('downgrades branch board moves that provably cannot revoke access', () => {
+    const moved = (changed: boolean | undefined, result: unknown) => {
+      const params = {};
+      if (changed !== undefined) markBranchBoardChanged(params, changed);
+      return classifyRealtimeAuthorizationInvalidation({
+        path: 'branches',
+        method: 'patch',
+        data: { board_id: 'board-2' },
+        params,
+        result,
+      } as never);
+    };
+    // No-op: the stored board already matched.
+    expect(moved(false, { board_id: 'board-2', permission_binding: 'inherit' })).toBe('none');
+    // Override-bound ACLs ignore the board; only board-derived audiences move.
+    expect(moved(true, { board_id: 'board-2', permission_binding: 'override' })).toBe('cache');
+    // Inherited ACLs follow the board; unknown/missing proof fails closed.
+    expect(moved(true, { board_id: 'board-2', permission_binding: 'inherit' })).toBe('branch');
+    expect(moved(undefined, { board_id: 'board-2' })).toBe('branch');
+    expect(moved(undefined, [{ permission_binding: 'override' }])).toBe('branch');
+    // A binding change in the same write is never downgraded.
+    expect(
+      classifyRealtimeAuthorizationInvalidation({
+        path: 'branches',
+        method: 'patch',
+        data: { board_id: 'board-2', permission_binding: 'override' },
+        params: {},
+        result: { permission_binding: 'override' },
+      } as never)
+    ).toBe('branch');
   });
 
   it('ignores branch metadata patches that cannot change authorization', () => {

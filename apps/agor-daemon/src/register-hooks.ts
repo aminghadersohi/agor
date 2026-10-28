@@ -142,6 +142,7 @@ import { validateMessageCreate } from './hooks/validate-message-create.js';
 import { coordinateMCPServerMutationAfterWrite } from './mcp-egress/coordination.js';
 import { protectExternalPermissionMessageWrites } from './permissions/permission-message-boundary.js';
 import type { RedisRealtimeRuntime } from './realtime/redis-realtime.js';
+import { BRANCH_REVOCATION_SCOPE } from './realtime/routing.js';
 import type { ArtifactsService } from './services/artifacts.js';
 import {
   publicBoardCommentCreateInput,
@@ -195,6 +196,7 @@ import {
   stampCallbackPrincipal,
   validateSessionUnixUsername,
 } from './utils/branch-authorization.js';
+import { classifyBranchBoardMoveInvalidation } from './utils/branch-board-move-invalidation.js';
 import { captureBranchRemovalRealtimeVisibility as captureBranchRemovalVisibility } from './utils/branch-removal-realtime.js';
 import { emitServiceEvent, publishCommittedServiceEvent } from './utils/emit-service-event.js';
 import { bindPrimaryOwnerToCreatedBy, injectCreatedBy } from './utils/inject-created-by.js';
@@ -1135,7 +1137,11 @@ export function redactGatewayChannelResultsForTransport(context: HookContext): H
   return context;
 }
 
-export type RealtimeAuthorizationInvalidationMode = 'none' | 'cache' | 'evict';
+/**
+ * `branch` is a targeted revocation for a write that can change only one
+ * branch's effective ACL; see `RealtimeAuthorizationInvalidation.revocationScope`.
+ */
+export type RealtimeAuthorizationInvalidationMode = 'none' | 'cache' | 'branch' | 'evict';
 
 /** Only successful single-branch writes can narrow Task-executor eviction. */
 export function authorizationInvalidationBranchId(
@@ -1186,7 +1192,10 @@ export function classifyPrimaryTeammateAuthorizationInvalidation(
  * evict; other revocation-capable writes do the same.
  */
 export function classifyRealtimeAuthorizationInvalidation(
-  context: Pick<HookContext, 'path' | 'method' | 'data'> & { result?: unknown }
+  context: Pick<HookContext, 'path' | 'method' | 'data'> & {
+    params?: HookContext['params'];
+    result?: unknown;
+  }
 ): RealtimeAuthorizationInvalidationMode {
   if (!['create', 'update', 'patch', 'remove'].includes(context.method)) return 'none';
 
@@ -1232,8 +1241,11 @@ export function classifyRealtimeAuthorizationInvalidation(
   if (context.path === 'branches') {
     if (context.method === 'create') return 'none';
     if (context.method === 'remove') return 'evict';
-    return ['board_id', 'permission_binding'].some((field) => Object.hasOwn(data, field))
-      ? 'evict'
+    // Either field can change only this branch's effective ACL. Revoke that
+    // branch's capabilities instead of reconnecting every tenant socket.
+    if (Object.hasOwn(data, 'permission_binding')) return 'branch';
+    return Object.hasOwn(data, 'board_id')
+      ? classifyBranchBoardMoveInvalidation(context.params, context.result)
       : 'none';
   }
 
@@ -1880,14 +1892,18 @@ export function registerHooks(ctx: RegisterHooksContext): void {
     mode: Exclude<RealtimeAuthorizationInvalidationMode, 'none'>
   ): HookContext => {
     const affectedBranchId =
-      mode === 'evict' ? authorizationInvalidationBranchId(context) : undefined;
+      mode === 'cache' ? undefined : authorizationInvalidationBranchId(context);
+    // A branch-scoped revocation without a validated target fails closed.
+    const branchScoped = mode === 'branch' && affectedBranchId !== undefined;
     deferWithTenantContext(
       context.params,
       async () => {
         app.emit('realtime:authorization-invalidated', {
           tenantId: requireCurrentTenantId(),
-          disconnectSockets: mode === 'evict',
+          // Kept true for branch scope so pre-scope replicas still evict.
+          disconnectSockets: mode !== 'cache',
           ...(affectedBranchId ? { affectedBranchId } : {}),
+          ...(branchScoped ? { revocationScope: BRANCH_REVOCATION_SCOPE } : {}),
         });
       },
       () => console.warn('[realtime] Failed to schedule authorization eviction')
