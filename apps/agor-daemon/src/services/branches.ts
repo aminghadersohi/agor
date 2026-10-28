@@ -145,6 +145,7 @@ import {
   isSuperAdmin,
   withoutPrefetchedRecord,
 } from '../utils/branch-authorization.js';
+import { markBranchBoardChanged } from '../utils/branch-board-move-invalidation.js';
 import { ensureBranchWorkspaceAccess } from '../utils/branch-workspace-path.js';
 import { verifyBranchWorkspacePreflight } from '../utils/branch-workspace-preflight.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
@@ -1531,6 +1532,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     const boardIdProvided = Object.hasOwn(data, 'board_id');
     const newBoardId = data.board_id;
     const boardChanged = boardIdProvided && oldBoardId !== newBoardId;
+    if (boardIdProvided) markBranchBoardChanged(params, boardChanged);
 
     if (boardChanged) {
       if (!newBoardId && currentBranch.permission_binding === 'inherit') {
@@ -2451,7 +2453,8 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
           // Use the same lock order as board movement before reading placement.
           // A preflight comparison can race a move and silently ignore the
           // requested destination. Real moves still use patch's authorization,
-          // commit-deferred events and eviction; refused admission rolls it back.
+          // commit-deferred events and branch-scoped revocation; refused
+          // admission rolls it back.
           await lockTenantAuthorizationFence(db, params);
           await lockBranchReferenceMutation(db);
           // Committed placement under the locks, not the request's cached row.

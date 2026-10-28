@@ -315,11 +315,15 @@ for (const scenario of [
         expect(disconnected).not.toHaveBeenCalled();
         expect(client.io.connected).toBe(true);
       } else if (scenario === 'different-board') {
-        // Real moves still evict. The socket can lose its ack even though the
-        // transaction commits: this is why the UI needs an unknown-outcome path.
-        await response.catch(() => undefined);
-        await vi.waitFor(() => expect(completed).toHaveBeenCalledTimes(1));
-        expect(disconnected).toHaveBeenCalledWith('io server disconnect', undefined);
+        // A real move revokes only the moved branch's capabilities; the
+        // caller keeps its connection and receives the acknowledgement.
+        await expect(response).resolves.toMatchObject({
+          branch_id: branch.branch_id,
+          archived: false,
+        });
+        expect(completed).toHaveBeenCalledTimes(1);
+        expect(disconnected).not.toHaveBeenCalled();
+        expect(client.io.connected).toBe(true);
       } else {
         await expect(response).rejects.toThrow(
           scenario === 'denied-board' ? /Board Editor or Manager/ : /unfinished tasks/
