@@ -180,6 +180,7 @@ import { AppNode } from './canvas/AppNodeLazy';
 import { ArtifactNode } from './canvas/ArtifactNodeLazy';
 import { ARRANGE_DEAL_CLASS } from './canvas/arrangeAnimation';
 import { CommentNode, ZoneNode } from './canvas/BoardObjectNodes';
+import { canvasPanOnDrag, useSpaceDragPan, useSpacePan } from './canvas/canvasPanning';
 import { LayoutOptionsEditor } from './canvas/LayoutOptionsEditor';
 import { MarkdownNode } from './canvas/MarkdownNode';
 import {
@@ -264,7 +265,10 @@ import { applyZoneGridLayouts, autoLayoutOfZoneNode, zoneGridOrder } from './can
 import { createZoneTriggerSession } from './canvas/zoneTriggerSessionCreation';
 import { getZoneWorkflowAdvanceNotice } from './canvas/zoneWorkflowAdvanceNotice';
 
-export function isCanvasSelectionControlTarget(target: Element): boolean {
+export function isCanvasSelectionControlTarget(target: Element, canvas?: Element): boolean {
+  // Popups a node opens (dropdown menus, popovers) render in portals outside
+  // the canvas, yet React still bubbles their events through it.
+  if (canvas && !canvas.contains(target)) return true;
   return Boolean(
     target.closest(
       `.canvas-layout-toolbar, .${CANVAS_LAYOUT_CONTROLS_CLASS}, .ant-modal-root, .react-flow__controls, .react-flow__minimap, button, input, textarea, select, a, [role="button"]`
@@ -872,6 +876,9 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
       /** Captured when the gesture began. */
       ticket: BoardWriteTicket | null;
     } | null>(null);
+
+    // Holding Space turns the pointer into a hand: any drag pans the canvas.
+    const spacePan = useSpacePan();
 
     // Custom marquee selection supports starting inside a zone's empty body.
     // React Flow's built-in marquee only starts on the bare pane, which makes
@@ -2142,6 +2149,8 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
     // Store ReactFlow instance ref
     const reactFlowInstanceRef = useRef<ReactFlowInstance | null>(null);
     const reactFlowWrapperRef = useRef<HTMLDivElement | null>(null);
+    const getViewportHandle = useCallback(() => reactFlowInstanceRef.current, []);
+    useSpaceDragPan(reactFlowWrapperRef, getViewportHandle, spacePan && !drawingZone);
     const getUsableBoardAspect = useCallback(() => {
       const wrapper = reactFlowWrapperRef.current;
       if (!wrapper || typeof document === 'undefined') return 16 / 9;
@@ -4505,11 +4514,17 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
 
     const handleSelectionPointerDownCapture = useCallback(
       (event: React.PointerEvent<HTMLDivElement>) => {
-        if (activeTool !== 'select' || event.button !== 0 || !reactFlowInstanceRef.current) return;
+        if (
+          activeTool !== 'select' ||
+          spacePan ||
+          event.button !== 0 ||
+          !reactFlowInstanceRef.current
+        )
+          return;
         const target = event.target;
         if (!(target instanceof Element)) return;
 
-        if (isCanvasSelectionControlTarget(target)) {
+        if (isCanvasSelectionControlTarget(target, event.currentTarget)) {
           return;
         }
 
@@ -4548,7 +4563,7 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
           event.stopPropagation();
         }
       },
-      [activeTool]
+      [activeTool, spacePan]
     );
 
     // Canvas pointer handlers for marquee selection and drag-to-draw zones.
@@ -5507,16 +5522,21 @@ const SessionCanvasInner = forwardRef<SessionCanvasRef, SessionCanvasProps>(
             edgesFocusable={activeTool === 'workflow'}
             elementsSelectable={true}
             elevateNodesOnSelect={false}
-            // Two-finger scrolling to pan when in select mode (Figma-style)
-            // Also allow click-drag to pan since selection box isn't useful here
-            // Disable all panning when actively drawing a zone to prevent interference
+            // Two-finger scrolling pans in select and workflow mode (Figma-style).
+            // A select-mode drag draws a marquee, so the middle button pans
+            // instead (and Space+drag, see useSpaceDragPan). Drawing a zone
+            // disables all panning.
             panOnScroll={(activeTool === 'select' || activeTool === 'workflow') && !drawingZone}
-            panOnDrag={activeTool === 'workflow' ? [1, 2] : activeTool !== 'select' && !drawingZone}
+            panOnDrag={canvasPanOnDrag(activeTool, !!drawingZone)}
             // SessionCanvas owns marquee selection so it can begin on empty
             // zone bodies as well as the bare pane and can normalize selected
             // container hierarchies before group drag.
             selectionOnDrag={activeTool === 'workflow'}
-            className={[`tool-mode-${activeTool}`, isArranging && ARRANGE_DEAL_CLASS]
+            className={[
+              `tool-mode-${activeTool}`,
+              spacePan && 'canvas-space-pan',
+              isArranging && ARRANGE_DEAL_CLASS,
+            ]
               .filter(Boolean)
               .join(' ')}
             // Disable React Flow's keyboard shortcuts that conflict with typing/spatial messages.

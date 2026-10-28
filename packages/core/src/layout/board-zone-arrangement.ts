@@ -74,6 +74,11 @@ export interface BoardZoneArrangementInput {
   layout?: Partial<ZoneLayoutPolicy>;
   /** Capability-aware frame resizing. False keeps this root at its safe size. */
   resizable?: boolean;
+  /**
+   * The zone sizes and places its own contents (a row, column or grid zone):
+   * plan it as one rectangle of exactly this size and leave its items where they are.
+   */
+  fixedFrame?: boolean;
   /** Persisted/manual frame floors which matching may never cross. */
   minWidth?: number;
   minHeight?: number;
@@ -314,26 +319,27 @@ export function planBoardZoneArrangement(
             preserveInputOrder: true,
           })
         : undefined;
-    const shapes = !packZoneContents
-      ? [{ columns: 1, width: zone.width, height: zone.height }]
-      : items.length === 0
-        ? [{ columns: 1, ...EMPTY_PACKED_ZONE_SIZE }]
-        : compact
-          ? [
-              {
-                columns: compact.columns,
-                width: Math.max(400, ceilBoardGridValue(compact.width)),
-                height: Math.max(240, ceilBoardGridValue(compact.height + frame.headerInset)),
-              },
-            ]
-          : zoneShapesForItems(items, {
-              titleInset: frame.headerInset,
-              padding: frame.padding,
-              gapX,
-              gapY,
-              maxColumns: policy.preset === 'compact_list' ? 1 : policy.columns,
-              gridSize: BOARD_GRID_SIZE,
-            });
+    const shapes =
+      !packZoneContents || zone.fixedFrame
+        ? [{ columns: 1, width: zone.width, height: zone.height }]
+        : items.length === 0
+          ? [{ columns: 1, ...EMPTY_PACKED_ZONE_SIZE }]
+          : compact
+            ? [
+                {
+                  columns: compact.columns,
+                  width: Math.max(400, ceilBoardGridValue(compact.width)),
+                  height: Math.max(240, ceilBoardGridValue(compact.height + frame.headerInset)),
+                },
+              ]
+            : zoneShapesForItems(items, {
+                titleInset: frame.headerInset,
+                padding: frame.padding,
+                gapX,
+                gapY,
+                maxColumns: policy.preset === 'compact_list' ? 1 : policy.columns,
+                gridSize: BOARD_GRID_SIZE,
+              });
     return { zone, policy, frame, orderedItems, items, shapes, gapX, gapY, compact, compactById };
   });
   const preparedById = new Map(prepared.map((entry) => [entry.zone.id, entry]));
@@ -360,7 +366,8 @@ export function planBoardZoneArrangement(
     };
   });
 
-  const eligibleZone = (entry: (typeof prepared)[number]) => entry.zone.resizable !== false;
+  const eligibleZone = (entry: (typeof prepared)[number]) =>
+    entry.zone.resizable !== false && entry.zone.fixedFrame !== true;
   const eligibleLoose = (item: (typeof naturalLooseItems)[number]) => item.resizable !== false;
   const matchedWidth = options.matchWidth
     ? Math.max(
@@ -498,6 +505,7 @@ export function planBoardZoneArrangement(
                 entry &&
                   resizeZoneFrames &&
                   entry.zone.resizable !== false &&
+                  entry.zone.fixedFrame !== true &&
                   matchedWidth === undefined &&
                   matchedHeight === undefined
               ),
@@ -563,7 +571,7 @@ export function planBoardZoneArrangement(
       if (!shape) throw new Error(`Missing final shape for zone '${entry.zone.id}'.`);
       const placement = gridPlacementById.get(entry.zone.id);
       let frame: { width: number; height: number };
-      if (!packZoneContents) {
+      if (!packZoneContents || entry.zone.fixedFrame) {
         frame = { width: entry.zone.width, height: entry.zone.height };
       } else if (resizeZoneFrames && placement) {
         frame = {
@@ -754,43 +762,44 @@ export function planBoardZoneArrangement(
     // Recomputing compact-list widths from finalFrame would make child content
     // scale with the container and destroy idempotence.
     const items = entry.items;
-    const packed = !packZoneContents
-      ? {
-          columns: 1,
-          placements: entry.orderedItems.map((item, index) => ({
-            id: item.id,
-            x: item.position.x,
-            y: item.position.y,
-            width: item.width,
-            height: item.height,
-            row: 0,
-            column: index,
-            stackIndex: index,
-            deckDepth: 0,
-          })),
-          overflowingItemIds: [] as string[],
-        }
-      : entry.policy.preset === 'grid' && entry.policy.columns === undefined
-        ? layoutCompactRectangles(items, {
-            bounds: { width: finalFrame.width, height: finalFrame.height - frame.headerInset },
-            padding: frame.padding,
-            gapX: entry.gapX,
-            gapY: entry.gapY,
-            gridSize: BOARD_GRID_SIZE,
-            preserveInputOrder: true,
-          })
-        : layoutRectangles(items, {
-            bounds: { width: finalFrame.width, height: finalFrame.height - frame.headerInset },
-            padding: frame.padding,
-            minPadding: frame.padding,
-            gapX: entry.gapX,
-            gapY: entry.gapY,
-            minGapX: entry.gapX,
-            minGapY: entry.gapY,
-            exactColumns: Math.max(1, Math.min(items.length || 1, shape.columns)),
-            allowDeck: false,
-            gridSize: BOARD_GRID_SIZE,
-          });
+    const packed =
+      !packZoneContents || entry.zone.fixedFrame
+        ? {
+            columns: 1,
+            placements: entry.orderedItems.map((item, index) => ({
+              id: item.id,
+              x: item.position.x,
+              y: item.position.y,
+              width: item.width,
+              height: item.height,
+              row: 0,
+              column: index,
+              stackIndex: index,
+              deckDepth: 0,
+            })),
+            overflowingItemIds: [] as string[],
+          }
+        : entry.policy.preset === 'grid' && entry.policy.columns === undefined
+          ? layoutCompactRectangles(items, {
+              bounds: { width: finalFrame.width, height: finalFrame.height - frame.headerInset },
+              padding: frame.padding,
+              gapX: entry.gapX,
+              gapY: entry.gapY,
+              gridSize: BOARD_GRID_SIZE,
+              preserveInputOrder: true,
+            })
+          : layoutRectangles(items, {
+              bounds: { width: finalFrame.width, height: finalFrame.height - frame.headerInset },
+              padding: frame.padding,
+              minPadding: frame.padding,
+              gapX: entry.gapX,
+              gapY: entry.gapY,
+              minGapX: entry.gapX,
+              minGapY: entry.gapY,
+              exactColumns: Math.max(1, Math.min(items.length || 1, shape.columns)),
+              allowDeck: false,
+              gridSize: BOARD_GRID_SIZE,
+            });
     if (packed.overflowingItemIds.length > 0) {
       throw new Error(
         `Zone '${entry.zone.id}' shape did not contain ${packed.overflowingItemIds.join(', ')}.`
@@ -818,7 +827,10 @@ export function planBoardZoneArrangement(
         };
         return {
           ...placement,
-          y: packZoneContents ? placement.y + frame.headerInset : placement.y,
+          y:
+            packZoneContents && !entry.zone.fixedFrame
+              ? placement.y + frame.headerInset
+              : placement.y,
           ...(entry.compactById.get(placement.id) === undefined
             ? {}
             : { compact: entry.compactById.get(placement.id) }),

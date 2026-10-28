@@ -418,6 +418,40 @@ function captureAtomicLayout(
 }
 
 describe('agor_boards_auto_arrange_zone', () => {
+  it('leaves a row, column or grid zone to place its own cards', async () => {
+    const write = vi.fn();
+    const app = {
+      service(name: string) {
+        if (name === 'boards') {
+          return {
+            get: vi.fn(async () => ({
+              board_id: 'board-1',
+              objects: {
+                'zone-1': { type: 'zone', x: 0, y: 0, width: 760, height: 400, layout: 'grid' },
+              },
+            })),
+            patch: write,
+          };
+        }
+        if (name === 'board-objects')
+          return { find: vi.fn(async () => ({ data: [] })), patch: write };
+        throw new Error(`Unexpected service call: ${name}`);
+      },
+    };
+    const arrange = registerAndCaptureHandler('agor_boards_auto_arrange_zone', {
+      app,
+      userId: 'user-1',
+    });
+
+    const parsed = JSON.parse(
+      (await arrange({ boardId: 'board-1', zoneId: 'zone-1' })).content[0].text
+    );
+
+    expect(parsed).toMatchObject({ applied: false, arranged: 0 });
+    expect(parsed.note).toContain('grid layout');
+    expect(write).not.toHaveBeenCalled();
+  });
+
   const baseServiceParams = { authenticated: true, provider: 'mcp' };
 
   it('exposes deck overflow as an explicit opt-in', () => {
@@ -2271,6 +2305,48 @@ describe('board layout tools with branch entities present', () => {
 
     expect(parsed.applied).toBe(false);
     expect(parsed.requiredWidth).toBeGreaterThan(300);
+  });
+
+  it('moves a grid zone as one rectangle at its shown height, never its cards', async () => {
+    const boardPatches: Array<Record<string, unknown>> = [];
+    const { app } = makeApp({
+      boardPatches,
+      entities: [
+        branchEntity({
+          object_id: 'obj-b-11',
+          branch_id: '019e8e11',
+          zone_id: 'zone-grid',
+          position: { x: 20, y: 80 },
+          size: { width: 500, height: 200 },
+        }),
+        branchEntity({
+          object_id: 'obj-b-12',
+          branch_id: '019e8e12',
+          zone_id: 'zone-grid',
+          position: { x: 400, y: 80 },
+          size: { width: 500, height: 200 },
+        }),
+      ],
+      objects: {
+        // Stored height is stale: the canvas shows two cards side by side.
+        'zone-grid': { type: 'zone', x: 900, y: 900, width: 760, height: 1400, layout: 'grid' },
+      },
+    });
+    const arrangeZones = registerAndCaptureHandler('agor_boards_arrange_zones', {
+      app,
+      userId: 'user-1',
+      baseServiceParams,
+    });
+
+    await arrangeZones({ boardId: 'board-1', targetWidth: 1600 });
+
+    const layout = boardPatches.find((patch) => patch._action === 'applyLayout');
+    if (!layout) throw new Error('expected an atomic layout write');
+    expect(layout.placements).toEqual({});
+    // Header 80 + a 200px row + 20px padding: the height the canvas shows.
+    expect(
+      (layout.objects as Record<string, { width: number; height: number }>)['zone-grid']
+    ).toMatchObject({ width: 760, height: 300, layout: 'grid' });
   });
 
   it('sizes a zone from the order the arrange will actually use', async () => {

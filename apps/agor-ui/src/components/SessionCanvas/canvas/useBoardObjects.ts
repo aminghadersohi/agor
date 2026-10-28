@@ -21,6 +21,7 @@ import {
   type ZoneContentJustification,
   type ZoneLayoutSortItem,
 } from '@agor/core/layout/zone-layout';
+import { arrangedZoneLayout } from '@agor/core/layout/zone-layout-arrangement';
 import type {
   BoardLayoutApplyResult,
   BoardLayoutBatch,
@@ -1203,6 +1204,8 @@ export const useBoardObjects = ({
       const currentBoard = options.recovery?.source.board ?? boardRef.current;
       const persistedZone = currentBoard?.objects?.[zoneId];
       if (!currentBoard || !client || persistedZone?.type !== 'zone') return;
+      // A row, column or grid zone places its own cards; its policy is parked.
+      if (arrangedZoneLayout(persistedZone)) return;
       // A layout is a board write: its ticket is captured when it starts and
       // checked again right before the atomic layout request.
       const ticket = options.recovery?.ticket ?? options.ticket ?? guardRef.current.capture();
@@ -1953,6 +1956,7 @@ export const useBoardObjects = ({
       const currentBoard = boardRef.current;
       const persistedZone = currentBoard?.objects?.[zoneId];
       if (!currentBoard || !client || persistedZone?.type !== 'zone') return;
+      if (arrangedZoneLayout(persistedZone)) return;
       const currentNodes = nodesRef.current;
       const liveZoneNode = currentNodes.find((node) => node.id === zoneId);
       const visibleWidth = Number(liveZoneNode?.width ?? liveZoneNode?.style?.width);
@@ -2257,8 +2261,12 @@ export const useBoardObjects = ({
         const plan = planBoardZoneArrangement(
           selectedZones.map(([zoneId, object]) => {
             const persistedZone = currentBoard.objects?.[zoneId];
+            // A row, column or grid zone places its own cards: it moves as one
+            // rectangle at its shown height and keeps its width (its columns).
+            const arranged = arrangedZoneLayout(object) !== undefined;
             const children = currentNodes.filter((node) => {
               if (
+                !arranged &&
                 node.parentId === zoneId &&
                 !node.hidden &&
                 node.data?.locked !== true &&
@@ -2269,19 +2277,30 @@ export const useBoardObjects = ({
                 isPositionableZoneCanvasNode(node) && zoneForCanvasNode.get(node.id) === zoneId
               );
             });
+            const width =
+              arranged && persistedZone?.type === 'zone' ? persistedZone.width : object.width;
             return {
               id: zoneId,
               x: object.x,
               y: object.y,
-              width: object.width,
+              width,
               height: object.height,
               fontSize: object.fontSize,
               fontScale: object.fontScale,
               status: object.status,
               layout: normalizeZoneLayoutPolicy(object.layout),
-              resizable: true,
-              minWidth: persistedZone?.type === 'zone' ? persistedZone.width : object.width,
-              minHeight: persistedZone?.type === 'zone' ? persistedZone.height : object.height,
+              resizable: !arranged,
+              fixedFrame: arranged,
+              minWidth: arranged
+                ? width
+                : persistedZone?.type === 'zone'
+                  ? persistedZone.width
+                  : object.width,
+              minHeight: arranged
+                ? object.height
+                : persistedZone?.type === 'zone'
+                  ? persistedZone.height
+                  : object.height,
               items: children.map((node) => {
                 const isCanvasObject = isPositionableZoneCanvasNode(node);
                 const data = node.data as {
