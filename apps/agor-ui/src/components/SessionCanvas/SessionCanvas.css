@@ -222,6 +222,14 @@
 
 /* Select mode uses default grab/grabbing cursors from React Flow */
 
+/* Holding Space pans with any drag, over cards and zones too. */
+.react-flow.canvas-space-pan .react-flow__pane,
+.react-flow.canvas-space-pan .react-flow__node,
+.react-flow.canvas-space-pan .react-flow__node * {
+  /* biome-ignore lint/complexity/noImportantStyles: cards set an inline cursor that the Space hand must override. */
+  cursor: grab !important;
+}
+
 /* Drag handle cursor */
 .drag-handle {
   cursor: grab;

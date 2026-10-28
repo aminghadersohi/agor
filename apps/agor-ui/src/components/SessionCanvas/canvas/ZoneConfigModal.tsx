@@ -3,6 +3,7 @@
  */
 
 import { normalizeZoneLayoutPolicy } from '@agor/core/layout/zone-layout';
+import { arrangedZoneLayout } from '@agor/core/layout/zone-layout-arrangement';
 import type {
   AgenticToolName,
   BoardObject,
@@ -548,11 +549,22 @@ export const ZoneConfigModal = ({
     </>
   );
 
+  // A row, column or grid zone keeps its policy parked until it switches back to Free.
+  const arrangedLayout = arrangedZoneLayout(zone);
   const layoutContent = (
     <>
       <Typography.Paragraph>
         Choose how this zone packs its contents. Geometry and content expansion are independent.
       </Typography.Paragraph>
+      {arrangedLayout && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: token.marginMD }}
+          title={`This zone uses the ${arrangedLayout} layout, which places its cards itself.`}
+          description="Switch the zone to Free from its layout menu to edit this policy; the zone picks it up again when it does."
+        />
+      )}
       <Form.Item
         label="Use board defaults"
         help={
@@ -564,7 +576,7 @@ export const ZoneConfigModal = ({
         <Switch
           aria-label="Use board defaults"
           checked={layoutBinding === 'inherit'}
-          disabled={!mutationGate.canMutate || !canEdit}
+          disabled={!mutationGate.canMutate || !canEdit || !!arrangedLayout}
           onChange={(checked) => {
             if (checked) setLayoutPolicy(normalizeZoneLayoutPolicy(boardZoneLayoutDefaults));
             setLayoutBinding(checked ? 'inherit' : 'override');
@@ -574,7 +586,9 @@ export const ZoneConfigModal = ({
       <ZoneLayoutPolicyEditor
         value={layoutPolicy}
         onChange={setLayoutPolicy}
-        disabled={!mutationGate.canMutate || !canEdit || layoutBinding === 'inherit'}
+        disabled={
+          !mutationGate.canMutate || !canEdit || layoutBinding === 'inherit' || !!arrangedLayout
+        }
         idPrefix={`zone-${objectId}`}
       />
     </>

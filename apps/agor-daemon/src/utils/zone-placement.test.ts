@@ -57,6 +57,23 @@ describe('zone placement fixed canvas siblings', () => {
       })
     ).rejects.toThrow();
   });
+  it('always fits a pin into a row, column or grid zone without resizing it', async () => {
+    // Stored size is stale for an arranged zone: the canvas fits it to its cards.
+    const gridded = {
+      ...board,
+      objects: { zone: { type: 'zone', x: 0, y: 0, width: 260, height: 200, layout: 'grid' } },
+    } as unknown as Board;
+    const find = vi.fn(async () => ({
+      data: [{ object_id: 'other', entity_type: 'branch', position: { x: 20, y: 80 } }],
+    }));
+    const plan = await planZoneEntityPlacement({ service: () => ({ find }) }, params, {
+      board: gridded,
+      zoneId: 'zone',
+      entityWidth: 500,
+      entityHeight: 300,
+    });
+    expect(plan.growth).toBeNull();
+  });
   it('retains the caller tenant context when another tenant cannot read occupants', async () => {
     const otherTenant = {
       provider: 'mcp',

@@ -261,6 +261,8 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
   const { authGeneration } = useConnectionState();
   const mutationDisabled = !mutationGate.canMutate || data.canEdit === false;
   const normalizedLayout = normalizeZoneLayoutPolicy(data.layout);
+  // Row, column and grid zones place their own cards; the policy actions wait for Free.
+  const arrangedLayout = isAutoZoneLayout(zoneLayoutOf(data));
   const autoZoneEnabled = normalizedLayout.mode === 'auto';
   const alignsInsideGridCells =
     normalizedLayout.preset === 'grid' && (normalizedLayout.columns ?? 0) > 1;
@@ -418,7 +420,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
   };
 
   const handleToggleAutoZone = () => {
-    if (mutationDisabled || !data.onUpdate) return;
+    if (mutationDisabled || arrangedLayout || !data.onUpdate) return;
     void data.onUpdate(
       data.objectId,
       createObjectData({
@@ -446,7 +448,10 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
         <Flex vertical>
           <span>{option.label}</span>
           <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-            {option.description}
+            {/* A free zone with Auto Zone on is arranged by its policy, not placed by hand. */}
+            {option.layout === 'free' && !arrangedLayout && autoZoneEnabled
+              ? 'Auto Zone arranges the cards'
+              : option.description}
           </Typography.Text>
         </Flex>
       ),
@@ -810,12 +815,13 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
                     key: 'tidy',
                     label: 'Tidy up contents',
                     icon: <AppstoreOutlined />,
-                    disabled: positionableItemCount < 1,
+                    disabled: positionableItemCount < 1 || arrangedLayout,
                   },
                   {
                     key: 'auto-zone',
                     label: autoZoneEnabled ? 'Disable Auto Zone' : 'Enable Auto Zone',
                     icon: <SyncOutlined />,
+                    disabled: arrangedLayout,
                   },
                   {
                     key: 'align-contents',
@@ -823,7 +829,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
                       ? 'Align inside Grid cells'
                       : 'Align content cluster',
                     icon: <AlignCenterOutlined />,
-                    disabled: positionableItemCount < 1,
+                    disabled: positionableItemCount < 1 || arrangedLayout,
                     children: [
                       { key: 'align-left', label: 'Left', icon: <AlignLeftOutlined /> },
                       {

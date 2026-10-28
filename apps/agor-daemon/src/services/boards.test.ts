@@ -19,6 +19,7 @@ import {
   ZoneWorkflowRepository,
 } from '@agor/core/db';
 import { BadRequest } from '@agor/core/feathers';
+import { normalizeZoneLayoutPolicy } from '@agor/core/layout/zone-layout';
 import {
   type Board,
   type BoardID,
@@ -205,9 +206,11 @@ describe('BoardsService - Custom Methods', () => {
         TEST_PARAMS
       );
 
+      // A grid zone with no policy to return to follows the board's zone defaults.
       expect(saved.objects?.['zone-review']).toMatchObject({
         label: 'Review',
-        layout: 'free',
+        layout: normalizeZoneLayoutPolicy(undefined),
+        layout_binding: 'inherit',
         order: [],
         height: 520,
       });
@@ -218,6 +221,51 @@ describe('BoardsService - Custom Methods', () => {
       expect(emitBoardObjectPatched).toHaveBeenCalledTimes(2);
     }
   );
+
+  dbTest('placeZoneEntities hands a gridded zone back its own layout policy', async ({ db }) => {
+    await ensureTestUser(db);
+    const service = new BoardsService(db);
+    const policy = normalizeZoneLayoutPolicy({
+      mode: 'auto',
+      preset: 'compact_list',
+      resize: 'height',
+      onOverflow: 'reflow_board',
+    });
+    const board = (await service.create({
+      name: 'Zone Policy Round Trip',
+      slug: `zone-policy-${generateId()}`,
+      created_by: TEST_USER,
+      objects: {},
+    })) as Board;
+    await service.upsertBoardObject(board.board_id, 'zone-review', {
+      type: 'zone',
+      x: 0,
+      y: 0,
+      width: 760,
+      height: 400,
+      label: 'Review',
+      layout: policy,
+      layout_binding: 'override',
+    });
+    // The zone's layout badge picks Grid, then Free.
+    await service.mergeBoardObjectFields(board.board_id, {
+      'zone-review': { layout: 'grid', order: [] } as Partial<Board['objects'][string]>,
+    });
+
+    const { board: saved } = await service.placeZoneEntities(
+      board.board_id,
+      'zone-review',
+      { width: 760, height: 400 },
+      {},
+      TEST_PARAMS
+    );
+
+    expect(saved.objects?.['zone-review']).toMatchObject({
+      layout: policy,
+      layout_binding: 'override',
+    });
+    expect(saved.objects?.['zone-review']).not.toHaveProperty('suspended_layout');
+  });
 
   dbTest('rejects a client-supplied board id that is not UUIDv7', async ({ db }) => {
     const service = new BoardsService(db);

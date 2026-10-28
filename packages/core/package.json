@@ -76,6 +76,12 @@
       "import": "./dist/layout/zone-layout.js",
       "default": "./dist/layout/zone-layout.js"
     },
+    "./layout/zone-layout-arrangement": {
+      "source": "./src/layout/zone-layout-arrangement.ts",
+      "types": "./dist/layout/zone-layout-arrangement.d.ts",
+      "import": "./dist/layout/zone-layout-arrangement.js",
+      "default": "./dist/layout/zone-layout-arrangement.js"
+    },
     "./layout/zone-growth-reflow": {
       "source": "./src/layout/zone-growth-reflow.ts",
       "types": "./dist/layout/zone-growth-reflow.d.ts",

@@ -313,6 +313,12 @@ export interface ZoneLayoutPolicy {
  */
 export type ZoneLayout = 'free' | 'row' | 'column' | 'grid';
 
+/** A zone's policy and binding, kept while an arranged layout is shown. */
+export interface SuspendedZoneLayout {
+  layout?: ZoneLayoutPolicy;
+  layout_binding?: ZoneLayoutBinding;
+}
+
 /**
  * Zone rectangle object (for organizing sessions visually)
  */
@@ -341,11 +347,16 @@ export interface ZoneBoardObject {
    * created before board defaults existed keeps its historical behaviour.
    */
   layout_binding?: ZoneLayoutBinding;
+  /**
+   * The layout policy a `row`, `column` or `grid` zone resumes when it switches
+   * back to `free`. Server-maintained: the repository parks the policy here when
+   * an arranged layout replaces it, so neither layout vocabulary erases the other.
+   */
+  suspended_layout?: SuspendedZoneLayout;
   /** Label/status font size in px. Falls back to the theme default when unset. */
   fontSize?: number;
   /** Explicit stacking order. Falls back to the per-type default when unset. */
   zIndex?: number;
-  /** Placement of pinned entities. Missing means `free`. */
   /** Pinned branch and card node ids in the order an arranged layout shows them. */
   order?: string[];
 }
