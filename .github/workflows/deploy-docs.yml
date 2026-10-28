@@ -20,6 +20,9 @@ concurrency:
 
 jobs:
   build:
+    # GitHub Pages is configured only on the canonical repository; forks build
+    # the docs in Docs PR Check instead.
+    if: github.repository == 'preset-io/agor'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
