@@ -1211,12 +1211,15 @@ export function classifyRealtimeAuthorizationInvalidation(
  * the DB on every call.
  */
 export function realtimeAuthorizationInvalidationSubject(
-  context: Pick<HookContext, 'path' | 'id'>,
+  context: Pick<HookContext, 'path' | 'id'> & { result?: unknown },
   mode: Exclude<RealtimeAuthorizationInvalidationMode, 'none'>
 ): { userId?: string } {
-  return mode === 'evict' && context.path === 'users' && typeof context.id === 'string'
-    ? { userId: context.id }
-    : {};
+  if (mode !== 'evict' || context.path !== 'users') return {};
+  // The users repository also resolves short-ID prefixes, so prefer the full
+  // user_id from the result over the caller-supplied id.
+  const resultUserId = (context.result as { user_id?: unknown } | null | undefined)?.user_id;
+  const userId = typeof resultUserId === 'string' ? resultUserId : context.id;
+  return typeof userId === 'string' ? { userId } : {};
 }
 
 export function registerHooks(ctx: RegisterHooksContext): void {

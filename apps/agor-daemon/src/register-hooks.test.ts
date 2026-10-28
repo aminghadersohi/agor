@@ -134,6 +134,15 @@ describe('realtimeAuthorizationInvalidationSubject', () => {
     ).toEqual({ userId: 'user-1' });
   });
 
+  it('prefers the full user_id from the result over a short-ID prefix', () => {
+    expect(
+      realtimeAuthorizationInvalidationSubject(
+        { path: 'users', id: 'user-1', result: { user_id: 'user-1-full-uuid' } },
+        'evict'
+      )
+    ).toEqual({ userId: 'user-1-full-uuid' });
+  });
+
   it.each([
     [{ path: 'users', id: 'user-1' }, 'cache'],
     [{ path: 'users', id: null }, 'evict'],
