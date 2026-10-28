@@ -22,6 +22,7 @@ import {
 import { Button, Layout, Space, Spin, Tooltip, Typography, theme } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
+import { surfaceTitle } from '@/branding/brand';
 import { ArtifactBindingControls } from '@/components/artifacts/ArtifactBindingControls';
 import {
   ArtifactConsoleReporter,
@@ -309,6 +310,10 @@ export function ArtifactFullscreenPage({
     sandpackInputs.template === 'static'
   );
   const title = payload?.name ?? artifact?.name ?? `Artifact ${artifactIdParam}`;
+
+  useEffect(() => {
+    document.title = surfaceTitle(payload?.name ?? artifact?.name ?? 'Artifact');
+  }, [payload?.name, artifact?.name]);
 
   const hideNavbar = useCallback(() => {
     const next = new URLSearchParams(searchParams);
