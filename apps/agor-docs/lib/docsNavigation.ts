@@ -40,6 +40,7 @@ export const guideNavigation: Record<string, NavigationItem> = {
   'mcp-administration': 'MCP Administration',
   'containerized-execution': 'Containerized Execution',
   'daemon-ha': 'Daemon High Availability',
+  'maintenance-admission': 'Database Maintenance Admission',
   'multi-tenant-filesystem': 'Multi-Tenant Filesystem',
   'tenant-data-portability': 'Tenant Data Portability',
   'one-time-launch-auth': 'One-Time Launch Auth',

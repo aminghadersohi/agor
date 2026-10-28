@@ -53,10 +53,12 @@ jobs:
     name: Build & push
     # Branch filtering applies to both push- and PR-triggered CI runs. Only a
     # successful push run is allowed to publish main; PRs keep using this
-    # workflow's direct pull_request trigger instead.
+    # workflow's direct pull_request trigger instead. Forks have no Docker Hub
+    # credentials, so only the canonical repository publishes main.
     if: >-
       github.event_name != 'workflow_run' ||
       (
+        github.repository == 'preset-io/agor' &&
         github.event.workflow_run.event == 'push' &&
         github.event.workflow_run.conclusion == 'success'
       )

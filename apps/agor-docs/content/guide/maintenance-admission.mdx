@@ -1,0 +1,163 @@
+---
+title: Database maintenance admission
+description: Explicit PostgreSQL operator hold, natural Task drain and generation-bound release.
+---
+
+## Scope and authority
+
+`agor db maintenance` is a foreground **database operator** command. It is not a
+REST, Socket.IO or MCP service, and tenant administrator privileges do not grant
+it. The connection must own `public.tasks` and the operational schema, and must
+have no tenant routing context. SQLite is unsupported rather than silently
+reporting a working fence.
+
+The command manages a versioned `agor_maintenance` operational schema. It contains
+only installation state, operator database-role attribution and generation audit
+records, not tenant identities, prompts, tools or credentials. It is separate
+from the application migration journal and tenant export/deletion. Installation
+is explicit, never a daemon startup side effect. No applied migration is edited
+or re-stamped. An ordinary application migration must not remove these triggers.
+
+This is a **database admission barrier**, not an assertion that all processes,
+terminals, filesystem operations or provider work are quiescent. In particular,
+older terminal launches use a read/lock-only admission path and are **not fenced
+by these write triggers**. Do not use this command alone as a deployment-ready or
+all-ingress maintenance proof. The bootstrap limitation below is a hard gate.
+
+## Hold and natural drain
+
+```sh
+agor db maintenance --action acquire --install --ttl-seconds 900
+```
+
+The JSON result binds `database`, `generation` and `expiresAt`. Retain all three;
+they are fencing identifiers, not authority to operate without operator access.
+A lost response is uncertain: inspect before another action. There is no force
+replacement, automatic acquisition retry or background job.
+
+Installation and acquisition commit in one bounded transaction. The installer
+locks Branch, Session and Task tables in that order, with a three-second lock
+wait limit; a busy database aborts and rolls back instead of killing a holder.
+The trigger takes a shared control-row lock through each admission commit. Hold
+acquisition takes the conflicting exclusive row lock, so previously admitted
+transactions commit before the hold becomes observable. Even an older daemon's
+SQL must cross the trigger; no new-daemon in-memory marker is trusted.
+
+During `draining`:
+
+- New Task, Session and Branch inserts are rejected for every tenant. HTTP,
+  socket, scheduler, reminder and completion-callback Task producers use the same
+  database fence. Existing stable producer identities are not changed or replayed.
+- Previously admitted queued/dispatching/running Tasks may complete naturally,
+  including executor claims and heartbeats. No Task is cancelled or force-settled.
+- New persisted branch command, maintenance invocation and filesystem-creation
+  intents are rejected. Settlement of previously admitted commands remains allowed.
+- Schedules are not disabled, paused or rescheduled. Normal producer error handling
+  still applies; database rejection is not a guarantee that every upstream event
+  or initialization failure is automatically retried. Reconcile uncertain
+  producer outcomes through their existing durable identities, never blind resend.
+- Token revocation, tenant authorization, terminal immutability and existing
+  executor authentication are not bypassed or replaced by maintenance authority.
+
+## Inspect, stable zero and seal
+
+```sh
+agor db maintenance --action inspect
+agor db maintenance --action seal --database DB --generation GENERATION --expires-at DEADLINE
+```
+
+`seal` first records a database-clock zero sample. A second finite invocation at
+least 60 seconds later can seal the same continuously-held generation. Every
+unknown/nonterminal Task status, all tenants, queued work, pending restart-recovery
+intent and persisted branch operation count as unfinished. There is no launcher,
+coordinator, operator Task or foreign-tenant exclusion. An unfinished sample
+clears the idle start. No polling loop is installed. A seal command that has not drained exits 3 with
+its truthful JSON status, not a success marker.
+
+A missing/changed trigger body, wrong trigger event or disabled trigger
+invalidates inspection instead of becoming an empty count. So does any
+row-level-security shape that could make the global counts silently zero:
+PostgreSQL filters rather than errors when a policy does not apply to the
+operator role or a `RESTRICTIVE` policy intersects the result, so the
+aggregate maintenance policy must exist on `tasks` and `branches` as a
+`PERMISSIVE`, `SELECT`-only policy with the canonical expression that applies to
+the operator role, and no other applicable policy that could narrow `SELECT`
+visibility may be present. Any unknown catalog value fails closed. Policies that
+only affect writes are not refused.
+`admissionDrained` means only that the database fence is sealed, unexpired and
+its covered durable counters are zero **at `observedAt`**. Consumers must bind
+all lease fields and recheck the deadline and current proof before and after
+every awaited operational action, including rollback and verification waits.
+It is not a reusable approval, process-absence proof, schema compatibility result
+or permission to stop anything. Late transitions into active Task states are
+rejected after sealing. A running executor cannot be inferred absent from a
+terminal Task alone.
+
+Expiry makes readiness false but deliberately **does not reopen admission**.
+An abandoned hold therefore requires an operator decision; a fixed lease cannot
+be silently renewed, extended or replaced during a cutover.
+
+## Release and audit
+
+```sh
+agor db maintenance --action release --database DB --generation GENERATION --expires-at DEADLINE
+```
+
+Only the exact database/generation/deadline can release, including after natural
+expiry. A stale generation cannot release a successor. Release permits ordinary
+producer behavior; it does not replay a Task/tool call or restore a database.
+Acquire, seal and release audit entries commit with their state changes in
+`agor_maintenance.audit`. No provider or network call occurs in these transactions.
+
+Release requires the exact lease and an intact installation (owner, trigger body,
+version and the three enabled triggers). It does **not** require the global
+row-level-security visibility proof, because release only reopens producers and
+never reports a count. If an owner-run policy change on `tasks` or `branches`
+after acquire breaks that proof, `inspect` and `seal` keep refusing (visibility is
+never loosened), but the exact lease can still release the hold instead of
+leaving ingress blocked until someone writes manual SQL. Such a release is
+audited as `released_visibility_unproven` rather than `released`. A tampered or
+missing trigger still refuses release; repair or inspect it as the database owner
+first.
+
+## First-install bootstrap and the remaining old-runtime gate
+
+A reviewed standalone CLI from the exact candidate can install/acquire the
+**database portion** while an older daemon continues running. It needs neither a
+live checkout switch nor a restart, and does not change the Drizzle watermark.
+Run installation first on a disposable database with the exact old binary and
+new source, not on production as a discovery probe. Prove trigger/grant shape,
+old admission rejection, ongoing completion, existing queues, expiry, release,
+producer reconciliation, schedules and rollback compatibility.
+
+However, a safe first production bootstrap is **not yet established by this
+patch**: old read-only terminal/start handlers and non-database foreign jobs can
+be in flight or begin without writing one of the covered admission intents.
+`TerminalsService.spawnTerminal` currently releases its Branch transaction before
+`spawnExecutorFireAndForget`; neither a Task count nor a table-write trigger can
+prove that interval drained. Adding an assertion only to the new binary would
+not fix an old binary's bootstrap race.
+
+Before any stop, the operator must supply an independently reviewed supported
+old-runtime ingress interlock and complete in-flight handler/process proof for
+those paths, or a separately reviewed bootstrap extension that enforces them.
+If that mechanism is unavailable, **defer**. Do not invent readiness from two
+empty process samples, a human promise not to click, a schedule pause, a power
+policy change, a forced lock takeover or stopping the old daemon first. This
+patch does not authorize hotpatching the live checkout or disconnecting active
+clients/executors to manufacture idle.
+
+After that missing bootstrap gate is met, the sequence is: acquire the database
+hold; let all admitted work finish naturally; obtain stable global zero and
+independent runtime/foreign-job absence; seal and retain/revalidate the exact
+lease; execute the separately reviewed stop/backup/build/migration/start plan;
+verify actual running identity and invariants immediately and again two minutes
+later; release only after an explicit result/rollback decision. An expired lease
+or uncertain liveness aborts further effects, with an observed-running/unknown
+handoff rather than a false DOWN or OK label.
+
+Restored copies must handle this additional operational schema explicitly before
+any daemon boot; do not copy a production lease as scratch authority. Existing
+neutralization, egress/filesystem containment, exact-head review/CI, frozen build,
+backward-compatible boot and rollback gates remain mandatory. No live DB restore
+is authorized by maintenance admission.
