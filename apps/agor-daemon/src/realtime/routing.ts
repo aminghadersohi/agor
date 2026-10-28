@@ -59,7 +59,23 @@ export const HA_AUTHORIZATION_INVALIDATION_EVENT = 'agor:authorization-invalidat
 export interface RealtimeAuthorizationInvalidation {
   tenantId?: unknown;
   disconnectSockets?: boolean;
+  /** Validated single-branch mutation target; meaningful with `revocationScope`. */
+  affectedBranchId?: unknown;
+  /**
+   * `'branch'` declares that the mutation changed only `affectedBranchId`'s
+   * effective ACL (a board move or permission-binding change). Receivers then
+   * clear caches, retire that branch's terminal attachments, and disconnect
+   * only executor/terminal sockets bound to that branch or with no provable
+   * binding. User and service sockets hold no branch-bound passive room that
+   * outlives a cache clear: every branch-derived publication re-checks current
+   * visibility. Senders keep `disconnectSockets: true` so an older receiver
+   * that does not understand this field still evicts tenant-wide. Any other
+   * value, or a missing/invalid branch id, is ignored (full eviction).
+   */
+  revocationScope?: unknown;
 }
+
+export const BRANCH_REVOCATION_SCOPE = 'branch';
 
 /** Internal exact executor-token revocation signal. */
 export const HA_EXECUTOR_TOKEN_INVALIDATION_EVENT = 'agor:executor-token-invalidated:v1';
