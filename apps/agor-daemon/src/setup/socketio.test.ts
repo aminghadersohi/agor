@@ -453,6 +453,100 @@ it('clears distributed authorization caches without disconnecting sockets for ad
   });
 });
 
+const EXECUTOR_MULTI_TENANCY = {
+  mode: 'required_from_auth',
+  static_tenant_id: 'default' as never,
+  auth_claim: 'tenant_id',
+} as const;
+
+function connectTaskExecutor(
+  app: ReturnType<typeof buildHarness>['app'],
+  io: FakeIO,
+  id: string,
+  userId: UserID,
+  taskId: string
+): FakeSocket {
+  const fence = getOrCreateExecutorConnectionRevocationFence(app);
+  const executor = makeSocket(id, io);
+  executor.feathers = {};
+  const authResult = {
+    user: { user_id: userId },
+    authentication: {
+      strategy: 'jwt',
+      payload: {
+        type: 'executor-session',
+        purpose: 'executor-task',
+        session_id: `session-${taskId}`,
+        task_id: taskId,
+        tenant_id: 'tenant-a',
+      },
+    },
+  };
+  attachExecutorConnectionCandidate(authResult, {
+    tenantId: 'tenant-a',
+    taskId,
+    tokenFingerprint: fingerprintExecutorSessionToken(`executor-token-${taskId}`),
+    revocationGeneration: fence.snapshot('tenant-a'),
+  });
+  finalizeAuthenticatedConnectionAuthority({
+    connection: executor.feathers,
+    authResult,
+    multiTenancy: EXECUTOR_MULTI_TENANCY,
+    executorRevocationFence: fence,
+  });
+  connect(io, executor);
+  return executor;
+}
+
+it('keeps task executor sockets connected through tenant authorization eviction', () => {
+  const { app, io } = buildHarness({ adapter: {} as never, multiTenancy: EXECUTOR_MULTI_TENANCY });
+  const executor = connectTaskExecutor(app, io, 'executor-running-turn', ALICE, 'task-1');
+  const user = makeSocket('tenant-a-user', io);
+  asUser(user, ALICE, 'tenant-a');
+  connect(io, user);
+
+  (app as any).eventHandlers.get('realtime:authorization-invalidated')?.({
+    tenantId: 'tenant-a',
+    disconnectSockets: true,
+  });
+
+  expect(user.connected).toBe(false);
+  expect(executor.connected).toBe(true);
+});
+
+it("disconnects only the changed user's task executors on a user-level eviction", () => {
+  const { app, io } = buildHarness({ adapter: {} as never, multiTenancy: EXECUTOR_MULTI_TENANCY });
+  const aliceExecutor = connectTaskExecutor(app, io, 'executor-alice', ALICE, 'task-alice');
+  const bobExecutor = connectTaskExecutor(app, io, 'executor-bob', BOB, 'task-bob');
+  const bob = makeSocket('tenant-a-bob', io);
+  asUser(bob, BOB, 'tenant-a');
+  connect(io, bob);
+
+  // e.g. users.patch(ALICE, { role }) — the hook names the changed user.
+  const invalidation = { tenantId: 'tenant-a', disconnectSockets: true, userId: ALICE };
+  (app as any).eventHandlers.get('realtime:authorization-invalidated')?.(invalidation);
+
+  expect(aliceExecutor.connected).toBe(false);
+  expect(bobExecutor.connected).toBe(true);
+  // Interactive sockets still reconnect so passive room capabilities rebuild.
+  expect(bob.connected).toBe(false);
+  expect(io.serverSideEmitted).toContainEqual({
+    event: HA_AUTHORIZATION_INVALIDATION_EVENT,
+    data: invalidation,
+  });
+
+  // A peer replica applies the same principal-scoped fence.
+  const { io: peerIo, app: peerApp } = buildHarness({
+    adapter: {} as never,
+    multiTenancy: EXECUTOR_MULTI_TENANCY,
+  });
+  const peerAlice = connectTaskExecutor(peerApp, peerIo, 'peer-alice', ALICE, 'task-peer-alice');
+  const peerBob = connectTaskExecutor(peerApp, peerIo, 'peer-bob', BOB, 'task-peer-bob');
+  peerIo.serverHandlers.get(HA_AUTHORIZATION_INVALIDATION_EVENT)?.(invalidation);
+  expect(peerAlice.connected).toBe(false);
+  expect(peerBob.connected).toBe(true);
+});
+
 it('fences already-authenticated task executors on local and HA exact revocation', async () => {
   const { app, io } = buildHarness({
     adapter: {} as never,

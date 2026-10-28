@@ -54,10 +54,18 @@ export const HA_AUTHORIZATION_INVALIDATION_EVENT = 'agor:authorization-invalidat
  * `disconnectSockets` is optional for rolling-deployment compatibility: an
  * older sender produces an eviction, and a receiver must default to the safer
  * disconnecting behavior when the field is absent.
+ *
+ * `userId` names the principal whose role, credentials, or existence changed.
+ * Agent executor sockets survive ordinary tenant evictions (branch/board/group
+ * ACLs are rechecked against the DB on every call), but their Feathers
+ * projection freezes the initiating user's role, so an eviction about that
+ * user must still drop them. It is optional for the same rolling-deployment
+ * reason: older replicas already disconnect every socket.
  */
 export interface RealtimeAuthorizationInvalidation {
   tenantId?: unknown;
   disconnectSockets?: boolean;
+  userId?: unknown;
 }
 
 /** Internal exact executor-token revocation signal. */

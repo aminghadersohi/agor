@@ -267,6 +267,19 @@ export function getSocketAuthState(socket: Socket): SocketAuthState {
 }
 
 /**
+ * The initiating user an executor socket acts for, read from the immutable
+ * Feathers projection bound at the handshake. Used only to match evictions
+ * about that user; it never grants native-socket authority.
+ */
+function executorUserId(socket: Socket): string | undefined {
+  const projection = (socket as FeathersSocket).feathers as
+    | { user?: { user_id?: unknown } }
+    | undefined;
+  const userId = projection?.user?.user_id;
+  return typeof userId === 'string' ? userId : undefined;
+}
+
+/**
  * Convenience predicate — prefer this over duplicating the
  * `userId || isService` pattern at call sites.
  */
@@ -888,10 +901,23 @@ export function createSocketIOConfig(
       // A reconnect can land on this same replica immediately and must not
       // inherit a warmed pre-revocation ACL cache or terminal allocation.
       app.emit(LOCAL_AUTHORIZATION_INVALIDATION_EVENT, { tenantId: data.tenantId });
+      const changedUserId =
+        typeof data.userId === 'string' && data.userId.length > 0 ? data.userId : undefined;
       for (const socket of io.sockets.sockets.values()) {
-        if (getSocketAuthState(socket).tenant?.tenant_id === data.tenantId) {
-          socket.disconnect(true);
+        const auth = getSocketAuthState(socket);
+        if (auth.tenant?.tenant_id !== data.tenantId) continue;
+        // Agent executors survive ordinary tenant evictions: dropping them
+        // fails every in-flight turn in the tenant with "socket has been
+        // disconnected" whenever any RBAC-relevant mutation (e.g. moving a
+        // branch between boards) happens. Branch/board ACL changes still
+        // apply to them because those checks hit the DB by user id on every
+        // call. Their projected role and credentials are frozen at the
+        // handshake, though, so an eviction about the executor's own user
+        // (role, credential, or removal) still disconnects it.
+        if (auth.isExecutor && (!changedUserId || executorUserId(socket) !== changedUserId)) {
+          continue;
         }
+        socket.disconnect(true);
       }
     };
 

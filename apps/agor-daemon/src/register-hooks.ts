@@ -1203,6 +1203,25 @@ export function classifyRealtimeAuthorizationInvalidation(
   return 'none';
 }
 
+/**
+ * Name the user whose own authority an eviction concerns. User-level changes
+ * (role, credentials, removal) must also retire that user's running agent
+ * executors, whose Feathers projection froze the previous role at handshake.
+ * Other evictions leave executors connected; their branch/board ACL checks hit
+ * the DB on every call.
+ */
+export function realtimeAuthorizationInvalidationSubject(
+  context: Pick<HookContext, 'path' | 'id'> & { result?: unknown },
+  mode: Exclude<RealtimeAuthorizationInvalidationMode, 'none'>
+): { userId?: string } {
+  if (mode !== 'evict' || context.path !== 'users') return {};
+  // The users repository also resolves short-ID prefixes, so prefer the full
+  // user_id from the result over the caller-supplied id.
+  const resultUserId = (context.result as { user_id?: unknown } | null | undefined)?.user_id;
+  const userId = typeof resultUserId === 'string' ? resultUserId : context.id;
+  return typeof userId === 'string' ? { userId } : {};
+}
+
 export function registerHooks(ctx: RegisterHooksContext): void {
   const {
     db,
@@ -1810,6 +1829,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
         app.emit('realtime:authorization-invalidated', {
           tenantId: requireCurrentTenantId(),
           disconnectSockets: mode === 'evict',
+          ...realtimeAuthorizationInvalidationSubject(context, mode),
         });
       },
       () => console.warn('[realtime] Failed to schedule authorization eviction')

@@ -51,6 +51,7 @@ import {
   protectFilesystemHomeWrite,
   protectServerManagedTaskWrites,
   type RegisterHooksContext,
+  realtimeAuthorizationInvalidationSubject,
   registerHooks,
   shouldDrainQueueAfterSessionPostTurnPatch,
   shouldRunSessionPostTurnHooks,
@@ -123,6 +124,32 @@ describe('classifyRealtimeAuthorizationInvalidation', () => {
 
   it('ignores branch metadata patches that cannot change authorization', () => {
     expect(classify('branches', 'patch', { name: 'Renamed' })).toBe('none');
+  });
+});
+
+describe('realtimeAuthorizationInvalidationSubject', () => {
+  it('names the changed user on user evictions so their executors are retired', () => {
+    expect(
+      realtimeAuthorizationInvalidationSubject({ path: 'users', id: 'user-1' }, 'evict')
+    ).toEqual({ userId: 'user-1' });
+  });
+
+  it('prefers the full user_id from the result over a short-ID prefix', () => {
+    expect(
+      realtimeAuthorizationInvalidationSubject(
+        { path: 'users', id: 'user-1', result: { user_id: 'user-1-full-uuid' } },
+        'evict'
+      )
+    ).toEqual({ userId: 'user-1-full-uuid' });
+  });
+
+  it.each([
+    [{ path: 'users', id: 'user-1' }, 'cache'],
+    [{ path: 'users', id: null }, 'evict'],
+    [{ path: 'branches', id: 'branch-1' }, 'evict'],
+    [{ path: 'boards', id: 'board-1' }, 'evict'],
+  ] as const)('omits the user for %o (%s)', (context, mode) => {
+    expect(realtimeAuthorizationInvalidationSubject(context, mode)).toEqual({});
   });
 });
 
