@@ -8,6 +8,8 @@
  * verified NOSUPERUSER/NOBYPASSRLS, so an unscoped access throws and a
  * cross-tenant read is filtered by the database rather than by the service.
  */
+
+import { getBranchPath } from '@agor/core/config';
 import {
   acquireTenantWriteGate,
   BoardRepository,
@@ -117,7 +119,7 @@ describe.skipIf(!postgresUrl || !usesPostgresSchema)(
           name: 'launch',
           ref: 'main',
           branch_unique_id: Math.floor(Math.random() * 1_000_000),
-          path: `/tmp/${generateId()}`,
+          path: getBranchPath('launch-json/fixture', generateId(), tenantId),
         });
         return { tenantId, admin, member, repo, branch };
       });
