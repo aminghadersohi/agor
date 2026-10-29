@@ -6,7 +6,7 @@
  * answer. These tests run the after-hook chains `registerHooks` actually
  * installs and assert on the `realtime:authorization-invalidated` event the app
  * emits, so dropping `affectedBranchId` from the emission (which silently turns
- * every branch revocation back into a tenant-wide executor eviction) fails here.
+ * every branch revocation back into a tenant-wide eviction) fails here.
  */
 
 import type { HookContext } from '@agor/core/types';
@@ -101,29 +101,6 @@ const runAfterChain = async (
 };
 
 describe('registered after-hooks emit branch-scoped authorization invalidation', () => {
-  it('scopes a branch permission revocation to the route branch under the request tenant', async () => {
-    const { after, emitted } = registerAndCapture();
-    await runAfterChain(after, {
-      path: 'branches/:id/permissions',
-      method: 'patch',
-      data: { others_can: 'none' },
-      result: { others_can: 'none' },
-      params: {
-        tenant: { tenant_id: REQUEST_TENANT_ID },
-        route: { id: BRANCH_ID.toUpperCase() },
-        // A caller-proposed scope must never reach the emitted event.
-        query: { affectedBranchId: OTHER_BRANCH_ID },
-      },
-    } as never);
-
-    await vi.waitFor(() => expect(emitted).toHaveLength(1));
-    expect(emitted[0]).toEqual({
-      tenantId: REQUEST_TENANT_ID,
-      disconnectSockets: true,
-      affectedBranchId: BRANCH_ID,
-    });
-  });
-
   it.each([
     ['board_id', { board_id: 'board-2' }],
     ['permission_binding', { permission_binding: { kind: 'board' } }],

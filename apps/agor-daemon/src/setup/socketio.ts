@@ -33,7 +33,6 @@ import {
   type CursorMoveEvent,
   MAX_PRESENCE_BOARD_SUBSCRIPTIONS,
   MAX_TENANT_ID_LENGTH,
-  type Params,
   PRESENCE_SOCKET_EVENTS,
   type PresenceHeartbeatEvent,
   type PresenceLeftEvent,
@@ -49,7 +48,6 @@ import {
   retireAuthenticatedConnectionAuthority,
 } from '../auth/authenticated-connection-authority.js';
 import { getOrCreateExecutorConnectionRevocationFence } from '../auth/executor-connection-admission.js';
-import { authenticatedTaskExecutorRuntimeAuthority } from '../auth/executor-runtime-scope.js';
 import type { ExecutorSessionTokenRevocation } from '../auth/executor-session-token.js';
 import { getDaemonOperationalMetrics } from '../metrics/operational.js';
 import {
@@ -268,6 +266,19 @@ export function getSocketAuthState(socket: Socket): SocketAuthState {
     return socketAuthState(null, true, false, tenant);
   }
   return socketAuthState(authority.principal.userId, false, false, tenant);
+}
+
+/**
+ * The initiating user an executor socket acts for, read from the immutable
+ * Feathers projection bound at the handshake. Used only to match evictions
+ * about that user; it never grants native-socket authority.
+ */
+function executorUserId(socket: Socket): string | undefined {
+  const projection = (socket as FeathersSocket).feathers as
+    | { user?: { user_id?: unknown } }
+    | undefined;
+  const userId = projection?.user?.user_id;
+  return typeof userId === 'string' ? userId : undefined;
 }
 
 /**
@@ -907,51 +918,39 @@ export function createSocketIOConfig(
         // inherit a warmed pre-revocation ACL cache or terminal allocation.
         app.emit(LOCAL_AUTHORIZATION_INVALIDATION_EVENT, { tenantId: data.tenantId });
       }
+      const changedUserId =
+        typeof data.userId === 'string' && data.userId.length > 0 ? data.userId : undefined;
       for (const socket of io.sockets.sockets.values()) {
-        if (getSocketAuthState(socket).tenant?.tenant_id === data.tenantId) {
-          const connection = (socket as FeathersSocket).feathers;
-          const authority = getAuthenticatedConnectionAuthority(connection);
-          if (branchScoped) {
-            const kind = authority?.principal.kind;
-            // Users and full service accounts hold no branch-bound passive
-            // capability that survives the cache clear above.
-            if (kind === 'user' || kind === 'service') continue;
-            // A terminal executor serves exactly one branch's attachment.
-            if (
-              authority?.principal.kind === 'terminal-executor' &&
-              isValidUUID(authority.principal.branchId) &&
-              authority.principal.branchId.toLowerCase() !== affectedBranchId
-            )
-              continue;
-          }
-          if (
-            affectedBranchId &&
-            authority?.principal.kind === 'executor' &&
-            (authority.expiresAt === undefined || authority.expiresAt > Date.now())
-          ) {
-            let task: ReturnType<typeof authenticatedTaskExecutorRuntimeAuthority> = null;
-            try {
-              task = authenticatedTaskExecutorRuntimeAuthority({
-                ...connection,
-                provider: 'socketio',
-                connection,
-              } as Params);
-            } catch {
-              /* Invalid legacy projections never exempt eviction. */
-            }
-            // Task executors join only their exact Task channel, not passive
-            // board/user rooms. A branch-local ACL change cannot stale another
-            // branch's lease. Every service still checks current authorization;
-            // token retirement and broad identity changes still evict normally.
-            if (
-              task?.tenantId === data.tenantId &&
-              isValidUUID(task.branchId) &&
-              task.branchId.toLowerCase() !== affectedBranchId
-            )
-              continue;
-          }
-          socket.disconnect(true);
+        const auth = getSocketAuthState(socket);
+        if (auth.tenant?.tenant_id !== data.tenantId) continue;
+        // Agent executors survive ordinary tenant evictions: dropping them
+        // fails every in-flight turn in the tenant with "socket has been
+        // disconnected" whenever any RBAC-relevant mutation (e.g. moving a
+        // branch between boards) happens. Branch/board ACL changes still
+        // apply to them because those checks hit the DB by user id on every
+        // call. Their projected role and credentials are frozen at the
+        // handshake, though, so an eviction about the executor's own user
+        // (role, credential, or removal) still disconnects it.
+        if (auth.isExecutor && (!changedUserId || executorUserId(socket) !== changedUserId)) {
+          continue;
         }
+        if (branchScoped) {
+          const authority = getAuthenticatedConnectionAuthority(
+            (socket as FeathersSocket).feathers
+          );
+          const kind = authority?.principal.kind;
+          // Users and full service accounts hold no branch-bound passive
+          // capability that survives the cache clear above.
+          if (kind === 'user' || kind === 'service') continue;
+          // A terminal executor serves exactly one branch's attachment.
+          if (
+            authority?.principal.kind === 'terminal-executor' &&
+            isValidUUID(authority.principal.branchId) &&
+            authority.principal.branchId.toLowerCase() !== affectedBranchId
+          )
+            continue;
+        }
+        socket.disconnect(true);
       }
     };
 

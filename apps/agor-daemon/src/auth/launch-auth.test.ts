@@ -149,7 +149,7 @@ describe('one-time launch auth service', () => {
   function service(
     config = baseConfig(),
     usersService = makeUsersService(db),
-    onAuthorizationInvalidated?: (tenantId: string) => void
+    onAuthorizationInvalidated?: (tenantId: string, userId: UserID) => void
   ) {
     const { settings } = resolveExternalLaunchSettings(config);
     return createLaunchAuthService({
@@ -836,9 +836,11 @@ execution:
   it('invalidates tenant authority only when launch projection changes a persisted role', async () => {
     const invalidated = vi.fn();
     mockExchange(signClaims({ sub: 'role-change', role: 'member' }));
-    await service(externalAuthorityConfig(), makeUsersService(db), invalidated).create({
-      launchCode: 'first',
-    });
+    const first = await service(
+      externalAuthorityConfig(),
+      makeUsersService(db),
+      invalidated
+    ).create({ launchCode: 'first' });
     expect(invalidated).not.toHaveBeenCalled();
 
     mockExchange(signClaims({ sub: 'role-change', role: 'admin' }));
@@ -846,7 +848,7 @@ execution:
       launchCode: 'second',
     });
     expect(invalidated).toHaveBeenCalledOnce();
-    expect(invalidated).toHaveBeenCalledWith('default');
+    expect(invalidated).toHaveBeenCalledWith('default', first.user.user_id);
 
     mockExchange(signClaims({ sub: 'role-change', role: 'admin' }));
     await service(externalAuthorityConfig(), makeUsersService(db), invalidated).create({

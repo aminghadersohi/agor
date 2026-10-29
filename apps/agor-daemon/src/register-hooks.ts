@@ -1143,18 +1143,16 @@ export function redactGatewayChannelResultsForTransport(context: HookContext): H
  */
 export type RealtimeAuthorizationInvalidationMode = 'none' | 'cache' | 'branch' | 'evict';
 
-/** Only successful single-branch writes can narrow Task-executor eviction. */
+/** Only a successful single-branch write can narrow an invalidation's scope. */
 export function authorizationInvalidationBranchId(
   context: Pick<HookContext, 'path' | 'params' | 'result'>
 ): string | undefined {
-  // These are the service's validated mutation target, never a caller's
-  // proposed scope field. Bulk/unknown results deliberately stay tenant-wide.
+  // The service's validated mutation target, never a caller's proposed scope
+  // field. Bulk/unknown results deliberately stay tenant-wide.
   const id =
-    context.path === 'branches/:id/permissions'
-      ? context.params.route?.id
-      : context.path === 'branches' && context.result && !Array.isArray(context.result)
-        ? context.result.branch_id
-        : undefined;
+    context.path === 'branches' && context.result && !Array.isArray(context.result)
+      ? context.result.branch_id
+      : undefined;
   return typeof id === 'string' && isValidUUID(id) ? id.toLowerCase() : undefined;
 }
 
@@ -1277,6 +1275,25 @@ export function classifyRealtimeAuthorizationInvalidation(
   }
 
   return 'none';
+}
+
+/**
+ * Name the user whose own authority an eviction concerns. User-level changes
+ * (role, credentials, removal) must also retire that user's running agent
+ * executors, whose Feathers projection froze the previous role at handshake.
+ * Other evictions leave executors connected; their branch/board ACL checks hit
+ * the DB on every call.
+ */
+export function realtimeAuthorizationInvalidationSubject(
+  context: Pick<HookContext, 'path' | 'id'> & { result?: unknown },
+  mode: Exclude<RealtimeAuthorizationInvalidationMode, 'none'>
+): { userId?: string } {
+  if (mode !== 'evict' || context.path !== 'users') return {};
+  // The users repository also resolves short-ID prefixes, so prefer the full
+  // user_id from the result over the caller-supplied id.
+  const resultUserId = (context.result as { user_id?: unknown } | null | undefined)?.user_id;
+  const userId = typeof resultUserId === 'string' ? resultUserId : context.id;
+  return typeof userId === 'string' ? { userId } : {};
 }
 
 export function registerHooks(ctx: RegisterHooksContext): void {
@@ -1903,6 +1920,7 @@ export function registerHooks(ctx: RegisterHooksContext): void {
           // Kept true for branch scope so pre-scope replicas still evict.
           disconnectSockets: mode !== 'cache',
           ...(affectedBranchId ? { affectedBranchId } : {}),
+          ...realtimeAuthorizationInvalidationSubject(context, mode),
           ...(branchScoped ? { revocationScope: BRANCH_REVOCATION_SCOPE } : {}),
         });
       },

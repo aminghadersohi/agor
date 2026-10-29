@@ -20,6 +20,7 @@
  * (`/sessions/:id/prompt`) is stubbed — nothing in this feature reaches it.
  */
 
+import { getBranchPath } from '@agor/core/config';
 import {
   BoardRepository,
   BranchRepository,
@@ -179,7 +180,8 @@ export async function teammateAddressingFixture(
         name: options.name,
         ref: 'main',
         branch_unique_id: branchUnique++,
-        path: `/tmp/${generateId()}`,
+        // Executor sinks only accept paths under the tenant's managed branch root.
+        path: getBranchPath('fixture-org/teammates', generateId(), tenantId),
         archived: options.archived ?? false,
         ...(options.plainBranch
           ? {}
