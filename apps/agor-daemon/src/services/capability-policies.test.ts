@@ -87,7 +87,8 @@ async function fixture(db: Database) {
     name: 'service-policy-branch',
     ref: 'refs/heads/service-policy-branch',
     branch_unique_id: 45678,
-    path: '/tmp/service-policy-branch',
+    // Unique per fixture: branch workspaces may not overlap, even across tenants.
+    path: `/tmp/${generateId()}/service-policy-branch`,
     created_by: owner.user_id,
     permission_binding: 'override',
   });
