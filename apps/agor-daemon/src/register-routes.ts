@@ -1745,10 +1745,11 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       accessTokenTtl: ACCESS_TOKEN_TTL,
       refreshTokenTtl: REFRESH_TOKEN_TTL,
       usersService,
-      onAuthorizationInvalidated: (tenantId) => {
+      onAuthorizationInvalidated: (tenantId, userId) => {
         app.emit('realtime:authorization-invalidated', {
           tenantId,
           disconnectSockets: true,
+          userId,
         });
       },
     })

@@ -84,6 +84,7 @@ import { isSuperAdmin } from '../utils/branch-authorization.js';
 import { resolveBranchExecutorSandboxMounts } from '../utils/branch-executor-sandbox.js';
 import { ensureBranchWorkspaceAccess } from '../utils/branch-workspace-path.js';
 import { resolveDelegatedExecutionHomeKey } from '../utils/executor-delegated-home.js';
+import { assertManagedBranchPath } from '../utils/managed-branch-path.js';
 import { getDaemonUrl, requestExecutor } from '../utils/spawn-executor.js';
 import { issueExecutorCommandToken } from './session-token-service.js';
 
@@ -204,6 +205,11 @@ async function scanBranchWithExecutor(
     });
     return { fsAccess, delegatedHomeKey, sandboxMounts };
   });
+  // Revalidate the stored path against the caller tenant's branch root.
+  const managedPath = assertManagedBranchPath(
+    branch.path,
+    requireCurrentTenantId('Missing active tenant context for skill scan')
+  );
   const sessionToken = await issueExecutorCommandToken(
     app,
     BRANCH_SKILLS_SCAN_COMMAND,
@@ -217,7 +223,7 @@ async function scanBranchWithExecutor(
       daemonUrl: getDaemonUrl(),
       params: {
         branchId: branch.branch_id,
-        cwd: branch.path,
+        cwd: managedPath,
         principalBranchAccess: fsAccess,
         ...sandboxMounts,
       },

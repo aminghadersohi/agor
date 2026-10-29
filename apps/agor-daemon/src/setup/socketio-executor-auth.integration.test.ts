@@ -454,10 +454,11 @@ describe('executor Socket.IO connection capability', () => {
     await expect(finish).resolves.toMatchObject({ accepted: true, status: 'completed' });
     await disconnected; // exact terminal token revocation still wins
 
+    // An eviction about the executor's own user still retires its frozen projection.
     const other = await startHarness();
     harnesses.push(other);
     const evicted = waitForDisconnect(other.client);
-    other.app.emit('realtime:authorization-invalidated', { tenantId: TENANT_ID });
+    other.app.emit('realtime:authorization-invalidated', { tenantId: TENANT_ID, userId: USER_ID });
     await evicted;
     expect(other.client.io.connected).toBe(false);
   });
@@ -580,14 +581,21 @@ describe('executor Socket.IO connection capability', () => {
   });
 
   it.each([undefined, null, '', 'not-a-branch', { branchId: BRANCH_ID }, BRANCH_ID.toUpperCase()])(
-    'still evicts affected Task executors or unscoped/malformed invalidations (%j)',
+    "keeps Task executors through any branch scope (%j) but evicts on the executor's own user",
     async (affectedBranchId) => {
       const harness = await startHarness();
       harnesses.push(harness);
+      harness.app.emit('realtime:authorization-invalidated', {
+        tenantId: TENANT_ID,
+        affectedBranchId,
+      });
+      expect(harness.client.io.connected).toBe(true);
+      expect(executorRoomConnections(harness)).toHaveLength(1);
       const disconnected = waitForDisconnect(harness.client);
       harness.app.emit('realtime:authorization-invalidated', {
         tenantId: TENANT_ID,
         affectedBranchId,
+        userId: USER_ID,
       });
       await disconnected;
       expect(harness.client.io.connected).toBe(false);
@@ -632,14 +640,6 @@ describe('executor Socket.IO connection capability', () => {
         tenant_id: TENANT_ID,
         user_id: USER_ID,
       });
-      const disconnected = waitForDisconnect(commandClient);
-      harness.app.emit('realtime:authorization-invalidated', {
-        tenantId: TENANT_ID,
-        affectedBranchId: '018f0000-0000-7000-8000-0000000000b4',
-      });
-      await disconnected;
-      expect(commandClient.io.connected).toBe(false); // taskless capabilities are not exempt
-      expect(harness.client.io.connected).toBe(true); // the exact, unrelated Task lease is
     } finally {
       commandClient.io.close();
     }
