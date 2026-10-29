@@ -55,25 +55,29 @@ export const HA_AUTHORIZATION_INVALIDATION_EVENT = 'agor:authorization-invalidat
  * `disconnectSockets` is optional for rolling-deployment compatibility: an
  * older sender produces an eviction, and a receiver must default to the safer
  * disconnecting behavior when the field is absent.
+ *
+ * `userId` names the principal whose role, credentials, or existence changed.
+ * Agent executor sockets survive ordinary tenant evictions (branch/board/group
+ * ACLs are rechecked against the DB on every call), but their Feathers
+ * projection freezes the initiating user's role, so an eviction about that
+ * user must still drop them. It is optional for the same rolling-deployment
+ * reason: older replicas already disconnect every socket.
  */
 export interface RealtimeAuthorizationInvalidation {
   tenantId?: unknown;
   disconnectSockets?: boolean;
-  /**
-   * Validated single-branch mutation target. Only already-authenticated Task
-   * executors bound to a different branch can retain their task-only channel.
-   * Caches and all other socket principals still receive full invalidation.
-   * Missing/invalid scope retains tenant-wide eviction.
-   */
+  userId?: unknown;
+  /** Validated single-branch mutation target; meaningful with `revocationScope`. */
   affectedBranchId?: unknown;
   /**
    * `'branch'` declares that the mutation changed only `affectedBranchId`'s
    * effective ACL (a board move or permission-binding change). Receivers then
    * clear caches, retire that branch's terminal attachments, and disconnect
-   * only executor/terminal sockets bound to that branch or with no provable
-   * binding. User and service sockets hold no branch-bound passive room that
-   * outlives a cache clear: every branch-derived publication re-checks current
-   * visibility. Senders keep `disconnectSockets: true` so an older receiver
+   * only terminal sockets bound to that branch or with no provable binding.
+   * User and service sockets hold no branch-bound passive room that outlives a
+   * cache clear: every branch-derived publication re-checks current
+   * visibility. Agent executors keep the same `userId` rule as a full
+   * eviction. Senders keep `disconnectSockets: true` so an older receiver
    * that does not understand this field still evicts tenant-wide. Any other
    * value, or a missing/invalid branch id, is ignored (full eviction).
    */

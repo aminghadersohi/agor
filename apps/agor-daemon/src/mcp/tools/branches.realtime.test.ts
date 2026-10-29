@@ -87,6 +87,7 @@ async function fixture(options: { rollback?: boolean; storageMode?: 'clone' | 'w
   // fixture zone is empty.
   vi.spyOn(BoardObjectRepository.prototype, 'count').mockResolvedValue(0);
   vi.spyOn(BoardObjectRepository.prototype, 'findAll').mockResolvedValue([]);
+  vi.spyOn(BranchRepository.prototype, 'findAllByRepoId').mockResolvedValue([]);
   vi.spyOn(BoardObjectRepository.prototype, 'create').mockImplementation(async (data) => {
     placement = {
       ...data,
