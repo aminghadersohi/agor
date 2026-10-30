@@ -5392,7 +5392,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   );
 
   // Explicit, non-destructive repair for a branch whose filesystem provisioning
-  // landed in 'failed', or an active stale archive outcome. Creating is not retryable. Shares
+  // landed in 'failed', or an active stale archive outcome. Creating is retryable
+  // only once released as orphaned (see releaseStaleCreatingProvisioning). Shares
   // the exact same service implementation the MCP tool and UI use, so REST, MCP
   // and UI can never drift. A live 'creating' attempt conflicts, 'ready' no-ops;
   // the transition is an atomic claim. Returns the (possibly-updated) branch row.

@@ -1737,6 +1737,80 @@ describe('ReposService branch provisioning lifecycle', () => {
 
   // ---- startup watchdog (interrupted creating → failed) -------------------
 
+  // ---- stale creating takeover (single-daemon authority only) -------------
+
+  const STALE = '2026-09-30T12:00:00.000Z';
+
+  function staleRetryService() {
+    const get = vi.fn(async () => branch({ filesystem_status: 'creating', updated_at: STALE }));
+    branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
+      changed: true,
+      branch: branch({ filesystem_status: 'failed', updated_at: STALE }),
+    });
+    branchRepoMock.claimForProvisioning.mockResolvedValue({
+      claimed: true,
+      branch: branch({ filesystem_status: 'creating', provisioning_attempt_id: 'attempt-2' }),
+    });
+    const { service } = makeService({ get, patch: vi.fn() });
+    (service as unknown as { repoRepo: { findById: ReturnType<typeof vi.fn> } }).repoRepo.findById =
+      vi.fn(async () => repo);
+    return service;
+  }
+
+  it('with single-daemon authority, retry releases a stale orphaned creating branch and re-dispatches', async () => {
+    const service = staleRetryService();
+    service.setStaleProvisioningRecoveryAuthority(true);
+
+    const result = await service.retryBranchProvisioning('b1', externalParams());
+
+    // Fenced on the orphaned attempt: a late ack from it would win instead.
+    expect(branchRepoMock.markProvisioningFailedIfCreating).toHaveBeenCalledWith(
+      'b1',
+      expect.stringMatching(/no active materialization process/i),
+      'attempt-1'
+    );
+    expect(branchRepoMock.claimForProvisioning).toHaveBeenCalledOnce();
+    expect(result.provisioning_attempt_id).toBe('attempt-2');
+    expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledOnce();
+  });
+
+  it('never releases a creating branch whose executor this process launched and is still running', async () => {
+    const service = staleRetryService();
+    service.setStaleProvisioningRecoveryAuthority(true);
+    await (
+      service as unknown as { dispatchBranchProvisioning: (...a: unknown[]) => Promise<void> }
+    ).dispatchBranchProvisioning(branch(), repo, 'user-1', undefined, 'create');
+    const onExit = grabOnExit();
+    executorMocks.spawnExecutorFireAndForget.mockClear();
+
+    await expect(service.retryBranchProvisioning('b1', externalParams())).rejects.toThrow(
+      /in progress/i
+    );
+    expect(branchRepoMock.markProvisioningFailedIfCreating).not.toHaveBeenCalled();
+    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
+
+    // Once that executor has exited without settling the row, it is an orphan.
+    onExit(0);
+    await service.retryBranchProvisioning('b1', externalParams());
+    expect(branchRepoMock.markProvisioningFailedIfCreating).toHaveBeenCalledOnce();
+    expect(executorMocks.spawnExecutorFireAndForget).toHaveBeenCalledOnce();
+  });
+
+  it('a lost release CAS (attempt acked meanwhile) still refuses the retry', async () => {
+    const service = staleRetryService();
+    service.setStaleProvisioningRecoveryAuthority(true);
+    branchRepoMock.markProvisioningFailedIfCreating.mockResolvedValue({
+      changed: false,
+      branch: branch({ filesystem_status: 'creating' }),
+    });
+
+    await expect(service.retryBranchProvisioning('b1', externalParams())).rejects.toThrow(
+      /in progress/i
+    );
+    expect(branchRepoMock.claimForProvisioning).not.toHaveBeenCalled();
+    expect(executorMocks.spawnExecutorFireAndForget).not.toHaveBeenCalled();
+  });
+
   it('watchdog marks every stuck creating branch failed — never recovers or re-dispatches', async () => {
     const stuckA = branch({ branch_id: 'a', filesystem_status: 'creating' });
     const stuckB = branch({ branch_id: 'b', filesystem_status: 'creating' });

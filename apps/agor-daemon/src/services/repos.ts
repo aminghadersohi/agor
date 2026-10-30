@@ -165,12 +165,27 @@ function deriveLocalRepoSlug(remoteUrl: string | undefined, explicitSlug?: strin
 }
 
 /**
+ * How long a `creating` row must sit untouched before an authorized
+ * retry/archive/delete may release it to `failed`. Covers the post-commit
+ * launch window and any slow-but-live materialization reporting progress.
+ */
+export const STALE_CREATING_PROVISIONING_MS = 30 * 60 * 1000;
+
+/**
  * Extended repos service with custom methods
  */
 export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams> {
   private repoRepo: RepoRepository;
   private app: Application;
   private db: TenantScopeAwareDatabase;
+  /**
+   * Branch IDs with a provisioning executor this process launched that has not
+   * exited yet. Only meaningful under single-daemon authority, where this
+   * process is the sole launcher; a restart empties it along with the owners.
+   */
+  private readonly liveProvisioningExecutors = new Map<string, number>();
+  /** Granted at startup only when this daemon owns every provisioning attempt. */
+  private staleProvisioningRecoveryAuthority = false;
 
   constructor(db: TenantScopeAwareDatabase, app: Application) {
     const repoRepo = new RepoRepository(db);
@@ -1138,57 +1153,65 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         `${logPrefix} enqueue git.branch.add (reason=${reason}, storage_mode=${storageMode})`
       );
 
-      const launch = () =>
-        spawnExecutorFireAndForget(
-          {
-            command: 'git.branch.add',
-            sessionToken,
-            daemonUrl: getDaemonUrl(),
-            params: {
-              branchId: branch.branch_id,
-              repoId: repo.repo_id,
-              branchesRoot,
-              userId: userId as string | undefined,
-              principalBranchAccess: 'write',
-              // Echoed back on the executor's terminal patch so a superseded
-              // attempt's late ack can be discarded instead of overwriting a
-              // newer one.
-              ...(attemptId ? { provisioningAttemptId: attemptId } : {}),
-              restoreMode: branch.provisioning_operation === 'restore',
-              allowExistingCheckout: reason !== 'create',
-              useReference:
-                storageMode === 'clone' &&
-                !getTeammateConfig(branch)?.localHome &&
-                !!repo.local_path &&
-                shouldUseCloneReferencePath(this.app.get('config')),
+      const launch = () => {
+        const releaseLiveExecutor = this.trackLiveProvisioningExecutor(branch.branch_id);
+        try {
+          spawnExecutorFireAndForget(
+            {
+              command: 'git.branch.add',
+              sessionToken,
+              daemonUrl: getDaemonUrl(),
+              params: {
+                branchId: branch.branch_id,
+                repoId: repo.repo_id,
+                branchesRoot,
+                userId: userId as string | undefined,
+                principalBranchAccess: 'write',
+                // Echoed back on the executor's terminal patch so a superseded
+                // attempt's late ack can be discarded instead of overwriting a
+                // newer one.
+                ...(attemptId ? { provisioningAttemptId: attemptId } : {}),
+                restoreMode: branch.provisioning_operation === 'restore',
+                allowExistingCheckout: reason !== 'create',
+                useReference:
+                  storageMode === 'clone' &&
+                  !getTeammateConfig(branch)?.localHome &&
+                  !!repo.local_path &&
+                  shouldUseCloneReferencePath(this.app.get('config')),
+              },
             },
-          },
-          {
-            logPrefix,
-            delegatedHomeKey: homeKey,
-            templateVariables: {
-              branch_id: branch.branch_id,
-              user_id: userId,
-              branch_fs_access: 'write',
-            },
-            onExit: (code) => {
-              if (code === 0) {
-                // Success path: the executor patched 'ready' itself.
-                console.log(`${logPrefix} executor exited cleanly (code 0)`);
-                return;
-              }
-              console.error(
-                `${logPrefix} executor exited with code ${code ?? 'null'}; running safety-net reconcile`
-              );
-              void this.reconcileBranchFilesystemAfterExit(
-                branch.branch_id,
-                code,
-                tenantId,
-                attemptId
-              );
-            },
-          }
-        );
+            {
+              logPrefix,
+              delegatedHomeKey: homeKey,
+              templateVariables: {
+                branch_id: branch.branch_id,
+                user_id: userId,
+                branch_fs_access: 'write',
+              },
+              onExit: (code) => {
+                releaseLiveExecutor();
+                if (code === 0) {
+                  // Success path: the executor patched 'ready' itself.
+                  console.log(`${logPrefix} executor exited cleanly (code 0)`);
+                  return;
+                }
+                console.error(
+                  `${logPrefix} executor exited with code ${code ?? 'null'}; running safety-net reconcile`
+                );
+                void this.reconcileBranchFilesystemAfterExit(
+                  branch.branch_id,
+                  code,
+                  tenantId,
+                  attemptId
+                );
+              },
+            }
+          );
+        } catch (error) {
+          releaseLiveExecutor();
+          throw error;
+        }
+      };
       // REST uses short scopes; MCP may own an outer transaction. Neither the
       // attempt nor its command credential may be consumed before commit.
       if (
@@ -1304,7 +1327,8 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
    * Authorized retry/restore through one atomic admission and executor owner.
    * Active failed or stale archive outcomes are repairable; archived branches
    * enter only via unarchive's internal restoreArchived argument. Creating is
-   * never taken over based on age. A ready active branch is a no-op.
+   * taken over only through `releaseStaleCreatingProvisioning`. A ready active
+   * branch is a no-op.
    */
   async retryBranchProvisioning(
     branchId: string,
@@ -1313,8 +1337,8 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
   ): Promise<Branch> {
     const branchesService = this.app.service('branches');
     // Read through the service so short IDs resolve and RBAC hooks fire.
-    const branch = (await branchesService.get(branchId, params)) as Branch;
-    const status = branch.filesystem_status;
+    let branch = (await branchesService.get(branchId, params)) as Branch;
+    let status = branch.filesystem_status;
     const branchRepo = new BranchRepository(this.db);
 
     // Authorization. The `get` above only establishes VIEW access, and the CAS
@@ -1351,6 +1375,13 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
       restoreArchived || BRANCH_FILESYSTEM_ACTIONS.some((candidate) => candidate === status);
     if (status === 'ready' && !restore) {
       return branch;
+    }
+    if (status === 'creating') {
+      const released = await this.releaseStaleCreatingProvisioning(branch, params);
+      if (released) {
+        branch = released;
+        status = released.filesystem_status;
+      }
     }
     if (status === 'creating') {
       throw new Conflict(
@@ -1443,6 +1474,67 @@ export class ReposService extends DrizzleService<Repo, Partial<Repo>, RepoParams
         restore ? 'restore' : 'retry'
       )
     );
+  }
+
+  /**
+   * Called once at startup: true only when this daemon is the sole launcher of
+   * provisioning executors (standalone, or the owned standalone PostgreSQL
+   * host). Shared replicas never get it — another daemon may own the attempt.
+   */
+  setStaleProvisioningRecoveryAuthority(enabled: boolean): void {
+    this.staleProvisioningRecoveryAuthority = enabled;
+  }
+
+  private trackLiveProvisioningExecutor(branchId: string): () => void {
+    this.liveProvisioningExecutors.set(
+      branchId,
+      (this.liveProvisioningExecutors.get(branchId) ?? 0) + 1
+    );
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.liveProvisioningExecutors.get(branchId) ?? 1) - 1;
+      if (remaining > 0) this.liveProvisioningExecutors.set(branchId, remaining);
+      else this.liveProvisioningExecutors.delete(branchId);
+    };
+  }
+
+  /**
+   * Release an orphaned `creating` row to `failed` so the normal retry,
+   * archive and delete lifecycles accept it. The caller must already have
+   * authorized branch control. Eligible only when ALL hold:
+   * - this daemon has single-daemon provisioning authority;
+   * - this process has no live provisioning executor for the branch;
+   * - the row has not been written for STALE_CREATING_PROVISIONING_MS.
+   * The write is the attempt-fenced `creating` CAS, so an attempt that acks or
+   * is superseded meanwhile wins. Never inspects or touches the filesystem.
+   * Returns the failed row, or null when the row was left untouched.
+   */
+  async releaseStaleCreatingProvisioning(
+    branch: Branch,
+    params?: RepoParams,
+    now: number = Date.now()
+  ): Promise<Branch | null> {
+    if (branch.filesystem_status !== 'creating' || branch.archived) return null;
+    if (!this.staleProvisioningRecoveryAuthority) return null;
+    if (this.liveProvisioningExecutors.has(branch.branch_id)) return null;
+    const lastWrite = Date.parse(branch.updated_at);
+    if (!Number.isFinite(lastWrite) || now - lastWrite < STALE_CREATING_PROVISIONING_MS)
+      return null;
+    const { changed, branch: failed } = await this.withTenantDatabase(params, () =>
+      new BranchRepository(this.db).markProvisioningFailedIfCreating(
+        branch.branch_id,
+        'Branch provisioning stalled with no active materialization process. Retry provisioning to try again.',
+        branch.provisioning_attempt_id
+      )
+    );
+    if (!changed) return null;
+    console.warn(
+      `[branch-provisioning ${shortId(branch.branch_id)}] stale creating → failed (no live executor, last write ${branch.updated_at})`
+    );
+    this.emitBranchPatched(failed, params);
+    return failed;
   }
 
   /**
