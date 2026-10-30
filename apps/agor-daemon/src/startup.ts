@@ -18,6 +18,7 @@ import {
   resolveExecutorHeartbeatConfig,
   resolveMultiTenancyConfig,
   resolveRestartRecoverySettings,
+  usesExternalBranchExecutor,
 } from '@agor/core/config';
 import type { DistributedWorkIdentity } from '@agor/core/coordination';
 import {
@@ -733,17 +734,26 @@ export async function prepareTaskRuntimeStartup(
 
 /**
  * Stale `creating` takeover infers owner death from "no live executor in this
- * process", which is only evidence when this process is the sole launcher:
- * standalone, or the owned standalone PostgreSQL host. Returns the decision so
- * the startup provisioning watchdog uses the same gate.
+ * process", which is only evidence when this process is the sole launcher AND
+ * its executors run in-process: standalone, or the owned standalone PostgreSQL
+ * host, without an external executor. A delegated/templated launcher may exit
+ * after submitting a remote job that survives both its exit and a daemon
+ * restart, so external executors never get runtime takeover authority.
+ *
+ * The startup watchdog keeps its historical plain-standalone behavior; the
+ * owned standalone PostgreSQL host joins it only without an external executor.
  */
 export function configureBranchProvisioningRecovery(
-  ctx: Pick<StartupContext, 'app'>,
+  ctx: Pick<StartupContext, 'app' | 'config' | 'taskRuntimePolicy'>,
   singleDaemonTaskRuntime: boolean
-): boolean {
+): { staleRecoveryAuthority: boolean; startupWatchdog: boolean } {
+  const staleRecoveryAuthority = singleDaemonTaskRuntime && !usesExternalBranchExecutor(ctx.config);
   const reposService = ctx.app.service('repos') as unknown as ReposServiceImpl | undefined;
-  reposService?.setStaleProvisioningRecoveryAuthority(singleDaemonTaskRuntime);
-  return singleDaemonTaskRuntime;
+  reposService?.setStaleProvisioningRecoveryAuthority(staleRecoveryAuthority);
+  return {
+    staleRecoveryAuthority,
+    startupWatchdog: ctx.taskRuntimePolicy === 'standalone' || staleRecoveryAuthority,
+  };
 }
 
 export async function startup(ctx: StartupContext): Promise<void> {
@@ -767,7 +777,10 @@ export async function startup(ctx: StartupContext): Promise<void> {
   const ownedStandalonePostgres = isOwnedStandalonePostgres(ctx);
   const singleDaemonTaskRuntime = usesSingleDaemonTaskRuntime(ctx);
   const orphanCleanupResult = await prepareTaskRuntimeStartup(ctx);
-  configureBranchProvisioningRecovery(ctx, singleDaemonTaskRuntime);
+  const branchProvisioningRecovery = configureBranchProvisioningRecovery(
+    ctx,
+    singleDaemonTaskRuntime
+  );
   if (ownedStandalonePostgres) {
     console.log(
       '[startup] owned standalone PostgreSQL host: single-daemon startup cleanup and restart recovery enabled'
@@ -824,10 +837,11 @@ export async function startup(ctx: StartupContext): Promise<void> {
   // Single-daemon, bootstrap-tenant provisioning safety net. This is not HA
   // owner-death detection or a cross-tenant sweep: another daemon may still own
   // a `creating` attempt, so shared-replica startup must leave it alone. The
-  // owned standalone PostgreSQL host is the only launcher, so it qualifies.
+  // owned standalone PostgreSQL host is the only launcher, so it qualifies
+  // unless an external executor may still be running a remote job.
   // Failed rows require explicit retry; this job never re-dispatches or
   // inspects local worktrees.
-  if (singleDaemonTaskRuntime) {
+  if (branchProvisioningRecovery.startupWatchdog) {
     runPostStartJob('branch-provisioning-watchdog', () =>
       runStartupTenantDatabaseScope(ctx, async () => {
         const reposService = app.service('repos') as unknown as ReposServiceImpl;

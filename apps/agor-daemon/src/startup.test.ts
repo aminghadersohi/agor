@@ -208,32 +208,54 @@ describe('metadata archive startup recovery', () => {
 });
 
 describe('branch provisioning recovery authority', () => {
-  it('is granted on the owned standalone PostgreSQL host and withheld from shared replicas', () => {
-    const setStaleProvisioningRecoveryAuthority = vi.fn();
-    const withRepos = (ctx: StartupContext) => {
-      ctx.app = {
-        service: (name: string) =>
-          name === 'repos' ? { setStaleProvisioningRecoveryAuthority } : undefined,
-      } as unknown as StartupContext['app'];
-      return ctx;
-    };
+  const setStaleProvisioningRecoveryAuthority = vi.fn();
+  const withRepos = (ctx: StartupContext) => {
+    ctx.app = {
+      service: (name: string) =>
+        name === 'repos' ? { setStaleProvisioningRecoveryAuthority } : undefined,
+    } as unknown as StartupContext['app'];
+    return ctx;
+  };
+  const configure = (ctx: StartupContext) =>
+    configureBranchProvisioningRecovery(ctx, usesSingleDaemonTaskRuntime(ctx));
 
+  it('is granted on the owned standalone PostgreSQL host and withheld from shared replicas', () => {
     // The live shape that previously skipped the provisioning watchdog.
     const owned = withRepos(makeOwnedStandalonePostgres(makeStartupContextWithGuardedDb().ctx));
     expect(owned.taskRuntimePolicy).toBe('shared_postgres');
-    expect(configureBranchProvisioningRecovery(owned, usesSingleDaemonTaskRuntime(owned))).toBe(
-      true
-    );
+    expect(configure(owned)).toEqual({ staleRecoveryAuthority: true, startupWatchdog: true });
     expect(setStaleProvisioningRecoveryAuthority).toHaveBeenLastCalledWith(true);
 
     const shared = withRepos(makeStartupContextWithGuardedDb().ctx);
     shared.taskRuntimePolicy = 'shared_postgres';
     shared.environmentHealthMonitorPolicy = 'shared_postgres';
-    expect(configureBranchProvisioningRecovery(shared, usesSingleDaemonTaskRuntime(shared))).toBe(
-      false
-    );
+    expect(configure(shared)).toEqual({ staleRecoveryAuthority: false, startupWatchdog: false });
     expect(setStaleProvisioningRecoveryAuthority).toHaveBeenLastCalledWith(false);
   });
+
+  // A delegated/templated launcher can exit after submitting a remote job that
+  // outlives both the launcher and a daemon restart.
+  for (const [label, execution] of [
+    ['delegated unix_user_mode', { unix_user_mode: 'delegated' }],
+    ['executor_command_template', { executor_command_template: 'fixture-launcher {payload}' }],
+  ] as const) {
+    it(`is withheld for an external executor (${label})`, () => {
+      const owned = withRepos(makeOwnedStandalonePostgres(makeStartupContextWithGuardedDb().ctx));
+      owned.config.execution = { ...execution } as StartupContext['config']['execution'];
+      expect(configure(owned)).toEqual({ staleRecoveryAuthority: false, startupWatchdog: false });
+      expect(setStaleProvisioningRecoveryAuthority).toHaveBeenLastCalledWith(false);
+
+      // Plain standalone keeps its historical startup watchdog, but never
+      // gets runtime takeover authority with an external executor.
+      const standalone = withRepos(makeStartupContextWithGuardedDb().ctx);
+      standalone.config.execution = { ...execution } as StartupContext['config']['execution'];
+      expect(configure(standalone)).toEqual({
+        staleRecoveryAuthority: false,
+        startupWatchdog: true,
+      });
+      expect(setStaleProvisioningRecoveryAuthority).toHaveBeenLastCalledWith(false);
+    });
+  }
 });
 
 describe('startup tenant database scope', () => {

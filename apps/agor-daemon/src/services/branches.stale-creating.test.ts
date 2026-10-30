@@ -6,12 +6,16 @@ import {
   type Database,
   generateId,
   runWithTenantContext,
+  UsersRepository,
 } from '@agor/core/db';
 import type { Application } from '@agor/core/feathers';
 import type { AuthenticatedParams, BranchID, TenantID } from '@agor/core/types';
 import { afterEach, beforeEach, expect, vi } from 'vitest';
 import { seedEnvironmentCommandBranch } from '../../../../packages/core/src/db/repositories/environment-commands.test-support';
-import { ownedDbTest as test } from '../../../../packages/core/src/db/test-helpers';
+import {
+  setTestBranchUserRole,
+  ownedDbTest as test,
+} from '../../../../packages/core/src/db/test-helpers';
 import { markBranchArchiveDeleteAuthorized } from '../utils/branch-archive-delete-authorization';
 import { requestExecutor, spawnExecutor } from '../utils/spawn-executor';
 import { BranchesService } from './branches';
@@ -42,15 +46,16 @@ function setup(db: Database, { authority }: { authority: boolean }) {
   const scoped = createTenantScopedDatabaseProxy(db);
   const others = { emit: vi.fn(), archiveBranchSessions: vi.fn(async () => ({ count: 0 })) };
   let repos: ReposService;
+  let service: BranchesService;
   const app = {
     get: () => ({ execution: {} }),
     emit: vi.fn(),
     sessionTokenService: { generateCommandToken: vi.fn(async () => 'fixture-command-token') },
-    service: (name: string) => (name === 'repos' ? repos : others),
+    service: (name: string) => (name === 'repos' ? repos : name === 'branches' ? service : others),
   } as unknown as Application;
   repos = new ReposService(scoped, app);
   repos.setStaleProvisioningRecoveryAuthority(authority);
-  const service = new BranchesService(scoped, app);
+  service = new BranchesService(scoped, app);
   vi.spyOn(service, 'get').mockImplementation(
     async (id: BranchID) => (await new BranchRepository(db).findById(id))! as never
   );
@@ -191,4 +196,47 @@ test('a newer attempt acknowledging first wins the fenced CAS', async ({ db }) =
   expect((await new BranchRepository(db).findById(branch.branch_id))?.filesystem_status).toBe(
     'creating'
   );
+});
+
+test('a view-only user cannot trigger stale recovery through retry, archive or delete', async ({
+  db,
+}) => {
+  const { branch, user: owner } = await seedCreatingBranch(db, STUCK_SINCE);
+  const viewer = await new UsersRepository(db).create({
+    email: 'stale-viewer@example.test',
+    role: 'member',
+  });
+  await setTestBranchUserRole(
+    db,
+    branch.branch_id,
+    viewer.user_id,
+    'viewer',
+    'none',
+    owner.user_id
+  );
+  const { service, repos } = setup(db, { authority: true });
+  const release = vi.spyOn(repos, 'releaseStaleCreatingProvisioning');
+  await runWithTenantContext('default', async () => {
+    await expect(
+      repos.retryBranchProvisioning(branch.branch_id, paramsFor(viewer))
+    ).rejects.toThrow("'all' branch permission");
+    await expect(archive(service, branch.branch_id, paramsFor(viewer))).rejects.toThrow(
+      'Branch Manager authority is required'
+    );
+    const params = paramsFor(viewer);
+    markBranchArchiveDeleteAuthorized(params, branch.branch_id, 'delete');
+    await expect(
+      service.archiveOrDelete(
+        branch.branch_id,
+        { metadataAction: 'delete', filesystemAction: 'deleted' },
+        params
+      )
+    ).rejects.toThrow('branch all permission required');
+  });
+  expect(release).not.toHaveBeenCalled();
+  expect(await new BranchRepository(db).findById(branch.branch_id)).toMatchObject({
+    filesystem_status: 'creating',
+    archived: false,
+  });
+  expect(spawnExecutor).not.toHaveBeenCalled();
 });

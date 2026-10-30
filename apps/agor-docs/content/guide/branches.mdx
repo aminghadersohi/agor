@@ -445,6 +445,10 @@ PostgreSQL host), the daemon marks such branches `failed` at startup. At runtime
 process running for it, Retry, Archive, or Delete first moves it to `failed` with an
 explanatory error and then continues as usual. Files on disk are not checked or
 changed. HA deployments never do this, because another replica may own the attempt.
+Installs with an external executor (`unix_user_mode: delegated` or
+`executor_command_template`) never do the runtime release either, because a remote job
+can outlive its launcher and a daemon restart. A standalone PostgreSQL host with an
+external executor also skips the startup step.
 Stop or cancel unfinished tasks, stop the environment, and reconcile pending uploads
 before requesting recovery.
 
