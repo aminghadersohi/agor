@@ -731,6 +731,21 @@ export async function prepareTaskRuntimeStartup(
   });
 }
 
+/**
+ * Stale `creating` takeover infers owner death from "no live executor in this
+ * process", which is only evidence when this process is the sole launcher:
+ * standalone, or the owned standalone PostgreSQL host. Returns the decision so
+ * the startup provisioning watchdog uses the same gate.
+ */
+export function configureBranchProvisioningRecovery(
+  ctx: Pick<StartupContext, 'app'>,
+  singleDaemonTaskRuntime: boolean
+): boolean {
+  const reposService = ctx.app.service('repos') as unknown as ReposServiceImpl | undefined;
+  reposService?.setStaleProvisioningRecoveryAuthority(singleDaemonTaskRuntime);
+  return singleDaemonTaskRuntime;
+}
+
 export async function startup(ctx: StartupContext): Promise<void> {
   const {
     app,
@@ -752,6 +767,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
   const ownedStandalonePostgres = isOwnedStandalonePostgres(ctx);
   const singleDaemonTaskRuntime = usesSingleDaemonTaskRuntime(ctx);
   const orphanCleanupResult = await prepareTaskRuntimeStartup(ctx);
+  configureBranchProvisioningRecovery(ctx, singleDaemonTaskRuntime);
   if (ownedStandalonePostgres) {
     console.log(
       '[startup] owned standalone PostgreSQL host: single-daemon startup cleanup and restart recovery enabled'
@@ -805,11 +821,13 @@ export async function startup(ctx: StartupContext): Promise<void> {
     );
   }
 
-  // Standalone-only, bootstrap-tenant provisioning safety net. This is not HA
+  // Single-daemon, bootstrap-tenant provisioning safety net. This is not HA
   // owner-death detection or a cross-tenant sweep: another daemon may still own
-  // a `creating` attempt, so HA startup must leave it alone. Failed rows require
-  // explicit retry; this job never re-dispatches or inspects local worktrees.
-  if (ctx.taskRuntimePolicy === 'standalone') {
+  // a `creating` attempt, so shared-replica startup must leave it alone. The
+  // owned standalone PostgreSQL host is the only launcher, so it qualifies.
+  // Failed rows require explicit retry; this job never re-dispatches or
+  // inspects local worktrees.
+  if (singleDaemonTaskRuntime) {
     runPostStartJob('branch-provisioning-watchdog', () =>
       runStartupTenantDatabaseScope(ctx, async () => {
         const reposService = app.service('repos') as unknown as ReposServiceImpl;

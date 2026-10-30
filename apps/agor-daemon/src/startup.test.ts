@@ -18,6 +18,7 @@ import { SessionQueueWorker } from './services/session-queue-worker.js';
 import { TaskRuntimeReconciler } from './services/task-runtime-reconciler.js';
 import {
   cleanupOrphanStatuses,
+  configureBranchProvisioningRecovery,
   createEnvironmentHealthMonitor,
   initializeEnvironmentHealthMonitor,
   isOwnedStandalonePostgres,
@@ -203,6 +204,35 @@ describe('metadata archive startup recovery', () => {
     } finally {
       reconcile.mockRestore();
     }
+  });
+});
+
+describe('branch provisioning recovery authority', () => {
+  it('is granted on the owned standalone PostgreSQL host and withheld from shared replicas', () => {
+    const setStaleProvisioningRecoveryAuthority = vi.fn();
+    const withRepos = (ctx: StartupContext) => {
+      ctx.app = {
+        service: (name: string) =>
+          name === 'repos' ? { setStaleProvisioningRecoveryAuthority } : undefined,
+      } as unknown as StartupContext['app'];
+      return ctx;
+    };
+
+    // The live shape that previously skipped the provisioning watchdog.
+    const owned = withRepos(makeOwnedStandalonePostgres(makeStartupContextWithGuardedDb().ctx));
+    expect(owned.taskRuntimePolicy).toBe('shared_postgres');
+    expect(configureBranchProvisioningRecovery(owned, usesSingleDaemonTaskRuntime(owned))).toBe(
+      true
+    );
+    expect(setStaleProvisioningRecoveryAuthority).toHaveBeenLastCalledWith(true);
+
+    const shared = withRepos(makeStartupContextWithGuardedDb().ctx);
+    shared.taskRuntimePolicy = 'shared_postgres';
+    shared.environmentHealthMonitorPolicy = 'shared_postgres';
+    expect(configureBranchProvisioningRecovery(shared, usesSingleDaemonTaskRuntime(shared))).toBe(
+      false
+    );
+    expect(setStaleProvisioningRecoveryAuthority).toHaveBeenLastCalledWith(false);
   });
 });
 

@@ -437,6 +437,14 @@ use **Recover** on its card or in the board primary teammate panel,
 and filesystem write access and runs as the requesting user. It does not require
 archiving the branch again. An in-flight `creating` attempt or unsettled maintenance
 blocks recovery; elapsed time alone never authorizes a replacement executor.
+
+A branch can be left in `creating` when its provisioning process is gone, for example
+after a daemon restart. On a single-daemon install (standalone, including a standalone
+PostgreSQL host), the daemon marks such branches `failed` at startup. At runtime, if a
+`creating` branch has had no update for 30 minutes and the daemon has no provisioning
+process running for it, Retry, Archive, or Delete first moves it to `failed` with an
+explanatory error and then continues as usual. Files on disk are not checked or
+changed. HA deployments never do this, because another replica may own the attempt.
 Stop or cancel unfinished tasks, stop the environment, and reconcile pending uploads
 before requesting recovery.
 
