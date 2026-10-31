@@ -332,6 +332,12 @@ export interface ReposServiceImpl extends Service<Repo, Partial<Repo>, FeathersP
   reconcileStuckCreatingBranches(
     params?: CoreAuthenticatedParams
   ): Promise<{ scanned: number; failed: number }>;
+  setStaleProvisioningRecoveryAuthority(enabled: boolean): void;
+  releaseStaleCreatingProvisioning(
+    branch: Branch,
+    params?: FeathersParams,
+    now?: number
+  ): Promise<Branch | null>;
   removeBranch(id: string, name: string, params?: FeathersParams): Promise<Repo>;
   importFromAgorYml(
     id: string,

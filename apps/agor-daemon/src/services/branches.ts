@@ -1912,7 +1912,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     const config = this.app.get('config');
     const needsFiles = filesystemAction !== 'preserved';
     const externalExecutor = usesExternalBranchExecutor(config);
-    const branch = await this.withTenantDatabase(params, () => this.get(id, params));
+    let branch = await this.withTenantDatabase(params, () => this.get(id, params));
     const authorize = async (repository: BranchRepository, current: Branch) => {
       if (needsFiles)
         return ensureBranchWorkspaceAccess(
@@ -1940,6 +1940,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     };
     id = branch.branch_id;
     await this.withTenantDatabase(params, () => authorize(this.branchRepo, branch));
+    branch = await this.releaseStaleCreatingProvisioning(branch, params);
     const support = branchMaintenanceCapabilities(config, branch.storage_mode);
     const capability = support[filesystemAction === 'cleaned' ? 'archive_clean' : 'archive_remove'];
     if (needsFiles && !capability.supported) throw new Conflict(capability.reason);
@@ -2164,6 +2165,19 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     );
   }
 
+  /**
+   * Archive and delete refuse `creating`; after authorization, let an orphaned
+   * attempt settle to `failed` first (see ReposService). Otherwise unchanged.
+   */
+  private async releaseStaleCreatingProvisioning(
+    branch: Branch,
+    params?: BranchParams
+  ): Promise<Branch> {
+    if (branch.filesystem_status !== 'creating') return branch;
+    const reposService = this.app.service('repos') as unknown as ReposService;
+    return (await reposService.releaseStaleCreatingProvisioning(branch, params)) ?? branch;
+  }
+
   /** Best-effort attachment closure shared by archive and permanent deletion. */
   private closeBranchTerminals(branchId: BranchID, tenantId: string): void {
     const event = { tenantId, branchId };
@@ -2178,7 +2192,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
     const externalExecutor = usesExternalBranchExecutor(config);
     const capability = permanentBranchDeletionCapability(config);
     if (!capability.supported) throw new Conflict(capability.reason);
-    const branch = await this.withTenantDatabase(params, () => this.get(id, params));
+    let branch = await this.withTenantDatabase(params, () => this.get(id, params));
     const tenantId = params?.tenant?.tenant_id ?? getCurrentTenantId();
     if (!tenantId) throw new Forbidden('Deletion tenant context is required');
     await this.withTenantDatabase(params, () =>
@@ -2192,6 +2206,7 @@ export class BranchesService extends DrizzleService<Branch, Partial<Branch>, Bra
         config.execution?.allow_superadmin === true
       )
     );
+    branch = await this.releaseStaleCreatingProvisioning(branch, params);
     const context = await this.resolveEnvironmentExecutorContext(branch, params);
     const repo = await this.withTenantDatabase(params, () =>
       new RepoRepository(this.db).findById(branch.repo_id)
