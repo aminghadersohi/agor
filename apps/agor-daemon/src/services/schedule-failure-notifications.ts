@@ -60,7 +60,9 @@ export class ScheduleFailureNotificationsService {
   private readonly data: TenantBoundDataAccess;
   constructor(
     db: TenantScopeAwareDatabase,
-    private app?: Pick<Application, 'service'>
+    // Structural on purpose: `Pick<Application, 'service'>` made assignability
+    // of the core app depend on TypeScript's Feathers variance check order.
+    private app?: { service(path: 'gateway'): unknown }
   ) {
     this.data = createTenantBoundDataAccess(db);
   }

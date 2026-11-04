@@ -136,6 +136,19 @@ export function createMigrationImpactRegistry(
 
 const MIGRATION_IMPACT_REGISTRY = createMigrationImpactRegistry([
   [
+    '9036_session_reminder_wake_conditions',
+    {
+      requiresOfflineCutover: false,
+      impact: defineMigrationImpact({
+        classification: 'schema',
+        userAction: 'none',
+        rollbackCompatibility: 'compatible',
+        summary:
+          'Adds optional GitHub pull request wake conditions to Session reminders. Older binaries ignore the columns and deliver conditional reminders at their deadline.',
+      }),
+    },
+  ],
+  [
     '9035_schedule_failure_attempt_fence',
     {
       requiresOfflineCutover: true,

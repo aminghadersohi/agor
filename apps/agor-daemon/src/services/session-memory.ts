@@ -18,6 +18,7 @@ import type {
   SessionReminderCreateData,
   SessionReminderPatchData,
   SessionReminderStatus,
+  SessionReminderWakeCondition,
   UserID,
   UUID,
 } from '@agor/core/types';
@@ -30,12 +31,16 @@ import {
   SESSION_MEMORY_MAX_TAGS,
   SESSION_MEMORY_MAX_TEXT_BYTES,
   SESSION_MEMORY_MAX_TITLE_CHARS,
+  SESSION_REMINDER_DEFAULT_CHECK_EVERY_MINUTES,
   SESSION_REMINDER_DEFAULT_LIMIT,
+  SESSION_REMINDER_MAX_CHECK_EVERY_MINUTES,
   SESSION_REMINDER_MAX_HORIZON_MS,
   SESSION_REMINDER_MAX_LIMIT,
   SESSION_REMINDER_MAX_TEXT_BYTES,
+  SESSION_REMINDER_MIN_CHECK_EVERY_MINUTES,
   SESSION_REMINDER_MIN_LEAD_MS,
   SESSION_REMINDER_STATUSES,
+  SESSION_REMINDER_WAKE_PR_STATES,
   SessionMemoryRevisionConflictError,
   SessionReminderRevisionConflictError,
 } from '@agor/core/types';
@@ -138,6 +143,51 @@ export function normalizeDisplayTimezone(value: unknown): string {
     throw new BadRequest('display_timezone must be a recognized IANA timezone');
   }
   return timezone;
+}
+
+/** GitHub owner (≤39) and repository (≤100) names, as `owner/name`. */
+const GITHUB_REPO_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
+
+export function normalizeWakeCondition(value: unknown): SessionReminderWakeCondition {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new BadRequest('wake_when must be an object');
+  }
+  const { kind, repo, number, state, ...rest } = value as Record<string, unknown>;
+  if (Object.keys(rest).length > 0) {
+    throw new BadRequest(`wake_when has unsupported fields: ${Object.keys(rest).join(', ')}`);
+  }
+  if (kind !== 'github_pr') throw new BadRequest("wake_when.kind must be 'github_pr'");
+  if (typeof repo !== 'string' || !GITHUB_REPO_PATTERN.test(repo) || /\/\.{1,2}$/.test(repo)) {
+    throw new BadRequest("wake_when.repo must be a GitHub repository as 'owner/name'");
+  }
+  if (
+    typeof number !== 'number' ||
+    !Number.isInteger(number) ||
+    number < 1 ||
+    number > 2 ** 31 - 1
+  ) {
+    throw new BadRequest('wake_when.number must be a positive pull request number');
+  }
+  if (!SESSION_REMINDER_WAKE_PR_STATES.includes(state as SessionReminderWakeCondition['state'])) {
+    throw new BadRequest(
+      `wake_when.state must be one of: ${SESSION_REMINDER_WAKE_PR_STATES.join(', ')}`
+    );
+  }
+  return { kind, repo, number, state: state as SessionReminderWakeCondition['state'] };
+}
+
+export function normalizeCheckEveryMinutes(value: unknown): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < SESSION_REMINDER_MIN_CHECK_EVERY_MINUTES ||
+    value > SESSION_REMINDER_MAX_CHECK_EVERY_MINUTES
+  ) {
+    throw new BadRequest(
+      `check_every_minutes must be an integer between ${SESSION_REMINDER_MIN_CHECK_EVERY_MINUTES} and ${SESSION_REMINDER_MAX_CHECK_EVERY_MINUTES}`
+    );
+  }
+  return value;
 }
 
 class SessionResourceAuthorizer {
@@ -330,6 +380,11 @@ export class SessionRemindersService {
     });
     const createdBy = params?.user?.user_id as UserID | undefined;
     if (!createdBy) throw new Forbidden('Authenticated user identity is required');
+    if (data.wake_when === undefined && data.check_every_minutes !== undefined) {
+      throw new BadRequest('check_every_minutes requires wake_when');
+    }
+    const wakeWhen =
+      data.wake_when === undefined ? undefined : normalizeWakeCondition(data.wake_when);
     try {
       return await this.repository.create({
         session_id: session.session_id,
@@ -337,6 +392,15 @@ export class SessionRemindersService {
         due_at: normalizeReminderInstant(data.due_at),
         display_timezone: normalizeDisplayTimezone(data.display_timezone),
         created_by: createdBy,
+        ...(wakeWhen
+          ? {
+              wake_when: wakeWhen,
+              check_every_minutes:
+                data.check_every_minutes === undefined
+                  ? SESSION_REMINDER_DEFAULT_CHECK_EVERY_MINUTES
+                  : normalizeCheckEveryMinutes(data.check_every_minutes),
+            }
+          : {}),
       });
     } catch (error) {
       if (error instanceof EntityNotFoundError)
@@ -363,6 +427,27 @@ export class SessionRemindersService {
     if (data.due_at !== undefined) patch.due_at = normalizeReminderInstant(data.due_at);
     if (data.display_timezone !== undefined) {
       patch.display_timezone = normalizeDisplayTimezone(data.display_timezone);
+    }
+    if (data.wake_when === null) {
+      if (data.check_every_minutes !== undefined) {
+        throw new BadRequest('check_every_minutes cannot be set while removing wake_when');
+      }
+      patch.wake = null;
+    } else if (data.wake_when !== undefined || data.check_every_minutes !== undefined) {
+      // Merge a partial edit with the stored condition; the revision CAS below
+      // rejects the write if the reminder changed in between.
+      const current = await this.repository.findScheduledWakeInSession(session.session_id, id);
+      if (!current) throw new NotFound('Session-scoped resource not found');
+      const wakeWhen =
+        data.wake_when !== undefined ? normalizeWakeCondition(data.wake_when) : current.wake_when;
+      if (!wakeWhen) throw new BadRequest('check_every_minutes requires wake_when');
+      patch.wake = {
+        wake_when: wakeWhen,
+        check_every_minutes:
+          data.check_every_minutes !== undefined
+            ? normalizeCheckEveryMinutes(data.check_every_minutes)
+            : (current.check_every_minutes ?? SESSION_REMINDER_DEFAULT_CHECK_EVERY_MINUTES),
+      };
     }
     if (Object.keys(patch).length === 0) throw new BadRequest('No reminder changes were supplied');
     if (patch.cancel && Object.keys(patch).length > 1) {

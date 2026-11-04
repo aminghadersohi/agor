@@ -12,17 +12,26 @@ import {
 import type { Application } from '@agor/core/feathers';
 import type { BranchID, SessionReminder, TenantID, UserID, UUID } from '@agor/core/types';
 import { SessionStatus, TaskStatus } from '@agor/core/types';
-import { describe, expect, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from '../../../../packages/core/src/db/client';
 import { dbTest } from '../../../../packages/core/src/db/test-helpers';
 import { sessionReminderTaskId } from '../utils/durable-task-id';
+import {
+  type GitHubPullRequestObservation,
+  GitHubPullRequestReadError,
+  readGitHubPullRequest,
+} from './github-pull-request-state';
 import {
   SESSION_REMINDER_MAX_ATTEMPTS,
   SessionReminderWorker,
   sessionReminderRetryDelayMs,
 } from './session-reminder-worker';
 
-async function seed(db: Database, archived = false) {
+async function seed(
+  db: Database,
+  archived = false,
+  wake?: { state: 'merged' | 'closed'; dueInMs: number }
+) {
   const user = await new UsersRepository(db).create({
     user_id: generateId(),
     email: `reminder-${generateId()}@example.test`,
@@ -58,9 +67,20 @@ async function seed(db: Database, archived = false) {
   const reminder = await new SessionReminderRepository(db).create({
     session_id: session.session_id,
     text: 'Review the fictional decision.',
-    due_at: new Date(Date.now() - 1_000).toISOString(),
+    due_at: new Date(Date.now() + (wake?.dueInMs ?? -1_000)).toISOString(),
     display_timezone: 'UTC',
     created_by: user.user_id as UserID,
+    ...(wake
+      ? {
+          wake_when: {
+            kind: 'github_pr' as const,
+            repo: 'acme/widgets',
+            number: 284,
+            state: wake.state,
+          },
+          check_every_minutes: 10,
+        }
+      : {}),
   });
   return { user, session, reminder };
 }
@@ -325,5 +345,206 @@ describe('SessionReminderWorker', () => {
       skip: 0,
     });
     expect(page.data[0]).toMatchObject({ status: 'blocked', failure_code: 'retries_exhausted' });
+  });
+});
+
+const HOUR = 60 * 60_000;
+const MERGED: GitHubPullRequestObservation = {
+  state: 'closed',
+  merged: true,
+  merged_at: '2026-11-03T20:36:00.000Z',
+  closed_at: '2026-11-03T20:36:00.000Z',
+};
+const OPEN: GitHubPullRequestObservation = { state: 'open', merged: false };
+
+describe('SessionReminderWorker wake conditions', () => {
+  const tenantId = 'default' as TenantID;
+  const reload = async (db: Database, reminder: SessionReminder) =>
+    (
+      await new SessionReminderRepository(db).findPage({
+        session_id: reminder.session_id,
+        limit: 10,
+        skip: 0,
+      })
+    ).data[0]!;
+  const conditionalWorker = (
+    db: Database,
+    app: Application,
+    reminder: SessionReminder,
+    readPullRequest: () => Promise<GitHubPullRequestObservation>,
+    clock: number
+  ) =>
+    new SessionReminderWorker(db, app, {
+      tenantId,
+      now: () => new Date(clock),
+      readPullRequest,
+      discover: async () => [{ reminder_id: reminder.reminder_id, tenant_id: tenantId }],
+    });
+
+  dbTest('queues the prompt with the observed outcome once the PR merges', async ({ db }) => {
+    const { reminder } = await seed(db, false, { state: 'merged', dueInMs: 24 * HOUR });
+    const fixture = appFixture(db);
+    const read = vi.fn(async () => MERGED);
+    const clock = Date.parse(reminder.next_check_at!) + 1_000;
+    await conditionalWorker(db, fixture.app, reminder, read, clock).checkOnce();
+
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+    const prompt = (fixture.create.mock.calls[0]![0] as { prompt: string }).prompt;
+    expect(prompt).toBe(
+      `${promptText(reminder).replace(
+        '\n</session_reminder>',
+        '\n\nCondition met: acme/widgets#284 merged at 2026-11-03T20:36:00.000Z.\n</session_reminder>'
+      )}`
+    );
+    expect(await reload(db, reminder)).toMatchObject({
+      status: 'queued',
+      task_id: sessionReminderTaskId(reminder.reminder_id),
+      wake_outcome: 'Condition met: acme/widgets#284 merged at 2026-11-03T20:36:00.000Z.',
+    });
+  });
+
+  dbTest("treats a merge as satisfying 'closed'", async ({ db }) => {
+    const { reminder } = await seed(db, false, { state: 'closed', dueInMs: 24 * HOUR });
+    const fixture = appFixture(db);
+    const clock = Date.parse(reminder.next_check_at!) + 1_000;
+    await conditionalWorker(db, fixture.app, reminder, async () => MERGED, clock).checkOnce();
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+    expect(await reload(db, reminder)).toMatchObject({ status: 'queued' });
+  });
+
+  dbTest('reschedules the next check while unmet before the deadline', async ({ db }) => {
+    const { reminder } = await seed(db, false, { state: 'merged', dueInMs: 24 * HOUR });
+    const fixture = appFixture(db);
+    const clock = Date.parse(reminder.next_check_at!) + 1_000;
+    await conditionalWorker(db, fixture.app, reminder, async () => OPEN, clock).checkOnce();
+
+    expect(fixture.create).not.toHaveBeenCalled();
+    const current = await reload(db, reminder);
+    expect(current).toMatchObject({
+      status: 'scheduled',
+      attempt_count: 0,
+      next_check_at: new Date(clock + 10 * 60_000).toISOString(),
+    });
+    expect(current.wake_outcome).toBeUndefined();
+    // Still editable between checks.
+    expect(current.revision).toBeGreaterThan(reminder.revision);
+  });
+
+  dbTest('fires at the deadline anyway and says the condition was not met', async ({ db }) => {
+    const { reminder } = await seed(db, false, { state: 'merged', dueInMs: 2 * 60_000 });
+    const fixture = appFixture(db);
+    const clock = Date.parse(reminder.due_at) + 1_000;
+    await conditionalWorker(db, fixture.app, reminder, async () => OPEN, clock).checkOnce();
+
+    expect(fixture.create).toHaveBeenCalledTimes(1);
+    expect((fixture.create.mock.calls[0]![0] as { prompt: string }).prompt).toContain(
+      'Condition not met by deadline: acme/widgets#284 is still open.\n</session_reminder>'
+    );
+    expect(await reload(db, reminder)).toMatchObject({ status: 'queued' });
+  });
+
+  dbTest(
+    'counts a GitHub read failure as not met, logs no secrets, and never crashes',
+    async ({ db }) => {
+      const { reminder } = await seed(db, false, { state: 'merged', dueInMs: 24 * HOUR });
+      const fixture = appFixture(db);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const failing = async () => {
+        throw new GitHubPullRequestReadError('http_401');
+      };
+      const clock = Date.parse(reminder.next_check_at!) + 1_000;
+      await expect(
+        conditionalWorker(db, fixture.app, reminder, failing, clock).checkOnce()
+      ).resolves.toBe(1);
+      expect(fixture.create).not.toHaveBeenCalled();
+      expect(await reload(db, reminder)).toMatchObject({
+        status: 'scheduled',
+        next_check_at: new Date(clock + 10 * 60_000).toISOString(),
+      });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('wake_check_failed'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('code="http_401"'));
+      expect(warn.mock.calls.flat().join(' ')).not.toContain(reminder.text);
+
+      // At the deadline a failed read still delivers, stating the unknown state.
+      const deadline = Date.parse(reminder.due_at) + 1_000;
+      await conditionalWorker(db, fixture.app, reminder, failing, deadline).checkOnce();
+      expect((fixture.create.mock.calls[0]![0] as { prompt: string }).prompt).toContain(
+        'Condition not met by deadline: acme/widgets#284 is in an unknown state (the GitHub read failed).'
+      );
+      warn.mockRestore();
+    }
+  );
+
+  dbTest(
+    'a recovered claim reuses its recorded outcome without reading GitHub again',
+    async ({ db }) => {
+      const { reminder } = await seed(db, false, { state: 'merged', dueInMs: 24 * HOUR });
+      const outcome = 'Condition met: acme/widgets#284 merged at 2026-11-03T20:36:00.000Z.';
+      // A daemon recorded the outcome, then died before dispatch.
+      await executeRaw(
+        db,
+        sql`UPDATE session_reminders SET status = 'claimed', attempt_count = 1, claim_token = 'dead', next_check_at = NULL, wake_outcome = ${outcome}, claim_expires_at = ${Date.now() - 1_000} WHERE reminder_id = ${reminder.reminder_id}`
+      );
+      const fixture = appFixture(db);
+      const read = vi.fn(async () => OPEN);
+      await conditionalWorker(db, fixture.app, reminder, read, Date.now()).checkOnce();
+      expect(read).not.toHaveBeenCalled();
+      expect((fixture.create.mock.calls[0]![0] as { prompt: string }).prompt).toContain(
+        `${outcome}\n</session_reminder>`
+      );
+      expect(await reload(db, reminder)).toMatchObject({ status: 'queued' });
+    }
+  );
+
+  dbTest('time-only reminders never read GitHub and render unchanged', async ({ db }) => {
+    const { reminder } = await seed(db);
+    const fixture = appFixture(db);
+    const read = vi.fn(async () => MERGED);
+    await new SessionReminderWorker(db, fixture.app, {
+      tenantId,
+      readPullRequest: read,
+      discover: async () => [{ reminder_id: reminder.reminder_id, tenant_id: tenantId }],
+    }).checkOnce();
+    expect(read).not.toHaveBeenCalled();
+    expect((fixture.create.mock.calls[0]![0] as { prompt: string }).prompt).toBe(
+      promptText(reminder)
+    );
+  });
+});
+
+describe('readGitHubPullRequest', () => {
+  it('reads state with the bearer token and classifies failures without bodies', async () => {
+    const fetchImpl = vi.fn(async () =>
+      Response.json({
+        state: 'closed',
+        merged: true,
+        merged_at: '2026-11-03T20:36:00Z',
+        title: 'x',
+      })
+    );
+    await expect(
+      readGitHubPullRequest({ repo: 'acme/widgets', number: 284 }, 'ghp_fictional', fetchImpl)
+    ).resolves.toEqual({
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-11-03T20:36:00.000Z',
+      closed_at: undefined,
+    });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://api.github.com/repos/acme/widgets/pulls/284');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer ghp_fictional');
+
+    const denied = vi.fn(async () => new Response('secret body', { status: 404 }));
+    const error = await readGitHubPullRequest(
+      { repo: 'acme/widgets', number: 284 },
+      undefined,
+      denied
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(GitHubPullRequestReadError);
+    expect((error as GitHubPullRequestReadError).code).toBe('http_404');
+    expect(String(error)).not.toContain('secret body');
+    const [, anonymous] = denied.mock.calls[0] as unknown as [string, RequestInit];
+    expect(anonymous.headers).not.toHaveProperty('Authorization');
   });
 });
