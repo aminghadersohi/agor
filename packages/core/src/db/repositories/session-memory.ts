@@ -6,6 +6,7 @@ import type {
   SessionReminderFailureCode,
   SessionReminderID,
   SessionReminderStatus,
+  SessionReminderWakeCondition,
   TaskID,
   UserID,
 } from '@agor/core/types';
@@ -17,7 +18,7 @@ import {
   SessionMemoryRevisionConflictError,
   SessionReminderRevisionConflictError,
 } from '@agor/core/types';
-import { and, asc, count, desc, eq, lte, or, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import { generateId } from '../../lib/ids';
 import { lockSessionBranchForAdmission } from '../branch-admission';
 import type { Database } from '../client';
@@ -87,9 +88,36 @@ function reminderFromRow(row: SessionReminderRow): SessionReminder {
       queued_at: row.queued_at ? new Date(row.queued_at).toISOString() : undefined,
       task_id: (row.task_id as TaskID | null) ?? undefined,
       failure_code: (row.failure_code as SessionReminderFailureCode | null) ?? undefined,
+      // Wake fields are omitted entirely on time-only reminders.
+      ...(row.wake_when
+        ? {
+            wake_when: wakeConditionFromRow(row.wake_when),
+            check_every_minutes: row.check_every_minutes ?? undefined,
+            next_check_at: row.next_check_at
+              ? new Date(row.next_check_at).toISOString()
+              : undefined,
+            wake_outcome: row.wake_outcome ?? undefined,
+          }
+        : {}),
     },
     row
   );
+}
+
+function wakeConditionFromRow(value: unknown): SessionReminderWakeCondition {
+  const parsed = (typeof value === 'string' ? JSON.parse(value) : value) as
+    | SessionReminderWakeCondition
+    | undefined;
+  return {
+    kind: 'github_pr',
+    repo: String(parsed?.repo ?? ''),
+    number: Number(parsed?.number),
+    state: parsed?.state === 'closed' ? 'closed' : 'merged',
+  };
+}
+
+function minutesFrom(now: Date, minutes: number): Date {
+  return new Date(now.getTime() + minutes * 60_000);
 }
 
 function boundedPage(limit: number, skip: number, maxLimit: number): void {
@@ -241,6 +269,8 @@ export class SessionReminderRepository {
     due_at: string;
     display_timezone: string;
     created_by: UserID;
+    wake_when?: SessionReminderWakeCondition;
+    check_every_minutes?: number;
   }): Promise<SessionReminder> {
     return runDatabaseTransaction(
       this.db,
@@ -284,6 +314,13 @@ export class SessionReminderRepository {
           queued_at: null,
           task_id: null,
           failure_code: null,
+          ...(input.wake_when && input.check_every_minutes
+            ? {
+                wake_when: input.wake_when,
+                check_every_minutes: input.check_every_minutes,
+                next_check_at: minutesFrom(now, input.check_every_minutes),
+              }
+            : {}),
         };
         return reminderFromRow(await insert(tx, sessionReminders).values(values).returning().one());
       },
@@ -321,8 +358,26 @@ export class SessionReminderRepository {
     sessionId: SessionID,
     reminderId: SessionReminderID | string,
     expectedRevision: number,
-    patch: { text?: string; due_at?: string; display_timezone?: string; cancel?: boolean }
+    patch: {
+      text?: string;
+      due_at?: string;
+      display_timezone?: string;
+      /** Final condition and cadence; `null` makes the reminder time-only. */
+      wake?: { wake_when: SessionReminderWakeCondition; check_every_minutes: number } | null;
+      cancel?: boolean;
+    }
   ): Promise<SessionReminder> {
+    const now = new Date();
+    const wake =
+      patch.wake === undefined
+        ? {}
+        : patch.wake === null
+          ? { wake_when: null, check_every_minutes: null, next_check_at: null, wake_outcome: null }
+          : {
+              wake_when: patch.wake.wake_when,
+              check_every_minutes: patch.wake.check_every_minutes,
+              next_check_at: minutesFrom(now, patch.wake.check_every_minutes),
+            };
     const values = patch.cancel
       ? { status: 'cancelled' as const }
       : {
@@ -331,9 +386,10 @@ export class SessionReminderRepository {
           ...(patch.display_timezone !== undefined
             ? { display_timezone: patch.display_timezone }
             : {}),
+          ...wake,
         };
     const result = await update(this.db, sessionReminders)
-      .set({ ...values, updated_at: new Date(), revision: expectedRevision + 1 })
+      .set({ ...values, updated_at: now, revision: expectedRevision + 1 })
       .where(
         and(
           eq(sessionReminders.reminder_id, reminderId),
@@ -357,9 +413,30 @@ export class SessionReminderRepository {
     return reminderFromRow(row);
   }
 
+  /** Scheduled settings of one reminder, for merging a partial wake edit. */
+  async findScheduledWakeInSession(
+    sessionId: SessionID,
+    reminderId: SessionReminderID | string
+  ): Promise<Pick<SessionReminder, 'wake_when' | 'check_every_minutes'> | null> {
+    const row = await select(this.db)
+      .from(sessionReminders)
+      .where(
+        and(
+          eq(sessionReminders.reminder_id, reminderId),
+          eq(sessionReminders.session_id, sessionId)
+        )
+      )
+      .one();
+    if (!row) return null;
+    const reminder = reminderFromRow(row);
+    return { wake_when: reminder.wake_when, check_every_minutes: reminder.check_every_minutes };
+  }
+
   private dueCondition(now: Date) {
     return or(
       and(eq(sessionReminders.status, 'scheduled'), lte(sessionReminders.due_at, now)),
+      // A conditional reminder is also due for its next condition check.
+      and(eq(sessionReminders.status, 'scheduled'), lte(sessionReminders.next_check_at, now)),
       and(eq(sessionReminders.status, 'claimed'), lte(sessionReminders.claim_expires_at, now))
     );
   }
@@ -429,6 +506,80 @@ export class SessionReminderRepository {
           eq(sessionReminders.reminder_id, reminderId),
           eq(sessionReminders.status, 'claimed'),
           eq(sessionReminders.claim_token, claimToken)
+        )
+      )
+      .run();
+    if (result.rowsAffected !== 1) return null;
+    const row = await select(this.db)
+      .from(sessionReminders)
+      .where(eq(sessionReminders.reminder_id, reminderId))
+      .one();
+    return row ? reminderFromRow(row) : null;
+  }
+
+  /**
+   * Release a claim whose condition check found nothing yet. The check was not
+   * a delivery attempt, so its claim no longer counts toward the attempt cap.
+   */
+  async rescheduleCheck(
+    reminderId: SessionReminderID,
+    claimToken: string,
+    nextCheckAt: Date,
+    now: Date
+  ): Promise<SessionReminder | null> {
+    const result = await update(this.db, sessionReminders)
+      .set({
+        status: 'scheduled',
+        next_check_at: nextCheckAt,
+        claim_token: null,
+        claimed_at: null,
+        claim_expires_at: null,
+        attempt_count: sql`CASE WHEN ${sessionReminders.attempt_count} > 0 THEN ${sessionReminders.attempt_count} - 1 ELSE 0 END`,
+        updated_at: now,
+        revision: sql`${sessionReminders.revision} + 1`,
+      })
+      .where(
+        and(
+          eq(sessionReminders.reminder_id, reminderId),
+          eq(sessionReminders.status, 'claimed'),
+          eq(sessionReminders.claim_token, claimToken),
+          isNotNull(sessionReminders.wake_when),
+          isNull(sessionReminders.wake_outcome)
+        )
+      )
+      .run();
+    if (result.rowsAffected !== 1) return null;
+    const row = await select(this.db)
+      .from(sessionReminders)
+      .where(eq(sessionReminders.reminder_id, reminderId))
+      .one();
+    return row ? reminderFromRow(row) : null;
+  }
+
+  /**
+   * Fix the observed outcome before dispatch so a crash-recovered claim renders
+   * the identical prompt (the stable Task fence compares it).
+   */
+  async recordWakeOutcome(
+    reminderId: SessionReminderID,
+    claimToken: string,
+    outcome: string,
+    now: Date
+  ): Promise<SessionReminder | null> {
+    const result = await update(this.db, sessionReminders)
+      .set({
+        wake_outcome: outcome,
+        next_check_at: null,
+        updated_at: now,
+        revision: sql`${sessionReminders.revision} + 1`,
+      })
+      .where(
+        and(
+          eq(sessionReminders.reminder_id, reminderId),
+          eq(sessionReminders.status, 'claimed'),
+          eq(sessionReminders.claim_token, claimToken),
+          isNotNull(sessionReminders.wake_when),
+          isNull(sessionReminders.wake_outcome)
         )
       )
       .run();

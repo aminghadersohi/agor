@@ -185,4 +185,122 @@ describe('SessionReminderRepository', () => {
     );
     expect(cancelled).toMatchObject({ status: 'cancelled', revision: 3 });
   });
+
+  dbTest('time-only reminders carry no wake fields', async ({ db }) => {
+    const ctx = await setup(db);
+    const created = await new SessionReminderRepository(db).create({
+      session_id: ctx.first.session_id,
+      text: 'Plain fictional reminder',
+      due_at: new Date(Date.now() + 120_000).toISOString(),
+      display_timezone: 'UTC',
+      created_by: ctx.user.user_id as UserID,
+    });
+    for (const key of ['wake_when', 'check_every_minutes', 'next_check_at', 'wake_outcome']) {
+      expect(created).not.toHaveProperty(key);
+    }
+  });
+
+  dbTest(
+    'discovers a conditional reminder at its next check, reschedules it, and fixes its outcome',
+    async ({ db }) => {
+      const ctx = await setup(db);
+      const reminders = new SessionReminderRepository(db);
+      const wake = {
+        kind: 'github_pr',
+        repo: 'acme/widgets',
+        number: 284,
+        state: 'merged',
+      } as const;
+      const created = await reminders.create({
+        session_id: ctx.first.session_id,
+        text: 'Tell River the fictional PR merged.',
+        due_at: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+        display_timezone: 'UTC',
+        created_by: ctx.user.user_id as UserID,
+        wake_when: wake,
+        check_every_minutes: 10,
+      });
+      expect(created).toMatchObject({ wake_when: wake, check_every_minutes: 10 });
+      const nextCheck = Date.parse(created.next_check_at!);
+      expect(nextCheck - Date.parse(created.created_at)).toBe(10 * 60_000);
+
+      // Not due before its first check, due once it passes (deadline is a day out).
+      expect(await reminders.findDueRefs(new Date(nextCheck - 1_000), 10)).toEqual([]);
+      const checkTime = new Date(nextCheck + 1_000);
+      expect(await reminders.findDueRefs(checkTime, 10)).toEqual([
+        expect.objectContaining({ reminder_id: created.reminder_id }),
+      ]);
+
+      const claimed = await reminders.claimDue(created.reminder_id, checkTime, 'token-a', 120_000);
+      expect(claimed).toMatchObject({ status: 'claimed', attempt_count: 1 });
+      const later = new Date(checkTime.getTime() + 10 * 60_000);
+      const rescheduled = await reminders.rescheduleCheck(
+        created.reminder_id,
+        'token-a',
+        later,
+        checkTime
+      );
+      // A condition check is not a delivery attempt.
+      expect(rescheduled).toMatchObject({
+        status: 'scheduled',
+        attempt_count: 0,
+        next_check_at: later.toISOString(),
+      });
+      expect(rescheduled?.claim_expires_at).toBeUndefined();
+
+      await reminders.claimDue(created.reminder_id, later, 'token-b', 120_000);
+      // A stale claim token cannot record an outcome.
+      expect(
+        await reminders.recordWakeOutcome(created.reminder_id, 'token-a', 'stale', later)
+      ).toBeNull();
+      const recorded = await reminders.recordWakeOutcome(
+        created.reminder_id,
+        'token-b',
+        'Condition met: acme/widgets#284 merged at 2026-11-03T20:36:00.000Z.',
+        later
+      );
+      expect(recorded).toMatchObject({
+        status: 'claimed',
+        wake_outcome: 'Condition met: acme/widgets#284 merged at 2026-11-03T20:36:00.000Z.',
+      });
+      expect(recorded?.next_check_at).toBeUndefined();
+      // Once fixed, the outcome is never rewritten.
+      expect(
+        await reminders.recordWakeOutcome(created.reminder_id, 'token-b', 'other', later)
+      ).toBeNull();
+    }
+  );
+
+  dbTest('adds, edits, and removes a wake condition while scheduled', async ({ db }) => {
+    const ctx = await setup(db);
+    const reminders = new SessionReminderRepository(db);
+    const created = await reminders.create({
+      session_id: ctx.first.session_id,
+      text: 'Fictional follow-up',
+      due_at: new Date(Date.now() + 120_000).toISOString(),
+      display_timezone: 'UTC',
+      created_by: ctx.user.user_id as UserID,
+    });
+    const wake = { kind: 'github_pr', repo: 'acme/widgets', number: 7, state: 'closed' } as const;
+    const conditional = await reminders.updateScheduledInSession(
+      ctx.first.session_id,
+      created.reminder_id,
+      created.revision,
+      { wake: { wake_when: wake, check_every_minutes: 30 } }
+    );
+    expect(conditional).toMatchObject({ wake_when: wake, check_every_minutes: 30 });
+    expect(conditional.next_check_at).toBeDefined();
+    await expect(
+      reminders.findScheduledWakeInSession(ctx.second.session_id, created.reminder_id)
+    ).resolves.toBeNull();
+    const timeOnly = await reminders.updateScheduledInSession(
+      ctx.first.session_id,
+      created.reminder_id,
+      conditional.revision,
+      { wake: null }
+    );
+    for (const key of ['wake_when', 'check_every_minutes', 'next_check_at', 'wake_outcome']) {
+      expect(timeOnly).not.toHaveProperty(key);
+    }
+  });
 });

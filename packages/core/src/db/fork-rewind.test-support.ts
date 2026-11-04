@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import type { Database } from './client';
-import { executeRaw } from './database-wrapper';
+import { executeRaw, isPostgresDatabase } from './database-wrapper';
 
 /**
  * Undo upstream's Teams gateway HA and failed-deletion discovery migrations on
@@ -83,8 +83,42 @@ export async function dropTeamsAndDeletionDiscoveryObjectsPostgres(db: Database)
   );
 }
 
-/** Restore the pre-policy schema when a disposable fixture rewinds below 9033. */
+/**
+ * Restore the pre-policy schema when a disposable fixture rewinds below 9033,
+ * including the later fork columns replayed after it (9036 reminder wake).
+ */
 export async function dropScheduleExecutionPolicyColumns(db: Database): Promise<void> {
+  // Fixtures rewound below 9018 have no reminder table at all.
+  const hasWakeColumns = await executeRaw(
+    db,
+    sql`SELECT wake_when FROM session_reminders LIMIT 0`
+  ).then(
+    () => true,
+    () => false
+  );
+  if (hasWakeColumns) {
+    await executeRaw(db, sql`DROP INDEX IF EXISTS session_reminders_next_check_idx`);
+    // The 9036 discovery policy reads next_check_at; restore the 9018 policy so
+    // the column can be dropped and 9036 can replace the policy again.
+    if (isPostgresDatabase(db)) {
+      await executeRaw(
+        db,
+        sql`DROP POLICY IF EXISTS session_reminder_discovery ON session_reminders`
+      );
+      await executeRaw(
+        db,
+        sql.raw(`CREATE POLICY session_reminder_discovery ON session_reminders
+          FOR SELECT USING (
+            current_setting('agor.system_scope', true) = 'session_reminder_discovery'
+            AND ((status = 'scheduled' AND due_at <= CURRENT_TIMESTAMP)
+              OR (status = 'claimed' AND claim_expires_at <= CURRENT_TIMESTAMP))
+          )`)
+      );
+    }
+    for (const column of ['wake_when', 'check_every_minutes', 'next_check_at', 'wake_outcome']) {
+      await executeRaw(db, sql.raw(`ALTER TABLE session_reminders DROP COLUMN ${column}`));
+    }
+  }
   await executeRaw(db, sql`DROP TABLE schedule_failure_notifications`);
   await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN skills_enabled`);
   await executeRaw(db, sql`ALTER TABLE schedules DROP COLUMN failure_threshold`);

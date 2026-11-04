@@ -551,6 +551,11 @@ export const sessionReminders = pgTable(
     queued_at: t.timestamp('queued_at'),
     task_id: varchar('task_id', { length: 36 }),
     failure_code: text('failure_code').$type<SessionReminder['failure_code']>(),
+    // Optional wake condition; NULL on time-only reminders.
+    wake_when: t.json<NonNullable<SessionReminder['wake_when']>>('wake_when'),
+    check_every_minutes: integer('check_every_minutes'),
+    next_check_at: t.timestamp('next_check_at'),
+    wake_outcome: text('wake_outcome'),
   },
   (table) => ({
     tenantIdx: index('session_reminders_tenant_id_idx').on(table.tenant_id),
@@ -568,6 +573,9 @@ export const sessionReminders = pgTable(
       table.tenant_id,
       table.reminder_id
     ),
+    nextCheckIdx: index('session_reminders_next_check_idx')
+      .on(table.status, table.next_check_at, table.tenant_id, table.reminder_id)
+      .where(sql`${table.next_check_at} IS NOT NULL`),
     taskUnique: uniqueIndex('session_reminders_task_unique')
       .on(table.tenant_id, table.task_id)
       .where(sql`${table.task_id} IS NOT NULL`),

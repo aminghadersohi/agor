@@ -1925,3 +1925,68 @@ describe('schedule failure attempt-fence migration', () => {
     }
   });
 });
+
+describe('session reminder wake-condition migration', () => {
+  it('is additive and needs no offline cutover', () => {
+    for (const dialect of ['sqlite', 'postgresql'] as const)
+      expect(
+        pendingOfflineCutoverMigrations(dialect, {
+          applied: ['9035_schedule_failure_attempt_fence'],
+          pending: ['9036_session_reminder_wake_conditions'],
+        })
+      ).toEqual([]);
+  });
+  it('adds nullable wake columns without rewriting existing reminders, and bounds the cadence', async () => {
+    const client = createClient({ url: ':memory:' });
+    try {
+      await client.execute('PRAGMA foreign_keys = OFF');
+      await client.executeMultiple(
+        await readFile(
+          new URL('../../drizzle/sqlite/0107_session_memory_reminders.sql', import.meta.url),
+          'utf8'
+        )
+      );
+      await client.execute(`INSERT INTO session_reminders (reminder_id,session_id,text,due_at,display_timezone,status,created_by,created_at,updated_at)
+        VALUES ('legacy-reminder','legacy-session','Legacy text',1,'UTC','scheduled','legacy-owner',1,1)`);
+      await client.executeMultiple(
+        await readFile(
+          new URL(
+            '../../drizzle/sqlite/9036_session_reminder_wake_conditions.sql',
+            import.meta.url
+          ),
+          'utf8'
+        )
+      );
+      expect(
+        (
+          await client.execute(
+            'SELECT reminder_id,status,text,wake_when,check_every_minutes,next_check_at,wake_outcome FROM session_reminders'
+          )
+        ).rows
+      ).toEqual([
+        {
+          reminder_id: 'legacy-reminder',
+          status: 'scheduled',
+          text: 'Legacy text',
+          wake_when: null,
+          check_every_minutes: null,
+          next_check_at: null,
+          wake_outcome: null,
+        },
+      ]);
+      await expect(
+        client.execute(
+          'UPDATE session_reminders SET wake_when = \'{"kind":"github_pr"}\', check_every_minutes = 4'
+        )
+      ).rejects.toThrow(/CHECK/i);
+      await expect(
+        client.execute('UPDATE session_reminders SET wake_when = \'{"kind":"other"}\'')
+      ).rejects.toThrow(/CHECK/i);
+      await client.execute(
+        'UPDATE session_reminders SET wake_when = \'{"kind":"github_pr"}\', check_every_minutes = 60'
+      );
+    } finally {
+      client.close();
+    }
+  });
+});
