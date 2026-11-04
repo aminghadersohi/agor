@@ -37,6 +37,20 @@ settlement therefore reconciles the same Task rather than admitting another.
 The prompt route rejects archived Sessions for this internal producer and the
 ordinary queue retains busy ordering and power/admission holds.
 
+### Wake conditions
+
+A reminder may carry `wake_when` (a GitHub pull request reaching `merged` or
+`closed`) with `check_every_minutes`; `due_at` is then the hard deadline.
+`next_check_at` makes it discoverable before `due_at` (the PostgreSQL discovery
+policy includes it). Each check reuses the same claim/CAS/lease path: a worker
+claims, reads GitHub with the creator's stored `GITHUB_TOKEN`/`GH_TOKEN` in the
+reminder's tenant, and either releases the claim back to `scheduled` with the
+next check (a check is not a delivery attempt, so `attempt_count` is restored)
+or records `wake_outcome` under the claim token before dispatch. The outcome is
+appended to the prompt, so a crash-recovered claim renders the identical prompt
+and the stable Task fence still matches. Read failures count as unmet and are
+logged by error code only. Time-only reminders render exactly as before.
+
 The queued Task carries `metadata.session_reminder`; generic queued-prompt edit
 and prompt compaction treat unknown internal metadata as a barrier, preserving
 the immutable reminder identity.

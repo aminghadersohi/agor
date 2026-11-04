@@ -901,7 +901,7 @@ function oneLineForPrompt(text: string, maxChars = 900): string {
 }
 
 const SLACK_GATEWAY_REPLY_NOTE =
-  'Note: Any assistant message you send in this current Agor session is streamed back directly to the Slack conversation. Only use outbound gateway tools when you intentionally need to start a separate thread, DM, or message.';
+  'Note: Any assistant message you send in this current Agor session is streamed back directly to the Slack conversation. Only use outbound gateway tools when you intentionally need to start a separate thread, DM, or message. If you tell someone you will follow up when something happens (a PR merges, a review lands), create an agor_session_reminders_create reminder before ending your turn; nothing else will wake this session.';
 
 const TEAMS_PROACTIVE_REPLY_HINT = '_To reply, @mention Agor in this thread._';
 const TEAMS_PROACTIVE_MAX_CHUNKS = 3;

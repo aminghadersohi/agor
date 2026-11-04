@@ -15,8 +15,10 @@ import {
 import {
   type AuthenticatedParams,
   classifyBranchFilesystemReadiness,
+  SESSION_REMINDER_DEFAULT_CHECK_EVERY_MINUTES,
   type SessionReminder,
   type SessionReminderFailureCode,
+  type SessionReminderWakeCondition,
   type Task,
   type TenantID,
   type UUID,
@@ -24,6 +26,12 @@ import {
 import type { Application } from '../declarations.js';
 import { sessionReminderTaskId } from '../utils/durable-task-id.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
+import {
+  type GitHubPullRequestObservation,
+  GitHubPullRequestReadError,
+  readGitHubPullRequest,
+  resolveReminderGitHubToken,
+} from './github-pull-request-state.js';
 
 const DEFAULT_BATCH = 25;
 const DEFAULT_INTERVAL_MS = 30_000;
@@ -49,6 +57,38 @@ export interface SessionReminderWorkerOptions {
   random?: () => number;
   now?: () => Date;
   discover?: (now: Date, limit: number) => Promise<DueSessionReminderRef[]>;
+  /** Reads a wake condition's pull request; defaults to GitHub with the creator's token. */
+  readPullRequest?: (
+    reminder: SessionReminder,
+    tenantId: TenantID | string
+  ) => Promise<GitHubPullRequestObservation>;
+}
+
+/** A merge satisfies `closed` too: GitHub reports merged pull requests as closed. */
+export function wakeConditionMet(
+  condition: SessionReminderWakeCondition,
+  observation: GitHubPullRequestObservation
+): boolean {
+  return condition.state === 'merged' ? observation.merged : observation.state === 'closed';
+}
+
+/** One short, fixed-vocabulary line appended to the queued prompt. */
+export function describeWakeOutcome(
+  condition: SessionReminderWakeCondition,
+  observation: GitHubPullRequestObservation | undefined,
+  met: boolean
+): string {
+  const pr = `${condition.repo}#${condition.number}`;
+  const observed = !observation
+    ? 'in an unknown state (the GitHub read failed)'
+    : observation.merged
+      ? `merged at ${observation.merged_at ?? 'an unknown time'}`
+      : observation.state === 'closed'
+        ? `closed without merging at ${observation.closed_at ?? 'an unknown time'}`
+        : 'still open';
+  return met
+    ? `Condition met: ${pr} ${observed}.`
+    : `Condition not met by deadline: ${pr} is ${observed}.`;
 }
 
 /**
@@ -173,14 +213,20 @@ export class SessionReminderWorker {
         await this.block(claimed, token, tenantId, 'retries_exhausted', now);
         return;
       }
+      let reminder = claimed;
+      if (reminder.wake_when && !reminder.wake_outcome) {
+        const settled = await this.settleWakeCondition(reminder, token, tenantId);
+        if (!settled) return;
+        reminder = settled;
+      }
       const preparation = await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
         const sessions = new SessionRepository(tenantDb);
-        const session = await sessions.findById(claimed.session_id);
+        const session = await sessions.findById(reminder.session_id);
         if (!session) return { failure: 'session_missing' as const };
-        const expectedTaskId = sessionReminderTaskId(claimed.reminder_id);
+        const expectedTaskId = sessionReminderTaskId(reminder.reminder_id);
         const existing = await new TaskRepository(tenantDb).findById(expectedTaskId);
         if (existing) {
-          if (!this.taskMatches(existing, claimed)) {
+          if (!this.taskMatches(existing, reminder)) {
             return { failure: 'dispatch_failed' as const };
           }
           // A matching Task is the durable dispatch fence. Lifecycle or RBAC
@@ -195,11 +241,11 @@ export class SessionReminderWorker {
         if (classifyBranchFilesystemReadiness(branch) !== 'ready') {
           return { failure: 'branch_unavailable' as const };
         }
-        const user = await new UsersRepository(tenantDb).findById(claimed.created_by);
+        const user = await new UsersRepository(tenantDb).findById(reminder.created_by);
         if (!user) return { failure: 'authorization_revoked' as const };
         const authority = await branchRepository.resolveSessionPromptAuthority(
           branch.branch_id,
-          claimed.created_by as UUID,
+          reminder.created_by as UUID,
           session.created_by as UUID,
           session.sdk_home_scope
         );
@@ -209,7 +255,7 @@ export class SessionReminderWorker {
 
       if ('failure' in preparation) {
         await this.block(
-          claimed,
+          reminder,
           token,
           tenantId,
           preparation.failure as SessionReminderFailureCode,
@@ -218,7 +264,7 @@ export class SessionReminderWorker {
         return;
       }
 
-      const taskId = sessionReminderTaskId(claimed.reminder_id);
+      const taskId = sessionReminderTaskId(reminder.reminder_id);
       let task: Task;
       if (preparation.admitted) {
         task = preparation.existing;
@@ -232,16 +278,16 @@ export class SessionReminderWorker {
         };
         task = (await this.app.service('/sessions/:id/prompt').create(
           {
-            prompt: this.promptFor(claimed),
+            prompt: this.promptFor(reminder),
             stream: true,
             idempotencyTaskId: taskId,
             requireActiveSession: true,
             metadata: {
               system_authored: true,
               session_reminder: {
-                reminder_id: claimed.reminder_id,
-                due_at: claimed.due_at,
-                created_at: claimed.created_at,
+                reminder_id: reminder.reminder_id,
+                due_at: reminder.due_at,
+                created_at: reminder.created_at,
                 one_shot: true,
               },
             },
@@ -253,15 +299,15 @@ export class SessionReminderWorker {
       // Re-validate the durable fence returned by prompt admission. Another
       // internal producer could have raced the stable ID between preparation
       // and admission; never attach a reminder to mismatched provenance.
-      if (!this.taskMatches(task, claimed)) {
-        await this.block(claimed, token, tenantId, 'dispatch_failed', now);
+      if (!this.taskMatches(task, reminder)) {
+        await this.block(reminder, token, tenantId, 'dispatch_failed', now);
         return;
       }
 
       const queued = await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
         await assertTenantWritable(tenantDb, tenantId);
         return new SessionReminderRepository(tenantDb).markQueued(
-          claimed.reminder_id,
+          reminder.reminder_id,
           token,
           task!.task_id,
           this.options.now?.() ?? new Date()
@@ -293,11 +339,83 @@ export class SessionReminderWorker {
     }
   }
 
+  private now(): Date {
+    return this.options.now?.() ?? new Date();
+  }
+
+  private async readPullRequest(
+    reminder: SessionReminder,
+    tenantId: TenantID | string
+  ): Promise<GitHubPullRequestObservation> {
+    if (this.options.readPullRequest) return this.options.readPullRequest(reminder, tenantId);
+    const token = await resolveReminderGitHubToken(
+      this.db,
+      tenantId,
+      reminder.created_by,
+      reminder.session_id
+    );
+    return readGitHubPullRequest(reminder.wake_when!, token);
+  }
+
+  /**
+   * Check a conditional reminder under its claim. Returns the reminder with its
+   * outcome fixed when it should dispatch now; otherwise releases it for the
+   * next check (or has lost the claim) and returns null. A failed GitHub read
+   * counts as "not met" for this check and is logged without its content.
+   */
+  private async settleWakeCondition(
+    reminder: SessionReminder,
+    token: string,
+    tenantId: TenantID | string
+  ): Promise<SessionReminder | null> {
+    const condition = reminder.wake_when!;
+    let observation: GitHubPullRequestObservation | undefined;
+    try {
+      observation = await this.readPullRequest(reminder, tenantId);
+    } catch (error) {
+      const code = error instanceof GitHubPullRequestReadError ? error.code : 'unknown';
+      console.warn(
+        `[session-reminders] wake_check_failed tenant_id=${JSON.stringify(tenantId)} reminder_id=${JSON.stringify(reminder.reminder_id)} error_type=${JSON.stringify(error instanceof Error ? error.name : 'unknown')} code=${JSON.stringify(code)}`
+      );
+    }
+    const checkedAt = this.now();
+    const met = observation !== undefined && wakeConditionMet(condition, observation);
+    if (!met && Date.parse(reminder.due_at) > checkedAt.getTime()) {
+      const everyMs =
+        (reminder.check_every_minutes ?? SESSION_REMINDER_DEFAULT_CHECK_EVERY_MINUTES) * 60_000;
+      const rescheduled = await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
+        await assertTenantWritable(tenantDb, tenantId);
+        return new SessionReminderRepository(tenantDb).rescheduleCheck(
+          reminder.reminder_id,
+          token,
+          new Date(checkedAt.getTime() + everyMs),
+          checkedAt
+        );
+      });
+      if (rescheduled) this.publish(rescheduled, tenantId);
+      return null;
+    }
+    const recorded = await runWithTenantDatabaseScope(this.db, tenantId, async (tenantDb) => {
+      await assertTenantWritable(tenantDb, tenantId);
+      return new SessionReminderRepository(tenantDb).recordWakeOutcome(
+        reminder.reminder_id,
+        token,
+        describeWakeOutcome(condition, observation, met),
+        checkedAt
+      );
+    });
+    if (recorded) this.publish(recorded, tenantId);
+    return recorded;
+  }
+
   private promptFor(reminder: SessionReminder): string {
+    // Time-only reminders render exactly as before; a conditional reminder
+    // appends its recorded outcome line.
+    const outcome = reminder.wake_outcome ? `\n\n${reminder.wake_outcome}` : '';
     return `<session_reminder id="${reminder.reminder_id}" one_shot="true" due_at="${reminder.due_at}">
 This is a durable one-shot reminder for this same Agor Session. It does not reschedule itself. Creating another reminder requires an explicit agor_session_reminders_create tool call.
 
-${reminder.text}
+${reminder.text}${outcome}
 </session_reminder>`;
   }
 

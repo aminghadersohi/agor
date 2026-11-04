@@ -1,9 +1,10 @@
 /** PostgreSQL non-owner RLS and HA claim proof for Session memory/reminders. */
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateId } from '../lib/ids';
 import type { BranchID, SessionID, UserID, UUID } from '../types';
 import { createDatabase, type Database } from './client';
-import { insert } from './database-wrapper';
+import { executeRaw, insert } from './database-wrapper';
 import { initializeDatabase } from './migrate';
 import {
   BranchRepository,
@@ -147,5 +148,55 @@ describe.skipIf(!postgresUrl || !enabled)('Session memory/reminder RLS (PostgreS
       ),
     ]);
     expect(claims.filter(Boolean)).toHaveLength(1);
+  });
+
+  it('system discovery exposes a conditional reminder at its next check, not before', async () => {
+    const tenantId = `memory-wake-${generateId()}`;
+    const seeded = await seed(db, tenantId);
+    const reminder = await runWithTenantDatabaseScope(db, tenantId, (scoped) =>
+      new SessionReminderRepository(scoped).create({
+        session_id: seeded.session.session_id,
+        text: `wake-${tenantId}`,
+        due_at: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+        display_timezone: 'UTC',
+        created_by: seeded.user.user_id as UserID,
+        wake_when: { kind: 'github_pr', repo: 'acme/widgets', number: 284, state: 'merged' },
+        check_every_minutes: 10,
+      })
+    );
+    const discover = () =>
+      runWithSystemDatabaseScope(
+        db,
+        'Session reminder test discovery',
+        (systemDb) =>
+          new SessionReminderRepository(systemDb).findDueRefs(
+            new Date(Date.now() + 3_600_000),
+            100
+          ),
+        { capability: 'session_reminder_discovery' }
+      );
+    // The policy compares against the database clock, so a future next check stays hidden.
+    expect(await discover()).not.toContainEqual(
+      expect.objectContaining({ reminder_id: reminder.reminder_id })
+    );
+    await runWithTenantDatabaseScope(db, tenantId, (scoped) =>
+      executeRaw(
+        scoped,
+        sql`UPDATE session_reminders SET next_check_at = now() - interval '1 second' WHERE reminder_id = ${reminder.reminder_id}`
+      )
+    );
+    const refs = await discover();
+    expect(refs).toContainEqual({ reminder_id: reminder.reminder_id, tenant_id: tenantId });
+    expect(JSON.stringify(refs)).not.toContain(`wake-${tenantId}`);
+
+    // The shape CHECK rejects a cadence outside 5-60 minutes.
+    await expect(
+      runWithTenantDatabaseScope(db, tenantId, (scoped) =>
+        executeRaw(
+          scoped,
+          sql`UPDATE session_reminders SET check_every_minutes = 4 WHERE reminder_id = ${reminder.reminder_id}`
+        )
+      )
+    ).rejects.toThrow();
   });
 });

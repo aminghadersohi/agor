@@ -1861,6 +1861,9 @@ describe('GatewayService Slack thread catch-up', () => {
     expect(prompt).toContain(
       'Any assistant message you send in this current Agor session is streamed back directly to the Slack conversation'
     );
+    expect(prompt).toContain(
+      'create an agor_session_reminders_create reminder before ending your turn'
+    );
     expect(prompt).toContain('**Slack context**');
     expect(prompt).toContain('### Previous thread messages');
     expect(prompt).toContain('missed context');

@@ -51,6 +51,27 @@ executable. An archived or missing Session, archived branch, revoked author, or
 unavailable filesystem leaves a visible blocked reminder. Agor never creates a
 replacement Session or worktree.
 
+### Wake when a pull request merges or closes
+
+A reminder can carry an optional wake condition, so an agent can keep a promise
+like "I'll message you when PR #284 merges": `wakeWhen: { kind: 'github_pr',
+repo: 'owner/name', number: 284, state: 'merged' }`. A `closed` condition is
+also met by a merge. Agor checks the pull request every `checkEveryMinutes`
+(default 10, 5-60) and, once the condition is met, queues the prompt with one
+added line such as `Condition met: owner/name#284 merged at <time>`.
+
+`due_at` stays required and becomes the deadline. If the condition is still
+unmet when it passes, the reminder fires anyway with `Condition not met by
+deadline: …` and the state Agor last observed. Checks read GitHub with the
+reminder author's own `GITHUB_TOKEN` (or `GH_TOKEN`) Agor environment variable;
+without one, only public repositories can be read. A failed read counts as not
+met for that check and is retried at the next one. Between checks the reminder
+stays scheduled and editable; pass `wakeWhen: null` to make it time-only.
+
+A reminder created from a Slack thread replies in that thread when it fires.
+Gateway sessions are told to create a reminder before ending a turn in which
+they promised a follow-up, because nothing else wakes the Session.
+
 Reminders differ from [branch schedules](/guide/scheduler): schedules are cron
 templates that create fresh Sessions on a branch, while reminders are one-shot
 prompts to their exact owning Session.
