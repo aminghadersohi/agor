@@ -68,7 +68,7 @@ The **layout** button in the zone toolbar chooses how the zone places its branch
 
 In Row, Column and Grid, cards keep their natural height and their order. When an agent adds a session and a card grows, only the cards below it in the same column move. A card dropped into the zone joins at the end. To reorder, drag a card onto the slot where you want it; the other cards shift to make room. Drag a card out of the zone to take it out of the layout.
 
-These zones fit themselves to their cards, so they may overlap a nearby zone. Only a Grid's width can be resized. A badge in the zone's corner shows the layout and card count, and editors can change the layout from it. Switching back to **Free** keeps every card where it was shown. Agents can set a zone's layout with `agor_boards_update` (`layout: "free" | "row" | "column" | "grid"`).
+These zones fit themselves to their cards, so they may overlap a nearby zone. Only a Grid's width can be resized. An empty zone stays tall enough for one card, so there is always room to drop one in. Switching back to **Free** keeps every card where it was shown. Agents can set a zone's layout with `agor_boards_update` (`layout: "free" | "row" | "column" | "grid"`).
 
 Row, Column and Grid sit alongside the zone's layout policy (Grid/List, sorting, Auto Zone, growth) rather than replacing it. While a zone uses one of them, its policy is kept aside: **Tidy up contents**, alignment and **Auto Zone** are unavailable, the **Layout** tab of **Zone settings** is read-only, and **Arrange board** moves the zone as one rectangle at its shown size without touching its cards. Switching back to **Free** brings the policy back. Setting `layout: "free"` never clears a policy; a zone without one follows the board's zone defaults.
 
@@ -273,6 +273,8 @@ Every board has one primary owner and two intentionally separate permission sect
 2. **Branch defaults** define the complete permission package inherited by branches on this board.
 
 Board access uses Viewer, Editor, and Manager roles. Seeing a branch associated with a board does not make the board visible, and seeing a board does not reveal branch cards the person cannot access.
+
+A new board is shared by default: **Others** can view it, but only Editors and Managers can change its zones, notes, and cards. Create it as private to keep it to yourself. Branch defaults never hide the board itself.
 
 Branch defaults use the same roles, file-access choices, and session-sharing editor as a branch override. A branch inherits the entire package or overrides the entire package—session sharing never has its own separate inheritance switch.
 

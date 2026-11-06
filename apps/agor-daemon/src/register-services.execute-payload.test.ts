@@ -43,13 +43,18 @@ const baseSession = {
   sdk_home_scope: 'execution_home',
 } as Session;
 
-function createLaunch(session: Session) {
+type LaunchOptions = {
+  config?: AgorConfig;
+  fsAccess?: 'none' | 'read' | 'write';
+};
+
+function createLaunch(session: Session, { config = {}, fsAccess = 'write' }: LaunchOptions = {}) {
   mocks.session = session;
   mocks.spawnExecutor.mockReset();
   const ctx = {
     db: { run: vi.fn() },
     app: { get: () => undefined },
-    config: {} as AgorConfig,
+    config,
     deployment: { mode: 'standalone' },
     daemonUrl: 'http://127.0.0.1',
   } as unknown as RegisterServicesContext;
@@ -58,7 +63,7 @@ function createLaunch(session: Session) {
       session_id: 'session-1',
       branch_id: 'branch-1',
       principal_user_id: 'prompt-actor',
-      fs_access: 'write',
+      fs_access: fsAccess,
     })),
   };
   const sessionTokenService = { generateToken: vi.fn(async () => 'session-token') };
@@ -75,8 +80,12 @@ function createLaunch(session: Session) {
   return { launch, sessionTokenService };
 }
 
-async function launchPrompt(session: Session) {
-  await createLaunch(session).launch();
+async function executePrompt(session: Session, options: LaunchOptions) {
+  await createLaunch(session, options).launch();
+}
+
+async function launchPrompt(session: Session, options: LaunchOptions = {}) {
+  await executePrompt(session, options);
   expect(mocks.spawnExecutor).toHaveBeenCalledOnce();
   return mocks.spawnExecutor.mock.calls[0][0].params as Record<string, unknown>;
 }
@@ -136,4 +145,41 @@ describe('execute handler prompt payload', () => {
       expect(mocks.spawnExecutor).not.toHaveBeenCalled();
     }
   );
+});
+
+describe('execute handler branch file access', () => {
+  const delegated = { execution: { unix_user_mode: 'delegated' } } as AgorConfig;
+
+  it('refuses a delegated prompt whose actor has no file access before launching', async () => {
+    await expect(
+      executePrompt(baseSession, { config: delegated, fsAccess: 'none' })
+    ).rejects.toThrow(
+      'The prompt actor has no filesystem access to branch branch-1. Grant at least Read file access'
+    );
+    expect(mocks.spawnExecutor).not.toHaveBeenCalled();
+  });
+
+  it('refuses a sandboxed prompt whose actor has no file access before launching', async () => {
+    const sandboxed = { execution: { sandbox: { enabled: true } } } as AgorConfig;
+
+    await expect(
+      executePrompt(baseSession, { config: sandboxed, fsAccess: 'none' })
+    ).rejects.toThrow('The prompt actor has no filesystem access to branch branch-1.');
+    expect(mocks.spawnExecutor).not.toHaveBeenCalled();
+  });
+
+  it('forwards read access to a delegated launcher', async () => {
+    await launchPrompt({ ...baseSession, unix_username: 'agor_u1' } as Session, {
+      config: delegated,
+      fsAccess: 'read',
+    });
+
+    expect(mocks.spawnExecutor.mock.calls[0][1].templateVariables.branch_fs_access).toBe('read');
+  });
+
+  it('still launches a no-access prompt in simple mode, which mounts nothing by access', async () => {
+    await launchPrompt(baseSession, { fsAccess: 'none' });
+
+    expect(mocks.spawnExecutor.mock.calls[0][1].templateVariables.branch_fs_access).toBe('none');
+  });
 });

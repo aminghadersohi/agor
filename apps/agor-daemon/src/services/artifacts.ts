@@ -1089,7 +1089,8 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     if (!resolvedName) {
       throw new Error('name is required when creating a new artifact');
     }
-    const resolvedBoardId = (data.board_id ?? existing?.board_id) as BoardID | undefined;
+    // A republish stays on the artifact's stored board (moves go through updateMetadata), so authorize that board.
+    const resolvedBoardId = (existing ? existing.board_id : data.board_id) as BoardID | undefined;
     if (!resolvedBoardId) {
       throw new Error('boardId is required when creating a new artifact');
     }
@@ -1098,6 +1099,13 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     if (branch.board_id !== resolvedBoardId) {
       throw new Forbidden('Artifact board must match the source branch board');
     }
+    // Branch access lets the executor read files; the board canvas still needs the caller's Board Editor.
+    await this.requireBoardEditor(
+      resolvedBoardId,
+      userId,
+      params?.user?.role as UserRole | undefined,
+      'publish an artifact on this board'
+    );
 
     // agor_runtime: `enabled` plus declared `interactions`. Same
     // explicit-data > sidecar > existing chain; an absent `enabled` reads as
@@ -1274,11 +1282,34 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     const newBoardId = updates.board_id ?? oldBoardId;
     const moving = newBoardId !== oldBoardId;
 
+    const placementChanged =
+      updates.x !== undefined ||
+      updates.y !== undefined ||
+      updates.width !== undefined ||
+      updates.height !== undefined;
+
     if (moving) {
       const destBoard = await this.boardRepo.findById(newBoardId);
       if (!destBoard) {
         throw new Error(`Destination board ${newBoardId} not found`);
       }
+    }
+    // Writing the artifact's board objects is a board edit on every board it touches.
+    if (moving || placementChanged) {
+      await this.requireBoardEditor(
+        newBoardId,
+        userId,
+        userRole,
+        'place an artifact on this board'
+      );
+    }
+    if (moving) {
+      await this.requireBoardEditor(
+        oldBoardId,
+        userId,
+        userRole,
+        'move an artifact off this board'
+      );
     }
 
     let currentPlacement: { x: number; y: number; width: number; height: number } | null = null;
@@ -1341,12 +1372,6 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     if (Object.keys(dbUpdates).length > 0) {
       updated = await this.artifactRepo.update(fullArtifactId, dbUpdates);
     }
-
-    const placementChanged =
-      updates.x !== undefined ||
-      updates.y !== undefined ||
-      updates.width !== undefined ||
-      updates.height !== undefined;
 
     if (moving || placementChanged) {
       const placement = {
@@ -2272,6 +2297,18 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     return this.validateArtifactFiles(data.files, { template, sandpackConfig, requiredEnvVars });
   }
 
+  /** Require current Board Editor authority; admins and callers without a user identity keep their existing paths. */
+  private async requireBoardEditor(
+    boardId: string,
+    userId: string | undefined,
+    userRole: UserRole | undefined,
+    action: string
+  ): Promise<void> {
+    if (!userId || (userRole && hasMinimumRole(userRole, ROLES.ADMIN))) return;
+    if (await this.boardRepo.canMutate(boardId, userId as UUID).catch(() => false)) return;
+    throw new Forbidden(`Board Editor or Manager access is required to ${action}`);
+  }
+
   private requireExecutorCallback(
     params: ArtifactParams | undefined,
     action: 'artifact.publish' | 'artifact.validate',
@@ -2732,6 +2769,13 @@ export class ArtifactsService extends DrizzleService<Artifact, Partial<Artifact>
     if (!isOwner && !isAdmin) {
       throw new Error("Forbidden: only the artifact's creator or an admin may delete it");
     }
+    // Removing the placement edits the containing board.
+    await this.requireBoardEditor(
+      artifact.board_id,
+      userId,
+      userRole,
+      'delete an artifact from this board'
+    );
 
     const objectId = `artifact-${artifactId}`;
     try {
