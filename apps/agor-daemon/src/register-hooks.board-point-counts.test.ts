@@ -36,6 +36,9 @@ function captureBoardGetChains() {
   const board = { board_id: BOARD_ID, objects: {} };
   const boardRepository = {
     findBySlugOrId: vi.fn(async () => ({ ...board })),
+    // The boards access hook resolves a canonical ID among the caller's visible boards.
+    findBySlug: vi.fn(async () => null),
+    findVisibleById: vi.fn(async () => ({ ...board })),
     canViewResolved: vi.fn(async () => true),
   };
   registerHooks({

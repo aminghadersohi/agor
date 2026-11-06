@@ -46,6 +46,7 @@ import {
 } from '@agor/core/layout/zone-layout-arrangement';
 import type {
   Board,
+  BoardAccessMode,
   BoardEntityObject,
   BoardEntityType,
   BoardLayoutPlacementUpdate,
@@ -66,7 +67,6 @@ import {
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { BoardsServiceImpl } from '../../declarations.js';
-import { emitServiceEvent } from '../../utils/emit-service-event.js';
 import {
   getCanvasObjectDimensions,
   planZoneGrowthObjects,
@@ -86,9 +86,21 @@ import {
 } from '../schema.js';
 import type { McpContext } from '../server.js';
 import { coerceString, textResult } from '../server.js';
-import { runWithMcpTenantDatabaseScope, runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
+import { runWithMcpTenantDatabaseWrite } from '../tenant-scope.js';
 
 const BOARD_ENTITY_TYPES = ['branch', 'card'] as const satisfies readonly BoardEntityType[];
+const BOARD_ACCESS_MODES = ['private', 'shared'] as const satisfies readonly BoardAccessMode[];
+
+/** Drop the legacy permission fields: rows carry fail-closed sentinels, not the stored policy. */
+function withoutLegacyPermissionFields(board: Board): Board {
+  const {
+    access_mode: _accessMode,
+    default_others_can: _defaultOthersCan,
+    default_others_fs_access: _defaultOthersFsAccess,
+    ...rest
+  } = board;
+  return rest;
+}
 
 // These match the rendered React Flow nodes.  Keeping the dimensions here is
 // important: a zone arrange must never blindly use the branch-card spacing for
@@ -957,7 +969,9 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       const boardId = coerceString(args.boardId);
       if (!boardId) throw new Error('boardId is required');
       const board = filterBoardCanvasObjects(
-        await ctx.app.service('boards').get(boardId, ctx.baseServiceParams),
+        withoutLegacyPermissionFields(
+          await ctx.app.service('boards').get(boardId, ctx.baseServiceParams)
+        ),
         args.objectTypes as BoardObjectType[] | undefined
       );
       const permissions = await ctx.app
@@ -1034,7 +1048,8 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         query.archived = false;
       }
       const boards = await ctx.app.service('boards').find({ query, ...ctx.baseServiceParams });
-      return textResult(mcpPageResult(boards, limit, offset));
+      const page = mcpPageResult<Board>(boards, limit, offset);
+      return textResult({ ...page, data: page.data.map(withoutLegacyPermissionFields) });
     }
   );
 
@@ -1084,7 +1099,6 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
     async (args) => {
       const boardId = coerceString(args.boardId);
       if (!boardId) throw new Error('boardId is required');
-      const boardsService = ctx.app.service('boards') as unknown as BoardsServiceImpl;
 
       const metadataUpdates: Record<string, unknown> = {};
       if (args.name !== undefined) metadataUpdates.name = args.name;
@@ -1101,44 +1115,38 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
         await ctx.app.service('boards').patch(boardId, metadataUpdates, ctx.baseServiceParams);
       }
 
+      // Object writes use the boards patch actions, which enforce Board Editor access and publish.
       if (
         args.upsertObjects &&
         typeof args.upsertObjects === 'object' &&
         !Array.isArray(args.upsertObjects)
       ) {
-        const updatedBoard = await runWithMcpTenantDatabaseScope(ctx, () =>
-          boardsService.batchUpsertBoardObjects(
+        await ctx.app
+          .service('boards')
+          .patch(
             boardId,
-            args.upsertObjects as unknown as unknown[],
+            { _action: 'batchUpsertObjects', objects: args.upsertObjects } as Partial<Board>,
             ctx.baseServiceParams
-          )
-        );
-        emitServiceEvent(ctx.app, {
-          path: 'boards',
-          event: 'patched',
-          data: updatedBoard,
-          id: boardId,
-        });
+          );
       }
 
       if (args.removeObjects && Array.isArray(args.removeObjects)) {
-        let finalBoard: Board | undefined;
         for (const objectId of args.removeObjects) {
-          finalBoard = await runWithMcpTenantDatabaseScope(ctx, () =>
-            boardsService.removeBoardObject(boardId, objectId, ctx.baseServiceParams)
-          );
+          await ctx.app
+            .service('boards')
+            .patch(
+              boardId,
+              { _action: 'removeObject', objectId } as Partial<Board>,
+              ctx.baseServiceParams
+            );
         }
-        if (finalBoard)
-          emitServiceEvent(ctx.app, {
-            path: 'boards',
-            event: 'patched',
-            data: finalBoard,
-            id: boardId,
-          });
       }
 
       const board = await ctx.app.service('boards').get(boardId, ctx.baseServiceParams);
-      return textResult({ board, note: 'Board updated successfully.' });
+      return textResult({
+        board: withoutLegacyPermissionFields(board),
+        note: 'Board updated successfully.',
+      });
     }
   );
 
@@ -2475,7 +2483,10 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
   server.registerTool(
     'agor_boards_create',
     {
-      description: 'Create a new board. Returns the created board object with its ID and URL.',
+      description:
+        'Create a new board. Returns the created board object with its ID, URL, and stored permissions. ' +
+        'accessMode controls who can see the board: "shared" (default) lets other workspace members view it; "private" limits it to you and admins. ' +
+        'defaultOthersCan/defaultOthersFsAccess set the default branch permissions for others on a shared board; they do not hide the board.',
       inputSchema: z.object({
         name: mcpRequiredString('name', 'Board name (required)'),
         slug: mcpOptionalString(
@@ -2496,8 +2507,20 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
           'customCss',
           'Custom CSS for board canvas animations (@keyframes, animation, etc.). Optional.'
         ),
-        defaultOthersCan: z.enum(BRANCH_PERMISSION_LEVELS).optional(),
-        defaultOthersFsAccess: z.enum(['none', 'read', 'write']).optional(),
+        accessMode: z
+          .enum(BOARD_ACCESS_MODES)
+          .optional()
+          .describe('Board visibility: "shared" (default, others can view) or "private".'),
+        defaultOthersCan: z
+          .enum(BRANCH_PERMISSION_LEVELS)
+          .optional()
+          .describe(
+            'Default branch permission for others on a shared board (ignored when private).'
+          ),
+        defaultOthersFsAccess: z
+          .enum(['none', 'read', 'write'])
+          .optional()
+          .describe('Default branch filesystem access for others on a shared board.'),
       }),
     },
     async (args) => {
@@ -2515,12 +2538,20 @@ export function registerBoardTools(server: McpServer, ctx: McpContext): void {
       if (args.backgroundColor !== undefined)
         boardData.background_color = coerceString(args.backgroundColor);
       if (args.customCss !== undefined) boardData.custom_css = coerceString(args.customCss);
+      if (args.accessMode !== undefined) boardData.access_mode = args.accessMode;
       if (args.defaultOthersCan !== undefined) boardData.default_others_can = args.defaultOthersCan;
       if (args.defaultOthersFsAccess !== undefined)
         boardData.default_others_fs_access = args.defaultOthersFsAccess;
 
-      const board = await ctx.app.service('boards').create(boardData, ctx.baseServiceParams);
-      return textResult(board);
+      const board = (await ctx.app
+        .service('boards')
+        .create(boardData, ctx.baseServiceParams)) as Board;
+      // The board already exists; a failed policy read must not invite a duplicate create.
+      const permissions = await ctx.app
+        .service('boards/:id/permissions')
+        .find({ ...ctx.baseServiceParams, route: { id: board.board_id } })
+        .catch(() => null);
+      return textResult({ ...withoutLegacyPermissionFields(board), permissions });
     }
   );
 

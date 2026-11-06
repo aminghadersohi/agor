@@ -199,6 +199,7 @@ describe('retired fork-main front desk / profile image order', () => {
     '9034_schedule_failure_notifications',
     '9035_schedule_failure_attempt_fence',
     '9036_session_reminder_wake_conditions',
+    '0119_kb_namespace_others_can_tighten',
   ];
   const dropUpstreamTail = async (db: ReturnType<typeof createDatabase>) => {
     await executeRaw(db, sql`ALTER TABLE user_api_keys DROP COLUMN source`);
@@ -239,6 +240,7 @@ describe('retired fork-main front desk / profile image order', () => {
       expect(status.pending).toEqual([...REPLAYED, ...UPSTREAM_TAIL]);
       expect(pendingOfflineCutoverMigrations('sqlite', status)).toEqual([
         '9035_schedule_failure_attempt_fence',
+        '0119_kb_namespace_others_can_tighten',
       ]);
 
       await runMigrations(db, { allowOfflineCutover: true });

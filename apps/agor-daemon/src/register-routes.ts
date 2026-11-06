@@ -35,6 +35,7 @@ import {
   resolvePasswordPolicyRequirements,
   resolvePowerManagementConfig,
   resolvePowerManagementRuntimeOverlay,
+  resolveRefreshTokenTtlSeconds,
   resolveRestartRecoverySettings,
   resolveSdkWatchdogConfig,
   resolveTeammateFrameworkRepoUrl,
@@ -50,6 +51,7 @@ import {
   getCurrentTenantId,
   getMCPEgressGatewayMode,
   isDatabaseUniqueConstraintError,
+  isScheduledInitialTaskRevoked,
   MCPCatalogCandidateRepository,
   MCPServerRepository,
   MessagesRepository,
@@ -279,6 +281,7 @@ import { buildAuthRateLimitKey } from './utils/auth-rate-limit-key.js';
 import {
   ensureMinimumRole,
   registerAuthenticatedRoute as registerAuthenticatedRouteUnscoped,
+  rejectNonScalarExternalId,
   requireMinimumRole,
 } from './utils/authorization.js';
 import { authorizeBranchArchiveDelete } from './utils/branch-archive-delete-authorization.js';
@@ -1596,13 +1599,17 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   const tenantTokenClaim = multiTenancy.auth_claim ?? 'tenant_id';
 
   // Access token TTL — short by design. The /authentication/refresh route
-  // (and the after-hook below) issues a 30-day refresh token so users stay
-  // logged in across browser restarts; the access token itself stays
+  // (and the after-hook and /auth/launch below) issues a refresh token so users
+  // stay logged in across browser restarts; the access token itself stays
   // short-lived so that a leaked one expires quickly. Both the auth-service
   // config AND the refresh endpoint MUST use this constant — if they drift,
   // the refresh path silently downgrades the security of the auth path.
   const ACCESS_TOKEN_TTL = '15m';
-  const REFRESH_TOKEN_TTL = '30d';
+  // Refresh token TTL in seconds (jsonwebtoken reads a numeric expiresIn as
+  // seconds). Comes from `daemon.refresh_token_ttl_seconds` or
+  // AGOR_REFRESH_TOKEN_TTL_SECONDS, validated at config load. All three issuers
+  // below MUST use this one value so login, launch and refresh never disagree.
+  const REFRESH_TOKEN_TTL_SECONDS = resolveRefreshTokenTtlSeconds(config);
 
   app.set('authentication', {
     secret: jwtSecret,
@@ -1648,7 +1655,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // Initialize API key strategy with dependencies
   const { UserApiKeysRepository } = await import('@agor/core/db');
   const userApiKeysRepo = new UserApiKeysRepository(db);
-  apiKeyStrategy.setDependencies(userApiKeysRepo, usersService);
+  apiKeyStrategy.setDependencies(userApiKeysRepo, usersService, db);
 
   // SECURITY: Rate-limit the authentication + refresh endpoints.
   //
@@ -1719,7 +1726,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
         createIssueBrowserTokensHook({
           jwtSecret,
           accessTokenTtl: ACCESS_TOKEN_TTL,
-          refreshTokenTtl: REFRESH_TOKEN_TTL,
+          refreshTokenTtl: REFRESH_TOKEN_TTL_SECONDS,
           tenantClaim: tenantTokenClaim,
           staticTenantId:
             multiTenancy.mode === 'static' ? multiTenancy.static_tenant_id : undefined,
@@ -1743,7 +1750,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       provider: externalLaunchProvider,
       jwtSecret,
       accessTokenTtl: ACCESS_TOKEN_TTL,
-      refreshTokenTtl: REFRESH_TOKEN_TTL,
+      refreshTokenTtl: REFRESH_TOKEN_TTL_SECONDS,
       usersService,
       onAuthorizationInvalidated: (tenantId, userId) => {
         app.emit('realtime:authorization-invalidated', {
@@ -1771,7 +1778,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
     createRefreshTokenService({
       jwtSecret,
       accessTokenTtl: ACCESS_TOKEN_TTL,
-      refreshTokenTtl: REFRESH_TOKEN_TTL,
+      refreshTokenTtl: REFRESH_TOKEN_TTL_SECONDS,
       tenantClaim: tenantTokenClaim,
       usersService,
     })
@@ -2666,16 +2673,19 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           // count, so it lands the system error at the true tail whether
           // the user-message row exists or not (no gap, no collision).
           const errorContent = `⚠️ The agent failed to start.\n\n${errorMessage}`;
-          await appendSystemMessage({
-            app,
-            db,
-            sessionId,
-            taskId,
-            content: errorContent,
-            role: MessageRole.ASSISTANT,
-            metadata: { is_meta: true },
-            params: failureParams,
-          });
+          // Deferred work carries tenant identity only; open the DB unit here.
+          await inCurrentTenantDatabaseScope(() =>
+            appendSystemMessage({
+              app,
+              db,
+              sessionId,
+              taskId,
+              content: errorContent,
+              role: MessageRole.ASSISTANT,
+              metadata: { is_meta: true },
+              params: failureParams,
+            })
+          );
         } catch (sysErr) {
           console.warn(
             '[Daemon] Failed to write system error message after spawn failure:',
@@ -3027,6 +3037,20 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
                   throw new Conflict('Cannot deliver to an archived Session');
                 }
                 await assertCurrentPromptAuthority(operationDb, admissionSession);
+                // An already-admitted initial Task is re-checked at its launch fence instead.
+                if (
+                  !prior &&
+                  data.idempotencyTaskId &&
+                  (await isScheduledInitialTaskRevoked(operationDb, {
+                    sessionId: id,
+                    taskId: data.idempotencyTaskId,
+                    principalUserId: createdBy,
+                  }))
+                ) {
+                  throw new Forbidden(
+                    "This schedule's creator no longer has Manager access to its branch"
+                  );
+                }
                 if (admissionFence) await admissionFence(operationDb);
                 return new TaskRepository(operationDb).createPending({
                   // Only a caller-supplied stable identity may pin the Task ID.
@@ -4168,9 +4192,12 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       async find(params: RouteParams) {
         const sessionId = params.route?.id;
         if (!sessionId) throw new Error('Session ID required');
+        // Queued Tasks carry full prompts: require Session view through the hooked service.
+        const { query: _query, ...readParams } = params;
+        const session = await app.service('sessions').get(sessionId, readParams);
 
         const taskQueueRepo = new TaskRepository(db);
-        const queued = await taskQueueRepo.findQueued(sessionId as SessionID);
+        const queued = await taskQueueRepo.findQueued(session.session_id);
 
         return {
           total: queued.length,
@@ -8091,7 +8118,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       all: aroundAll,
     },
     before: {
-      all: [enforcePasswordChange],
+      // Every service's record hooks only ever see scalar IDs from transports.
+      all: [rejectNonScalarExternalId, enforcePasswordChange],
       // Versioned list reads (utils/list-sync): app-level so `$sync` leaves
       // the query before any service hook and the projection runs after all
       // of them, on the exact payload the transport sends.

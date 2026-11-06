@@ -33,6 +33,7 @@ const UPSTREAM_TAIL = [
   '9034_schedule_failure_notifications',
   '9035_schedule_failure_attempt_fence',
   '9036_session_reminder_wake_conditions',
+  '0120_kb_namespace_others_can_tighten',
 ];
 
 // Fork main journalled front desk at 1790129000214 and profile images at

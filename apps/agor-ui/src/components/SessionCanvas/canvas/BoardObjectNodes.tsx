@@ -12,6 +12,8 @@ import {
   isAutoZoneLayout,
   ZONE_GRID_MIN_COLUMN_WIDTH,
   ZONE_GRID_PADDING,
+  ZONE_MIN_HEIGHT,
+  ZONE_MIN_WIDTH,
   zoneLayoutOf,
 } from '@agor/core/utils/zone-layout';
 import type { BoardComment, BoardObject, User } from '@agor-live/client';
@@ -29,6 +31,7 @@ import {
   CommentOutlined,
   DeleteOutlined,
   EditOutlined,
+  LayoutOutlined,
   LockOutlined,
   MoreOutlined,
   SettingOutlined,
@@ -47,7 +50,6 @@ import {
   type MenuProps,
   Popover,
   Space,
-  Tag,
   Typography,
   theme,
 } from 'antd';
@@ -64,6 +66,7 @@ import {
 import { useConnectionState, useMutationGate } from '../../../contexts/ConnectionContext';
 import type { BoardWriteResult } from '../../../hooks/useBoardMutationGuard';
 import { type BoardWriteTicket, hasBoardWriteTicketEnded } from '../../../store/boardMutationGuard';
+import { VISUALLY_HIDDEN_STYLE } from '../../../utils/accessibility';
 import { getContrastingTextColor } from '../../../utils/theme';
 import { UserIdentityAvatar } from '../../UserIdentityAvatar';
 import { DeleteZoneModal } from './DeleteZoneModal';
@@ -462,21 +465,6 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
       void data.onLayoutChange?.(data.objectId, key as ZoneLayout, captureTicket());
     },
   };
-  // A zone narrow on screen shows the badge as icon and count, so the title keeps its room.
-  const compactBadge = data.width * zoom < 360;
-  const layoutBadgeText = (
-    <>
-      {!compactBadge && <span>{layoutOption.label}</span>}
-      {data.pinnedItemCount !== undefined && (
-        <span>
-          {compactBadge ? '' : ' · '}
-          {data.pinnedItemCount}
-        </span>
-      )}
-    </>
-  );
-  // Badge width (in the label's unscaled pixels) the title leaves free.
-  const badgeRoom = isAutoZoneLayout(layout) ? (compactBadge ? 70 : 150) : 0;
   const resizable = selected && !data.locked && !mutationDisabled;
   // Status keeps its smaller relative size, scaled from the label size when set.
   const statusFontSize = statusFontSizeFor(data.fontSize, token.fontSize, token.fontSizeSM);
@@ -561,8 +549,8 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
       ) : (
         <NodeResizer
           isVisible={resizable}
-          minWidth={200}
-          minHeight={200}
+          minWidth={ZONE_MIN_WIDTH}
+          minHeight={ZONE_MIN_HEIGHT}
           handleStyle={{
             width: '10px',
             height: '10px',
@@ -783,7 +771,8 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
                   size="small"
                   aria-label={`Zone layout: ${layoutOption.label}`}
                   title={`Zone layout: ${layoutOption.label}`}
-                  icon={layoutOption.icon}
+                  // One icon for every layout, so the control is easy to find; the menu marks the current one.
+                  icon={<LayoutOutlined />}
                   disabled={mutationDisabled}
                   style={{ width: 32, height: 32 }}
                 />
@@ -1014,7 +1003,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
                 transform: `scale(${scale})`,
                 transformOrigin: 'top left',
                 // Constrain to zone width accounting for padding and scale
-                maxWidth: `${(data.width - token.padding * 2) / scale - badgeRoom}px`,
+                maxWidth: `${(data.width - token.padding * 2) / scale}px`,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
@@ -1060,6 +1049,10 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
             />
           )}
         </div>
+        {isAutoZoneLayout(layout) && (
+          // Not shown on the canvas: the toolbar is the visible control, but viewers never see it.
+          <span style={VISUALLY_HIDDEN_STYLE}>{layoutOption.label} layout</span>
+        )}
         {data.status && (
           <div
             style={{
@@ -1080,37 +1073,6 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
             }}
           >
             {data.status}
-          </div>
-        )}
-        {isAutoZoneLayout(layout) && (
-          <div
-            className="nodrag nopan"
-            onPointerDown={(event) => event.stopPropagation()}
-            style={{
-              position: 'absolute',
-              top: token.padding,
-              right: token.padding,
-              pointerEvents: 'auto',
-              // Inverse scale keeps the badge readable at any zoom, like the label.
-              transform: `scale(${scale})`,
-              transformOrigin: 'top right',
-            }}
-          >
-            {data.onLayoutChange && !mutationDisabled ? (
-              <Dropdown trigger={['click']} placement="bottomRight" menu={layoutMenu}>
-                <Button
-                  size="small"
-                  icon={layoutOption.icon}
-                  aria-label={`${layoutOption.label} layout. Change layout`}
-                >
-                  {layoutBadgeText}
-                </Button>
-              </Dropdown>
-            ) : (
-              <Tag icon={layoutOption.icon} bordered={false} style={{ marginInlineEnd: 0 }}>
-                {layoutBadgeText}
-              </Tag>
-            )}
           </div>
         )}
       </div>
