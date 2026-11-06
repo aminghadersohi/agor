@@ -124,6 +124,7 @@ async function fixture() {
         sessionsRepository,
         branchRepository,
         usersRepository,
+        superadminOpts: { allowSuperadmin: false },
       } as unknown as RegisterRoutesContext)
     ).rejects.toBe(stopRegistration);
   } finally {
