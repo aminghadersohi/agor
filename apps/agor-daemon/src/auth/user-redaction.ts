@@ -9,6 +9,8 @@ const USER_DIRECTORY_FIELDS = [
   'avatar_url',
   'avatar',
   'avatar_source',
+  // Fork: the primary gallery image drives every viewer's avatar.
+  'profile_image_id',
   'created_at',
   'updated_at',
 ] as const satisfies readonly (keyof User)[];
