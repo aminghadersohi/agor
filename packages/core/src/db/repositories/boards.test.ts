@@ -1224,7 +1224,7 @@ describe('BoardRepository.upsertBoardObject', () => {
         height: 400,
         label: 'Fictional zone',
       })
-    ).rejects.toThrow('requires a positive finite width');
+    ).rejects.toThrow('width must be a finite number');
     await expect(
       repo.upsertBoardObject(board.board_id, 'note-invalid', {
         type: 'markdown',

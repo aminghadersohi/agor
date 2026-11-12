@@ -129,11 +129,13 @@ function boardObjectGeometry(object: BoardObject): BoardLayoutObjectUpdate {
 
 function validateBoardObjectGeometry(objectId: string, object: BoardObject): void {
   if (!Number.isFinite(object.x) || !Number.isFinite(object.y)) {
-    throw new RepositoryError(`Board object ${objectId} requires finite x/y geometry`);
+    throw new BoardObjectValidationError(`Board object ${objectId} requires finite x/y geometry`);
   }
   const requirePositiveFiniteDimension = (dimension: 'width' | 'height', value: number) => {
     if (!Number.isFinite(value) || value <= 0) {
-      throw new RepositoryError(`Board object ${objectId} requires a positive finite ${dimension}`);
+      throw new BoardObjectValidationError(
+        `Board object ${objectId} requires a positive finite ${dimension}`
+      );
     }
   };
   if (object.type === 'zone' || object.type === 'app' || object.type === 'artifact') {
@@ -146,7 +148,7 @@ function validateBoardObjectGeometry(objectId: string, object: BoardObject): voi
     for (const dimension of ['width', 'height'] as const) {
       const value = object[dimension];
       if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
-        throw new RepositoryError(
+        throw new BoardObjectValidationError(
           `Board object ${objectId} requires a positive finite ${dimension} when provided`
         );
       }
@@ -1401,13 +1403,15 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
     objectData: BoardObject
   ): Promise<Board> {
     try {
-      validateBoardObjectGeometry(objectId, objectData);
       const fullId = await this.resolveId(boardId);
 
       const current = await this.findById(fullId);
       if (!current) {
         throw new EntityNotFoundError('Board', boardId);
       }
+      // Style first so a non-numeric size reports the upstream style message; both are bad input (400).
+      assertBoardObjectStyles({ [objectId]: objectData }, current.objects);
+      validateBoardObjectGeometry(objectId, objectData);
 
       const existing = current.objects?.[objectId];
       const normalizedObject =
