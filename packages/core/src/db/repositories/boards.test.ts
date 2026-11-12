@@ -1387,7 +1387,8 @@ describe('BoardRepository board object style fields', () => {
       fontSize: 18,
     } as BoardObject;
     const updated = await repo.upsertBoardObject(board.board_id, 'zone-1', zone);
-    expect(updated.objects?.['zone-1']).toEqual(zone);
+    // Fork: a zone written without a layout inherits the board's zone defaults.
+    expect(updated.objects?.['zone-1']).toMatchObject({ ...zone, layout_binding: 'inherit' });
   });
 
   dbTest('keeps writing a board whose stored objects predate the check', async ({ db }) => {
