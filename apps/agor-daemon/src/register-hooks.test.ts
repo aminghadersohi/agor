@@ -1583,8 +1583,8 @@ describe('protectExternalSessionPowerPriority', () => {
  * Guards the fix for CVE-class issue: `after: get` on /sessions was minting
  * an MCP token (with `uid = session.created_by`) for any `member+` caller
  * with `view` permission on the branch, letting them impersonate the
- * creator on the MCP channel. Only the creator, a superadmin, or the
- * executor's service identity may receive the token.
+ * creator on the MCP channel. Tokens are now caller-scoped and minted only
+ * for task executors; this predicate still refuses viewers and anonymous ids.
  */
 describe('canReceiveMcpTokenForSession', () => {
   const CREATOR = 'user-creator';
@@ -1604,15 +1604,6 @@ describe('canReceiveMcpTokenForSession', () => {
       canReceiveMcpTokenForSession({
         callerUserId: OTHER,
         callerRole: 'superadmin',
-      })
-    ).toBe(true);
-  });
-
-  it('allows the executor service identity (role=service)', () => {
-    expect(
-      canReceiveMcpTokenForSession({
-        callerUserId: 'executor-service',
-        callerRole: 'service',
       })
     ).toBe(true);
   });

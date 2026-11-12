@@ -9,6 +9,7 @@ import { SUBSESSION_AUTO_ARCHIVE_AFTER_SECONDS } from '@agor/core/types';
 import type {
   AgenticToolName,
   AgorClient,
+  DirectoryUser,
   MCPServer,
   Session,
   SpawnConfig,
@@ -48,7 +49,7 @@ export interface ForkSpawnModalProps {
   afterClose?: () => void;
   onCancel: () => void;
   client: AgorClient | null;
-  userById: Map<string, User>;
+  userById: Map<string, DirectoryUser>;
 }
 
 export const ForkSpawnModal: React.FC<ForkSpawnModalProps> = ({

@@ -5,6 +5,7 @@ import type {
   Board,
   BoardCapabilityPolicies,
   CapabilityPolicyWorkspacePreferences,
+  DirectoryUser,
   EffectiveCapabilityPolicyAccess,
   Group,
   User,
@@ -53,7 +54,7 @@ export function BoardEditModal({
   const [form] = Form.useForm();
   const { showError } = useThemedMessage();
   const [loading, setLoading] = useState(false);
-  const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [allUsers, setAllUsers] = useState<DirectoryUser[]>([]);
   const [allGroups, setAllGroups] = useState<Group[]>([]);
   const [policy, setPolicy] = useState<BoardCapabilityPolicies | null>(null);
   const [loadedPolicy, setLoadedPolicy] = useState<BoardCapabilityPolicies | null>(null);
@@ -104,7 +105,7 @@ export function BoardEditModal({
         if (cancelled) return;
 
         if (usersResult.status === 'fulfilled') {
-          setAllUsers(usersResult.value as User[]);
+          setAllUsers(usersResult.value as DirectoryUser[]);
         } else {
           setAllUsers([]);
           console.warn('Failed to load users for board permissions:', usersResult.reason);

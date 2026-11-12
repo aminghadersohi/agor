@@ -3,6 +3,7 @@ import type {
   Board,
   Branch,
   BranchArchiveOrDeleteOptions,
+  DirectoryUser,
   Repo,
   User,
 } from '@agor-live/client';
@@ -31,7 +32,7 @@ interface TeammatesTableProps {
   branchById: Map<string, Branch>;
   repoById: Map<string, Repo>;
   boardById: Map<string, Board>;
-  userById: Map<string, User>;
+  userById: Map<string, DirectoryUser>;
   onArchiveOrDelete?: (
     branchId: string,
     options: BranchArchiveOrDeleteOptions

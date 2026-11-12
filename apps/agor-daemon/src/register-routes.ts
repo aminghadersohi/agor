@@ -38,6 +38,7 @@ import {
   resolveRefreshTokenTtlSeconds,
   resolveRestartRecoverySettings,
   resolveSdkWatchdogConfig,
+  resolveSessionMaxLifetimeSeconds,
   resolveTeammateFrameworkRepoUrl,
   resolveTenantContext,
 } from '@agor/core/config';
@@ -161,6 +162,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+import { createApiKeyMembershipCheck } from './auth/api-key-membership-check.js';
 import {
   gatewaySlackUploadExecutorCommandId,
   uploadMaterializeExecutorCommandId,
@@ -172,7 +174,14 @@ import {
   matchesTaskExecutorRuntimeScope,
 } from './auth/executor-runtime-scope.js';
 import { createIssueBrowserTokensHook } from './auth/issue-browser-tokens-hook.js';
-import { createLaunchAuthService, resolvePublicLaunchAuthSettings } from './auth/launch-auth.js';
+import {
+  createLaunchAuthService,
+  createLaunchProjectionSerializer,
+  createLaunchSessionRevalidator,
+  launchSessionsAreRevalidated,
+  resolveLaunchConnectionBounds,
+  resolvePublicLaunchAuthSettings,
+} from './auth/launch-auth.js';
 import { createRefreshTokenService } from './auth/refresh-token-service.js';
 import {
   issueRuntimeToken,
@@ -232,6 +241,7 @@ import {
   type PowerPolicyController,
 } from './power-management/index.js';
 import { registerProfileImageRoutes } from './profile-image-routes.js';
+import { userScopedAuthorizationInvalidation } from './realtime/routing.js';
 import { registerTeamsGatewayIngressRoute } from './routes/teams-gateway-ingress.js';
 import { publicBoardCommentRepositionInput } from './services/board-comments.js';
 import { createBranchFrontDeskRoute } from './services/branch-front-desk.js';
@@ -1610,6 +1620,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // AGOR_REFRESH_TOKEN_TTL_SECONDS, validated at config load. All three issuers
   // below MUST use this one value so login, launch and refresh never disagree.
   const REFRESH_TOKEN_TTL_SECONDS = resolveRefreshTokenTtlSeconds(config);
+  // Absolute lifetime of a launched browser session, counted from the launch.
+  const SESSION_MAX_LIFETIME_SECONDS = resolveSessionMaxLifetimeSeconds(config);
 
   app.set('authentication', {
     secret: jwtSecret,
@@ -1643,6 +1655,7 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       sessionTokenService,
       executorRevocationFence: getOrCreateExecutorConnectionRevocationFence(app),
       multiTenancy,
+      ...resolveLaunchConnectionBounds(externalLaunchProvider, SESSION_MAX_LIFETIME_SECONDS),
     })
   );
   authentication.register('local', new AgorLocalStrategy());
@@ -1727,6 +1740,8 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
           jwtSecret,
           accessTokenTtl: ACCESS_TOKEN_TTL,
           refreshTokenTtl: REFRESH_TOKEN_TTL_SECONDS,
+          sessionMaxLifetimeSeconds: SESSION_MAX_LIFETIME_SECONDS,
+          pinReauthenticatedAccessExpiry: launchSessionsAreRevalidated(externalLaunchProvider),
           tenantClaim: tenantTokenClaim,
           staticTenantId:
             multiTenancy.mode === 'static' ? multiTenancy.static_tenant_id : undefined,
@@ -1740,6 +1755,16 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // One-time launch-code authentication endpoint
   // ============================================================================
 
+  const onLaunchAuthorizationInvalidated = (tenantId: string, userId: UserID) => {
+    app.emit('realtime:authorization-invalidated', {
+      tenantId,
+      disconnectSockets: true,
+      userId,
+    });
+  };
+  // Launch and refresh-time revalidation project the same identities through one queue.
+  const serializeLaunchProjection = createLaunchProjectionSerializer();
+
   // biome-ignore lint/suspicious/noExplicitAny: Feathers Application vs Express middleware overload
   app.use('/auth/launch', authRateLimiter as any);
   app.use(
@@ -1751,14 +1776,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
       jwtSecret,
       accessTokenTtl: ACCESS_TOKEN_TTL,
       refreshTokenTtl: REFRESH_TOKEN_TTL_SECONDS,
+      sessionMaxLifetimeSeconds: SESSION_MAX_LIFETIME_SECONDS,
       usersService,
-      onAuthorizationInvalidated: (tenantId, userId) => {
-        app.emit('realtime:authorization-invalidated', {
-          tenantId,
-          disconnectSockets: true,
-          userId,
-        });
-      },
+      onAuthorizationInvalidated: onLaunchAuthorizationInvalidated,
+      serializeProjection: serializeLaunchProjection,
     })
   );
 
@@ -1773,14 +1794,37 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   // Refresh token endpoint
   // ============================================================================
 
+  const revalidateLaunchSession = createLaunchSessionRevalidator({
+    db,
+    config,
+    provider: externalLaunchProvider,
+    serializeProjection: serializeLaunchProjection,
+    // A refusal or a role change found at revalidation only concerns that user's sockets.
+    onAuthorizationInvalidated: (tenantId, userId) => {
+      app.emit(
+        'realtime:authorization-invalidated',
+        userScopedAuthorizationInvalidation(tenantId, userId)
+      );
+    },
+  });
+  const apiKeyMembershipCheck = revalidateLaunchSession
+    ? createApiKeyMembershipCheck({
+        revalidate: revalidateLaunchSession,
+        tenantClaim: tenantTokenClaim,
+      })
+    : undefined;
+  apiKeyStrategy.setMembershipCheck(apiKeyMembershipCheck);
+
   app.use(
     '/authentication/refresh',
     createRefreshTokenService({
       jwtSecret,
       accessTokenTtl: ACCESS_TOKEN_TTL,
       refreshTokenTtl: REFRESH_TOKEN_TTL_SECONDS,
+      sessionMaxLifetimeSeconds: SESSION_MAX_LIFETIME_SECONDS,
       tenantClaim: tenantTokenClaim,
       usersService,
+      revalidateLaunchSession,
     })
   );
 
@@ -8080,7 +8124,10 @@ export async function registerRoutes(ctx: RegisterRoutesContext): Promise<void> 
   if (config.daemon?.mcpEnabled !== false) {
     const { setupMCPRoutes } = await import('./mcp/server.js');
     const toolSearchEnabled = config.daemon?.mcpToolSearch !== false;
-    setupMCPRoutes(app, db, toolSearchEnabled, config, { serverVersion: AGOR_VERSION });
+    setupMCPRoutes(app, db, toolSearchEnabled, config, {
+      serverVersion: AGOR_VERSION,
+      apiKeyMembershipCheck,
+    });
     console.log(
       `✅ MCP server enabled at POST /mcp${toolSearchEnabled ? ' (tool search mode)' : ''}`
     );

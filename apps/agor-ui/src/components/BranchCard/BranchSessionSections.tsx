@@ -1,4 +1,11 @@
-import type { AgorClient, Branch, Session, SessionID, SpawnConfig, User } from '@agor-live/client';
+import type {
+  AgorClient,
+  Branch,
+  DirectoryUser,
+  Session,
+  SessionID,
+  SpawnConfig,
+} from '@agor-live/client';
 import {
   getGatewaySource as getGatewaySourceCore,
   isGatewaySession as isGatewaySessionCore,
@@ -28,6 +35,7 @@ import {
 } from 'antd';
 import type React from 'react';
 import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { getSignedInUserRow } from '@/utils/currentUserAuthority';
 import { useConnectionDisabled } from '../../contexts/ConnectionContext';
 import { useConfirmArchiveSession } from '../../hooks/useConfirmArchiveSession';
 import { useIdleReady } from '../../hooks/useIdleReady';
@@ -123,7 +131,7 @@ type RemoteRelationshipRef = {
 export interface BranchSessionSectionsProps {
   branch: Branch;
   sessions: Session[];
-  userById: Map<string, User>;
+  userById: Map<string, DirectoryUser>;
   currentUserId?: string;
   selectedSessionId?: string | null;
   onSessionClick?: (sessionId: string) => void;
@@ -1566,7 +1574,7 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
             open={forkSpawnModal.open}
             action={forkSpawnModal.action}
             session={forkSpawnModal.session}
-            currentUser={currentUserId ? userById.get(currentUserId) : undefined}
+            currentUser={getSignedInUserRow(userById, currentUserId)}
             onConfirm={handleForkSpawnConfirm}
             onCancel={closeForkSpawnModal}
             afterClose={unmountForkSpawnModal}
@@ -1706,7 +1714,7 @@ export const BranchSessionSections: React.FC<BranchSessionSectionsProps> = ({
           open={forkSpawnModal.open}
           action={forkSpawnModal.action}
           session={forkSpawnModal.session}
-          currentUser={currentUserId ? userById.get(currentUserId) : undefined}
+          currentUser={getSignedInUserRow(userById, currentUserId)}
           onConfirm={handleForkSpawnConfirm}
           onCancel={closeForkSpawnModal}
           afterClose={unmountForkSpawnModal}

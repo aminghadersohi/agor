@@ -108,6 +108,7 @@ import {
   toAgenticToolsStatus,
   WORKSPACE_DEFAULT_AGENTIC_CONFIGURATION,
 } from '@agor/core/types';
+import { toUserDirectoryEntry } from '../auth/user-redaction.js';
 import { normalizeOpenCodeOllamaEndpoint } from '../integrations/opencode/ollama-service.js';
 import { emitServiceEvent } from '../utils/emit-service-event.js';
 import { resolveOwnerHomeStore } from '../utils/sandbox-context.js';
@@ -278,6 +279,26 @@ function isServiceAccount(params: Params | undefined): boolean {
 
 function isAdmin(params: Params | undefined): boolean {
   return hasMinimumRole((params as AuthenticatedParams | undefined)?.user?.role, ROLES.ADMIN);
+}
+
+/** Transport callers see every user's full profile only as an admin or service account. */
+function canReadAllProfiles(params: Params | undefined): boolean {
+  return (
+    !params?.provider ||
+    isLocalAuthenticationLookup(params) ||
+    isAuthenticationUserLookup(params) ||
+    isServiceAccount(params) ||
+    isAdmin(params)
+  );
+}
+
+function canReadFullProfile(params: Params | undefined, userId: string): boolean {
+  return canReadAllProfiles(params) || (params as AuthenticatedParams).user?.user_id === userId;
+}
+
+function scopeProfileForReader<T extends User>(user: T, params: Params | undefined): T {
+  // Internal callers keep User; transport clients type these rows as DirectoryUser.
+  return canReadFullProfile(params, user.user_id) ? user : (toUserDirectoryEntry(user) as T);
 }
 
 function isSelfEmailLookup(params: Params | undefined, email: string): boolean {
@@ -819,7 +840,7 @@ export class UsersService {
    * - `email` exact lookup for authorized callers; password is included only
    *   for the internal local-authentication lookup marker
    * - `search` / `query` / `q` case-insensitive substring lookup across
-   *   name, email, and unix_username
+   *   name, email, and (for admins and service accounts) unix_username
    * - Feathers-style `$limit` / `$skip`, plus plain `limit` / `skip` /
    *   `offset` for MCP/client ergonomics
    */
@@ -859,8 +880,10 @@ export class UsersService {
 
     if (search) {
       const needle = search.toLowerCase();
+      // Only fields the caller may read are searchable, so matches cannot reveal hidden ones.
+      const searchesExecutionHome = canReadAllProfiles(params);
       rows = rows.filter((row) =>
-        [row.name, row.email, row.unix_username].some((value) =>
+        [row.name, row.email, searchesExecutionHome ? row.unix_username : null].some((value) =>
           (value ?? '').toLowerCase().includes(needle)
         )
       );
@@ -880,7 +903,12 @@ export class UsersService {
     const includeAuthMetadata = shouldIncludeAuthMetadata(params, includePassword);
     const results = [];
     for (const row of pageRows) {
-      results.push(await this.rowToUser(row, includePassword, requesterId, includeAuthMetadata));
+      results.push(
+        scopeProfileForReader(
+          await this.rowToUser(row, includePassword, requesterId, includeAuthMetadata),
+          params
+        )
+      );
     }
 
     return {
@@ -907,7 +935,10 @@ export class UsersService {
     const requesterId = (params as AuthenticatedParams | undefined)?.user?.user_id as
       | UserID
       | undefined;
-    return this.rowToUser(row, false, requesterId, shouldIncludeAuthMetadata(params));
+    return scopeProfileForReader(
+      await this.rowToUser(row, false, requesterId, shouldIncludeAuthMetadata(params)),
+      params
+    );
   }
 
   /**

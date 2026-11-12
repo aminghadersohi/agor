@@ -5,7 +5,14 @@
  * schedules with create / edit / delete / run-now / runs-drawer.
  */
 
-import type { AgorClient, Branch, MCPServer, Schedule, User } from '@agor-live/client';
+import type {
+  AgorClient,
+  Branch,
+  DirectoryUser,
+  MCPServer,
+  Schedule,
+  User,
+} from '@agor-live/client';
 import { humanizeCron, shortId } from '@agor-live/client';
 import {
   DeleteOutlined,
@@ -39,7 +46,7 @@ interface ScheduleTabProps {
   client: AgorClient | null;
   mcpServerById?: Map<string, MCPServer>;
   currentUser?: User | null;
-  userById?: Map<string, User>;
+  userById?: Map<string, DirectoryUser>;
   onOpenSession?: (sessionId: string) => void;
   /** Whether an open schedule form holds unsaved changes (for the branch editor's guard). */
   /** The open schedule form's dirty getter (null when closed), for the branch editor's leave guard. */
@@ -87,7 +94,7 @@ const CompactTooltipText: React.FC<{
 
 const userLabel = (
   userId: string | null | undefined,
-  userById: Map<string, User>,
+  userById: Map<string, DirectoryUser>,
   currentUser?: User | null
 ) => {
   if (!userId) return '—';
@@ -99,7 +106,7 @@ const userLabel = (
 const ScheduleDetails: React.FC<{
   schedule: Schedule;
   humanizedCron: string;
-  userById: Map<string, User>;
+  userById: Map<string, DirectoryUser>;
   currentUser?: User | null;
 }> = ({ schedule, humanizedCron, userById, currentUser }) => (
   <Space direction="vertical" size={2} style={{ maxWidth: 360 }}>
@@ -132,7 +139,7 @@ export const ScheduleTab: React.FC<ScheduleTabProps> = ({
   client,
   mcpServerById = new Map(),
   currentUser,
-  userById = new Map(),
+  userById = new Map<string, DirectoryUser>(),
   onOpenSession,
   onDraftChange,
 }) => {
