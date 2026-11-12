@@ -2,7 +2,12 @@
 
 import { AGENTIC_TOOL_DISPLAY_NAMES } from '@agor/agentic-tools';
 import { failureMessageBase, isTaskExecuting, isTerminalTaskStatus } from '@agor/core/types';
-import type { AgenticToolName, AgorClient, StreamingMessageState } from '@agor-live/client';
+import type {
+  AgenticToolName,
+  AgorClient,
+  DirectoryUser,
+  StreamingMessageState,
+} from '@agor-live/client';
 import {
   hasMinimumRole,
   isAgenticToolName,
@@ -17,7 +22,6 @@ import {
   type Task,
   TaskStatus,
   type ToolExecutionState,
-  type User,
 } from '@agor-live/client';
 // TODO: Move normalization to DB or daemon API
 import { FileTextOutlined, GithubOutlined, RobotOutlined } from '@ant-design/icons';
@@ -57,7 +61,7 @@ const { Paragraph } = Typography;
 
 // Default-param `= new Map()` would mint a fresh Map per render and defeat
 // the MessageBlock memos below whenever the prop is omitted.
-const EMPTY_USER_MAP = new Map<string, User>();
+const EMPTY_USER_MAP = new Map<string, DirectoryUser>();
 /** Child-session callbacks in focus chat read as activity, not conversation. */
 const SIMPLE_CALLBACK_OPACITY = 0.84;
 
@@ -95,7 +99,7 @@ interface TaskBlockProps {
   task: Task;
   agentic_tool?: string;
   sessionModel?: string;
-  userById?: Map<string, User>;
+  userById?: Map<string, DirectoryUser>;
   currentUserId?: string;
   sessionId?: SessionID | null;
   onPermissionDecision?: (
@@ -207,7 +211,7 @@ function messagesHaveTools(messages: Message[]): boolean {
 function stopRequester(
   task: Task,
   currentUserId: string | undefined,
-  userById: Map<string, User>
+  userById: Map<string, DirectoryUser>
 ): TurnOutcomeContext['stoppedBy'] {
   const request = task.termination_request;
   const byPerson = request?.requested_via === 'ui' || request?.requested_via === 'api';
@@ -1429,7 +1433,7 @@ export const TaskBlock = React.memo<TaskBlockProps>(
         {blocks.map((block) =>
           block.type === 'message' && block.message.type === 'widget_request' ? (
             <div key={block.message.message_id} data-conversation-block={getBlockMarker(block)}>
-              <MessageBlock message={block.message} client={client} />
+              <MessageBlock message={block.message} client={client} viewerUserId={currentUserId} />
             </div>
           ) : null
         )}

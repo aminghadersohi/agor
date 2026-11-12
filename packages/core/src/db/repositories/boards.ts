@@ -50,6 +50,7 @@ import { normalizeZoneLayoutPolicy, zoneLayoutBinding } from '../../layout/zone-
 import { resolveZoneLayoutWrite } from '../../layout/zone-layout-arrangement.js';
 import { generateId, isValidUUID } from '../../lib/ids';
 import { generateSlug } from '../../lib/slugs';
+import { boardObjectStyleError } from '../../utils/board-object-style';
 import { normalizeExactEmojiShortcode } from '../../utils/emoji-shortcodes';
 import { getBoardUrl } from '../../utils/url';
 import { sanitizeZoneOrder, ZONE_LAYOUTS } from '../../utils/zone-layout';
@@ -128,11 +129,13 @@ function boardObjectGeometry(object: BoardObject): BoardLayoutObjectUpdate {
 
 function validateBoardObjectGeometry(objectId: string, object: BoardObject): void {
   if (!Number.isFinite(object.x) || !Number.isFinite(object.y)) {
-    throw new RepositoryError(`Board object ${objectId} requires finite x/y geometry`);
+    throw new BoardObjectValidationError(`Board object ${objectId} requires finite x/y geometry`);
   }
   const requirePositiveFiniteDimension = (dimension: 'width' | 'height', value: number) => {
     if (!Number.isFinite(value) || value <= 0) {
-      throw new RepositoryError(`Board object ${objectId} requires a positive finite ${dimension}`);
+      throw new BoardObjectValidationError(
+        `Board object ${objectId} requires a positive finite ${dimension}`
+      );
     }
   };
   if (object.type === 'zone' || object.type === 'app' || object.type === 'artifact') {
@@ -145,7 +148,7 @@ function validateBoardObjectGeometry(objectId: string, object: BoardObject): voi
     for (const dimension of ['width', 'height'] as const) {
       const value = object[dimension];
       if (value !== undefined && (!Number.isFinite(value) || value <= 0)) {
-        throw new RepositoryError(
+        throw new BoardObjectValidationError(
           `Board object ${objectId} requires a positive finite ${dimension} when provided`
         );
       }
@@ -178,6 +181,26 @@ function validateBoardPermissionDefaults(board: Partial<Board>): void {
       `Invalid board default_others_fs_access: ${board.default_others_fs_access}`
     );
   }
+}
+
+/** A board object whose style fields are not plain values. */
+export class BoardObjectValidationError extends RepositoryError {}
+
+/** Reject written objects with unusable style fields; fields unchanged from `previous` pass. */
+function assertBoardObjectStyles(
+  objects: Record<string, unknown> | undefined,
+  previous?: Record<string, unknown>
+): void {
+  for (const [objectId, object] of Object.entries(objects ?? {})) {
+    const reason = boardObjectStyleError(object, previous?.[objectId]);
+    if (reason) throw new BoardObjectValidationError(`Board object ${objectId}: ${reason}`);
+  }
+}
+
+/** Without an explicit access_mode, a board is shared only when Others were given branch access. */
+function boardSharedOnCreate(board: Partial<Board>): boolean {
+  if (board.access_mode !== undefined) return board.access_mode === 'shared';
+  return board.default_others_can !== undefined && board.default_others_can !== 'none';
 }
 
 const isFiniteNumber = (value: unknown): boolean =>
@@ -248,9 +271,9 @@ export function sanitizeImportedBoardObjects(objects: Record<string, unknown>): 
       });
       continue;
     }
-    const reason = BOARD_OBJECT_IMPORT_RULES[type as BoardObjectType](
-      object as Record<string, unknown>
-    );
+    const reason =
+      BOARD_OBJECT_IMPORT_RULES[type as BoardObjectType](object as Record<string, unknown>) ??
+      boardObjectStyleError(object);
     if (reason) {
       skipped.push({ object_id: id, type, reason: 'invalid', detail: reason });
       continue;
@@ -391,8 +414,15 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
     // Lean projection drops the two heavy JSON fields nested in `data` (zones /
     // text / markdown annotations + per-board CSS). A client `$select` can't do
     // this — they live inside the `data` column, not as top-level columns.
-    const { objects: _objects, custom_css: _customCss, ...leanData } = data;
-    const effectiveData = options?.lean ? leanData : data;
+    // Stored legacy permission fields are migration tombstones, not policy: never return them.
+    const {
+      access_mode: _accessMode,
+      default_others_can: _defaultOthersCan,
+      default_others_fs_access: _defaultOthersFsAccess,
+      ...fullData
+    } = data;
+    const { objects: _objects, custom_css: _customCss, ...leanData } = fullData;
+    const effectiveData = options?.lean ? leanData : fullData;
 
     return attachHiddenTenant(
       {
@@ -420,11 +450,6 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         archived_by: row.archived_by ?? undefined,
         ...effectiveData,
         icon: normalizeExactEmojiShortcode(data.icon),
-        // Legacy fields are a fail-closed compatibility view. Callers that
-        // need current permissions use boards/:id/permissions.
-        access_mode: data.access_mode ?? 'private',
-        default_others_can: data.default_others_can ?? 'none',
-        default_others_fs_access: data.default_others_fs_access ?? 'none',
       },
       row
     );
@@ -558,6 +583,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
         }
       }
 
+      assertBoardObjectStyles(data.objects);
       const insertData = this.boardToInsert({
         ...data,
         board_id: boardId,
@@ -582,7 +608,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
             boardId as BoardID,
             insertData.primary_owner_user_id as UserID,
             {
-              shared: (data.access_mode ?? 'shared') === 'shared',
+              shared: boardSharedOnCreate(data),
               defaultOthersCan: data.default_others_can,
               defaultOthersFsAccess: data.default_others_fs_access,
             }
@@ -1035,6 +1061,7 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       if (!current) {
         throw new EntityNotFoundError('Board', id);
       }
+      assertBoardObjectStyles(updates.objects, current.objects);
 
       const slugUpdateProvided = Object.hasOwn(updates, 'slug');
       let nextSlug: string | undefined = current.slug;
@@ -1376,13 +1403,15 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
     objectData: BoardObject
   ): Promise<Board> {
     try {
-      validateBoardObjectGeometry(objectId, objectData);
       const fullId = await this.resolveId(boardId);
 
       const current = await this.findById(fullId);
       if (!current) {
         throw new EntityNotFoundError('Board', boardId);
       }
+      // Style first so a non-numeric size reports the upstream style message; both are bad input (400).
+      assertBoardObjectStyles({ [objectId]: objectData }, current.objects);
+      validateBoardObjectGeometry(objectId, objectData);
 
       const existing = current.objects?.[objectId];
       const normalizedObject =
@@ -1572,6 +1601,8 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
     try {
       const fullId = await this.resolveId(boardId);
       const current = await this.findById(fullId);
+      // Check the whole batch first: objects are written one at a time.
+      assertBoardObjectStyles(objects, current?.objects);
       for (const [objectId, objectData] of Object.entries(objects)) {
         await this.upsertBoardObject(
           boardId,
@@ -1851,7 +1882,12 @@ export class BoardRepository implements BaseRepository<Board, Partial<Board>> {
       // users, groups, and primary ownership are
       // intentionally tenant-local security state and never leave with a
       // board template.
-      access_mode: permissions.board_access.sharing_mode,
+      // A board Others cannot see exports as private, which deliberately drops its branch defaults.
+      access_mode:
+        permissions.board_access.sharing_mode === 'private' ||
+        permissions.board_access.others.preset === 'none'
+          ? 'private'
+          : 'shared',
       default_others_can: defaultOthersCan,
       default_others_fs_access: templateOthers.fs_access,
       zone_layout_defaults: board.zone_layout_defaults,

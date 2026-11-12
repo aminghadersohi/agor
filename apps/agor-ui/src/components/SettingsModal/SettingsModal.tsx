@@ -424,7 +424,7 @@ const SettingsModalContent: React.FC<SettingsModalProps> = ({
         return (
           <ReposTable
             repoById={repoById}
-            canConfigureCleanup={isAdmin}
+            canEditRepos={isAdmin}
             identityKey={settingsAuthority.identityKey}
             operationScope={settingsAuthority.operationScope}
             onCreate={onCreateRepo}

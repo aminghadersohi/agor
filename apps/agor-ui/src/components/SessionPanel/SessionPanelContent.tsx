@@ -31,6 +31,7 @@ import {
   theme,
 } from 'antd';
 import React from 'react';
+import { getSignedInUserRow } from '@/utils/currentUserAuthority';
 import { useAppActions } from '../../contexts/AppActionsContext';
 import { useIsMobileViewport } from '../../hooks/useIsMobileViewport';
 import { useAgorStore } from '../../store/agorStore';
@@ -900,7 +901,7 @@ export const SessionPanelContent = React.memo<SessionPanelContentProps>(
           open={spawnModalOpen}
           action="spawn"
           session={session}
-          currentUser={currentUserId ? userById.get(currentUserId) || null : null}
+          currentUser={getSignedInUserRow(userById, currentUserId) ?? null}
           mcpServerById={mcpServerById}
           initialPrompt={inputValueRef.current ?? ''}
           onConfirm={onSpawnModalConfirm}

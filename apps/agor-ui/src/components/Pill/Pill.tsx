@@ -1,5 +1,5 @@
 import type { ContextUsageSnapshot } from '@agor/core/types';
-import type { Branch, User } from '@agor-live/client';
+import type { Branch, DirectoryUser } from '@agor-live/client';
 import { type Session, shortId } from '@agor-live/client';
 // TODO: Move normalization to DB or daemon API
 import {
@@ -974,7 +974,7 @@ export const BoardPill: React.FC<BoardPillProps> = ({
 );
 
 interface UserPillProps extends BasePillProps {
-  user: User;
+  user: DirectoryUser;
   compact?: boolean;
   title?: string;
   onClick?: (e: EntityPillInteractionEvent) => void;
