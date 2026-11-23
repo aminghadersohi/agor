@@ -2475,6 +2475,12 @@ describe('agor_sessions_prompt (subsession mode)', () => {
 });
 
 describe('agor_sessions_prompt task callback', () => {
+  // continue mode reads the target to flag scheduled runs; these are not.
+  const plainTargetSession = vi.fn(async (id: string) => ({
+    session_id: id,
+    scheduled_from_branch: false,
+  }));
+
   afterEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
@@ -2482,6 +2488,7 @@ describe('agor_sessions_prompt task callback', () => {
 
   it('reports shared execution and per-request compaction counts', async () => {
     const app = makeFakeApp({
+      sessions: { get: plainTargetSession },
       '/sessions/:id/prompt': {
         create: vi.fn(async () => ({
           task_id: 'task-shared',
@@ -2521,6 +2528,7 @@ describe('agor_sessions_prompt task callback', () => {
 
   it('reports a power hold instead of "busy" when the dispatch permit held the prompt', async () => {
     const app = makeFakeApp({
+      sessions: { get: plainTargetSession },
       '/sessions/:id/prompt': {
         create: vi.fn(async () => ({
           task_id: 'task-held',
@@ -2555,6 +2563,7 @@ describe('agor_sessions_prompt task callback', () => {
   it('binds callback:true to trusted calling session context', async () => {
     const promptCalls: any[] = [];
     const app = makeFakeApp({
+      sessions: { get: plainTargetSession },
       '/sessions/:id/prompt': {
         create: async (...args: unknown[]) => {
           promptCalls.push(args);
@@ -2604,6 +2613,7 @@ describe('agor_sessions_prompt task callback', () => {
     } as const;
     const promptCalls: any[] = [];
     const app = makeFakeApp({
+      sessions: { get: plainTargetSession },
       '/sessions/:id/prompt': {
         create: async (...args: unknown[]) => {
           promptCalls.push(args);

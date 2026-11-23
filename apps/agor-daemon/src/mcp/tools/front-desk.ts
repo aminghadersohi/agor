@@ -51,13 +51,13 @@ export const FRONT_DESK_TEAMMATE_ARG_DESCRIPTION =
   'Teammate by name — branch slug or display name, matched case-insensitively. Provide exactly one of teammate or branchId.';
 
 export const FRONT_DESK_SET_DESCRIPTION =
-  "Pin a session as a teammate's front desk: agor_sessions_prompt { teammate } then reaches that session instead of the teammate's most recently active one, so name addressing is deterministic. The session must belong to the teammate's branch and not be archived. Replaces any current pin atomically. Requires Branch Manager access. If the pinned session is later archived or dies, addressing falls back to the most recent session automatically.";
+  "Pin a session as a teammate's front desk: agor_sessions_prompt { teammate } then reaches that session instead of the teammate's most recently active non-scheduled one, so name addressing is deterministic. The session must belong to the teammate's branch and not be archived. Replaces any current pin atomically. Requires Branch Manager access. If the pinned session is later archived or dies, addressing falls back to the most recent session automatically.";
 
 export const FRONT_DESK_CLEAR_DESCRIPTION =
-  "Remove a teammate's front-desk pin. agor_sessions_prompt { teammate } goes back to reaching the teammate's most recently active session. No session is archived or changed. Requires Branch Manager access.";
+  "Remove a teammate's front-desk pin. agor_sessions_prompt { teammate } goes back to reaching the teammate's most recently active session that a schedule did not create. No session is archived or changed. Requires Branch Manager access.";
 
 export const TEAMMATE_RESOLVE_DESCRIPTION =
-  "Dry run of addressing a teammate: reports which session agor_sessions_prompt would reach and why, without prompting, creating, or changing anything. Precedence: an explicit sessionId, then the teammate's healthy front desk, then its most recently active session, else needs_session. Also reports whether the teammate is addressable by name for you (addressable, address to use, or the reason it is not), and any front desk that was skipped as unhealthy. Provide exactly one of teammate or branchId.";
+  "Dry run of addressing a teammate: reports which session agor_sessions_prompt would reach and why, without prompting, creating, or changing anything. Precedence: an explicit sessionId, then the teammate's healthy front desk, then its most recently active session (never one a schedule created), else needs_session. Also reports whether the teammate is addressable by name for you (addressable, address to use, or the reason it is not), and any front desk that was skipped as unhealthy. Provide exactly one of teammate or branchId.";
 
 export interface FrontDeskTargetArgs {
   teammate?: string;
@@ -94,9 +94,9 @@ function explainTarget(target: FrontDeskTarget): string {
     case 'front_desk':
       return "Reaches the teammate's pinned front desk, which passed the health gate.";
     case 'recency':
-      return `No usable front desk, so this reaches the teammate's most recently active session.${bypassed}`;
+      return `No usable front desk, so this reaches the teammate's most recently active session (scheduled runs are never candidates).${bypassed}`;
     case 'needs_session':
-      return `No usable front desk and no active session you can reach. agor_sessions_prompt would return needs_session; start one with agor_sessions_create (it starts cold).${bypassed}`;
+      return `No usable front desk and no active, non-scheduled session you can reach. agor_sessions_prompt would return needs_session; start one with agor_sessions_create (it starts cold).${bypassed}`;
     default:
       return `Resolved via ${target.via}.`;
   }

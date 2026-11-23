@@ -304,6 +304,14 @@ function assessScannedName(
  * branch, i.e. the greatest `updated_at`. That is the branch's warm context —
  * the conversation the teammate was last actually working in.
  *
+ * Scheduler-created runs (`scheduled_from_branch`) are never candidates. A
+ * run's session is the scheduled job, not the teammate's conversation: it is
+ * often the freshest row right after a tick, and a message landing there adds
+ * unrelated work to that run — for a posting schedule, a second post — and
+ * defeats `allow_concurrent_runs: false`. Filtering in SQL rather than
+ * skipping client-side keeps the pick correct however many runs stack up
+ * ahead of the warm session.
+ *
  * Routed through the `sessions` service rather than the repository so the
  * service's own access scoping applies. `$sort: { updated_at: -1 }` selects the
  * SQL `findPage` path, which supplies a `session_id` tie-breaker, so equal
@@ -317,6 +325,7 @@ async function findMostRecentTeammateSession(
     query: {
       branch_id: branch.branch_id,
       archived: false,
+      scheduled_from_branch: false,
       $sort: { updated_at: -1 },
       $limit: 1,
     },
@@ -332,6 +341,11 @@ async function findMostRecentTeammateSession(
   // to an unrelated teammate, so fail instead of delivering it.
   if (session.branch_id !== branch.branch_id) {
     throw new Error('Teammate session lookup returned a session outside the requested branch.');
+  }
+  // Same reasoning: a scheduled run here means the filter above was dropped,
+  // and delivering into it is the double-run this lookup exists to prevent.
+  if (session.scheduled_from_branch) {
+    throw new Error('Teammate session lookup returned a scheduled-run session.');
   }
   return session;
 }

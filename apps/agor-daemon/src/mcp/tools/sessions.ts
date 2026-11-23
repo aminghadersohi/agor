@@ -315,6 +315,24 @@ function compactSessionForMcp(session: Session) {
   };
 }
 
+/**
+ * The `scheduled_run_warning` for `agor_sessions_prompt` continuing a session
+ * the scheduler created, or `undefined` for any other session.
+ */
+export function scheduledRunContinueWarning(
+  session: Pick<Session, 'scheduled_from_branch' | 'schedule_id' | 'scheduled_run_at'>
+): { schedule_id: string | null; scheduled_run_at: string | null; note: string } | undefined {
+  if (!session.scheduled_from_branch) return undefined;
+  return {
+    schedule_id: session.schedule_id ?? null,
+    scheduled_run_at:
+      session.scheduled_run_at !== undefined
+        ? new Date(session.scheduled_run_at).toISOString()
+        : null,
+    note: "This session is a scheduled run. The prompt was added to that run, so it executes inside the schedule's job and keeps the run busy. Unless that is intended, address the teammate by name or use mode btw/subsession instead.",
+  };
+}
+
 export function registerSessionTools(server: McpServer, ctx: McpContext): void {
   // Tool 1: agor_sessions_list
   server.registerTool(
@@ -912,7 +930,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
     'agor_sessions_prompt',
     {
       description:
-        "Prompt an existing session to continue work. Address the target either by `sessionId`, or by `teammate` name to reach a teammate's current warm session without knowing its ID. Supports four modes: continue (append to conversation), fork (branch at decision point), subsession (delegate to child agent), or btw (ephemeral fork — ask a side question without disrupting the target session, even if running). Addressing by `teammate` defaults to btw, so you get an answer that knows what the teammate is currently working on without interrupting it. Configuration is inherited from parent session or user defaults. For urgent information that invalidates active work: capture the original active task ID before any queue changes, then use mode=continue to enqueue updated instructions while the child is active; inspect/re-read agor_tasks_list with status=queued, cancel obsolete pending work with agor_tasks_cancel_queued, and move the update to the front with agor_tasks_reorder_queued using expectedTaskIds. ONLY THEN call agor_sessions_stop with expectedTaskId set to that original active task ID and a reason: stop preserves/drains the queue, so stopping first risks dispatching stale work. The update is a next turn after verified termination, not in-place injection or guaranteed instantaneous delivery. Accepted/pending stop is not confirmed termination. If the original finishes and the update starts, expectedTaskId protects the update: on condition_changed re-read and reassess, never fall back to an unconditional stop. These separate calls are not atomic; on conflicts or unexpected dispatch/queue changes re-read and reassess. Existing running-task edits are preserved, not rolled back.",
+        "Prompt an existing session to continue work. Address the target either by `sessionId`, or by `teammate` name to reach a teammate's current warm session without knowing its ID. Continuing another session's scheduled run (a session a schedule created) succeeds but returns scheduled_run_warning, since the prompt then runs inside that schedule's job. Supports four modes: continue (append to conversation), fork (branch at decision point), subsession (delegate to child agent), or btw (ephemeral fork — ask a side question without disrupting the target session, even if running). Addressing by `teammate` defaults to btw, so you get an answer that knows what the teammate is currently working on without interrupting it. Configuration is inherited from parent session or user defaults. For urgent information that invalidates active work: capture the original active task ID before any queue changes, then use mode=continue to enqueue updated instructions while the child is active; inspect/re-read agor_tasks_list with status=queued, cancel obsolete pending work with agor_tasks_cancel_queued, and move the update to the front with agor_tasks_reorder_queued using expectedTaskIds. ONLY THEN call agor_sessions_stop with expectedTaskId set to that original active task ID and a reason: stop preserves/drains the queue, so stopping first risks dispatching stale work. The update is a next turn after verified termination, not in-place injection or guaranteed instantaneous delivery. Accepted/pending stop is not confirmed termination. If the original finishes and the update starts, expectedTaskId protects the update: on condition_changed re-read and reassess, never fall back to an unconditional stop. These separate calls are not atomic; on conflicts or unexpected dispatch/queue changes re-read and reassess. Existing running-task edits are preserved, not rolled back.",
       inputSchema: z.object({
         sessionId: mcpOptionalId(
           'sessionId',
@@ -921,7 +939,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         ),
         teammate: mcpOptionalNonBlankString(
           'teammate',
-          'Teammate to address by name instead of session ID — either the branch slug ("front-desk") or the teammate display name ("Front Desk"), matched case-insensitively. Resolves to that teammate\'s declared front-desk session when one is pinned (agor_teammates_front_desk_set), otherwise to its most recently active non-archived session, so the reply has their current working context. Errors listing candidates if the name is ambiguous; never guesses. Call agor_teammates_list to see addressable names. Provide exactly one of sessionId or teammate.'
+          'Teammate to address by name instead of session ID — either the branch slug ("front-desk") or the teammate display name ("Front Desk"), matched case-insensitively. Resolves to that teammate\'s declared front-desk session when one is pinned (agor_teammates_front_desk_set), otherwise to its most recently active non-archived session, so the reply has their current working context. Sessions created by a schedule are never reached by name: a scheduled run is that schedule\'s job, not the teammate\'s conversation. Errors listing candidates if the name is ambiguous; never guesses. Call agor_teammates_list to see addressable names. Provide exactly one of sessionId or teammate.'
         ),
         prompt: mcpRequiredString('prompt', 'The prompt/task to execute'),
         mode: z
@@ -1024,6 +1042,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           return {
             ...textResult({
               error: `Teammate "${args.teammate}" has no active session to talk to.`,
+              note: 'Sessions created by a schedule are never reached by name, so a teammate whose only sessions are scheduled runs has nothing to address.',
               needs_session: true,
               branch_id: target.branch.branch_id,
               teammate: describeTeammateBranch(target.branch),
@@ -1105,6 +1124,17 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         : provenanceParams;
 
       if (mode === 'continue') {
+        // Continuing another session's scheduled run adds work to that run:
+        // it is the schedule's job (a post, a report), and the extra turn
+        // keeps the run busy past what `allow_concurrent_runs` budgets for.
+        // Name addressing never lands here; an explicit sessionId is a
+        // deliberate choice, so warn rather than refuse.
+        const scheduledRunWarning =
+          !args.teammate && sessionId !== ctx.sessionId
+            ? scheduledRunContinueWarning(
+                await ctx.app.service('sessions').get(sessionId, ctx.baseServiceParams)
+              )
+            : undefined;
         // The prompt route returns the Task entity directly. Whether it ran
         // immediately or got queued is encoded in `task.status` — there's no
         // separate "queued vs ran" wire shape to branch on.
@@ -1126,6 +1156,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
             success: true,
             queued: true,
             ...addressedEcho,
+            ...(scheduledRunWarning ? { scheduled_run_warning: scheduledRunWarning } : {}),
             taskId: task.task_id,
             queue_position: task.queue_position,
             ...(powerHold ? { power_hold: powerHold } : {}),
@@ -1156,6 +1187,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         return textResult({
           success: true,
           ...addressedEcho,
+          ...(scheduledRunWarning ? { scheduled_run_warning: scheduledRunWarning } : {}),
           taskId: task.task_id,
           status: task.status,
           note: 'Prompt added to existing session and execution started.',
