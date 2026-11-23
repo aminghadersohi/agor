@@ -6,10 +6,11 @@
  */
 
 import { BoardRepository, CardRepository, type Database, generateId } from '@agor/core/db';
-import type { BoardID, Card } from '@agor/core/types';
+import type { BoardID, Card, CardID } from '@agor/core/types';
 import { describe, expect, vi } from 'vitest';
 import { ownedDbTest as dbTest } from '../../../../packages/core/src/db/test-helpers';
-import { CardsService } from './cards';
+import { seedBoardEntities } from '../../test/board-entity-fixture';
+import { type CardParams, CardsService } from './cards';
 
 async function seed(db: Database) {
   const boardRepo = new BoardRepository(db);
@@ -132,5 +133,107 @@ describe('CardsService.moveToZone placement', () => {
       moved.y < other.y + other.height &&
       other.y < moved.y + moved.height;
     expect(overlaps).toBe(false);
+  });
+});
+
+describe('CardsService archive / unarchive', () => {
+  async function seedPlaced(db: Database) {
+    const { BoardObjectRepository } = await import('@agor/core/db');
+    const fixture = await seedBoardEntities(db);
+    const service = new CardsService(db);
+    const objects = new BoardObjectRepository(db);
+    const cardId = fixture.cardObject.card_id as CardID;
+    const paramsFor = (user: { user_id: string; email: string; role: string }): CardParams => ({
+      provider: 'rest',
+      authenticated: true,
+      user: { user_id: user.user_id, email: user.email, role: user.role } as never,
+    });
+    return { ...fixture, service, objects, cardId, paramsFor };
+  }
+
+  dbTest('archive keeps the placement unless removeFromBoard is set', async ({ db }) => {
+    const { service, objects, cardId, owner, paramsFor } = await seedPlaced(db);
+
+    const { card, removedBoardObject } = await service.archive(cardId, paramsFor(owner));
+    expect(card.archived).toBe(true);
+    expect(card.archived_at).toBeDefined();
+    expect(removedBoardObject).toBeUndefined();
+    expect(await objects.findByCardId(cardId)).not.toBeNull();
+  });
+
+  dbTest('removeFromBoard deletes the placement; unarchive re-places it', async ({ db }) => {
+    const { service, objects, cardId, owner, board, cardObject, paramsFor } = await seedPlaced(db);
+    const params = paramsFor(owner);
+
+    const archived = await service.archive(cardId, params, { removeFromBoard: true });
+    expect(archived.card.archived).toBe(true);
+    expect(archived.removedBoardObject?.object_id).toBe(cardObject.object_id);
+    expect(await objects.findByCardId(cardId)).toBeNull();
+
+    // A retry is safe: the card stays archived with its first archive time.
+    const again = await service.archive(cardId, params, { removeFromBoard: true });
+    expect(again.card.archived_at).toBe(archived.card.archived_at);
+    expect(again.removedBoardObject).toBeUndefined();
+
+    const restored = await service.unarchive(cardId, params);
+    expect(restored.card.archived).toBe(false);
+    expect(restored.card.archived_at).toBeUndefined();
+    expect(restored.createdBoardObject).toMatchObject({
+      board_id: board.board_id,
+      card_id: cardId,
+      position: { x: 0, y: 0 },
+    });
+    expect((await objects.findByCardId(cardId))?.object_id).toBe(
+      restored.createdBoardObject?.object_id
+    );
+  });
+
+  dbTest('unarchive keeps an existing placement and can skip re-placement', async ({ db }) => {
+    const { service, objects, cardId, owner, cardObject, paramsFor } = await seedPlaced(db);
+    const params = paramsFor(owner);
+
+    await service.archive(cardId, params);
+    const kept = await service.unarchive(cardId, params);
+    expect(kept.createdBoardObject).toBeUndefined();
+    expect((await objects.findByCardId(cardId))?.object_id).toBe(cardObject.object_id);
+
+    await service.archive(cardId, params, { removeFromBoard: true });
+    const unplaced = await service.unarchive(cardId, params, { restorePlacement: false });
+    expect(unplaced.card.archived).toBe(false);
+    expect(unplaced.createdBoardObject).toBeUndefined();
+    expect(await objects.findByCardId(cardId)).toBeNull();
+  });
+
+  dbTest('archive and unarchive need board mutate access', async ({ db }) => {
+    const { service, objects, cardId, other, paramsFor } = await seedPlaced(db);
+    const cards = new CardRepository(db);
+
+    // `other` is a workspace member with no access to the private board.
+    await expect(
+      service.archive(cardId, paramsFor(other), { removeFromBoard: true })
+    ).rejects.toThrow();
+    expect((await cards.findById(cardId))?.archived).toBe(false);
+    expect(await objects.findByCardId(cardId)).not.toBeNull();
+
+    // A workspace viewer is below the Member floor for any card mutation.
+    const viewer = { ...other, role: 'viewer' };
+    await expect(service.archive(cardId, paramsFor(viewer))).rejects.toThrow(/member access/);
+
+    await cards.archive(cardId);
+    await expect(service.unarchive(cardId, paramsFor(other))).rejects.toThrow();
+    expect((await cards.findById(cardId))?.archived).toBe(true);
+  });
+
+  dbTest('find hides nothing by itself: archived is an explicit filter', async ({ db }) => {
+    const { service, cardId, board } = await seedPlaced(db);
+    await new CardRepository(db).archive(cardId);
+    const active = (await service.find({
+      query: { board_id: board.board_id, archived: false },
+    })) as { data: Card[] };
+    const all = (await service.find({ query: { board_id: board.board_id } })) as {
+      data: Card[];
+    };
+    expect(active.data.map((c) => c.card_id)).not.toContain(cardId);
+    expect(all.data.map((c) => c.card_id)).toContain(cardId);
   });
 });

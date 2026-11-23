@@ -2,7 +2,7 @@ import { BoardObjectRepository } from '@agor/core/db';
 import type { Card, ZoneBoardObject } from '@agor/core/types';
 import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import type { CardsService } from '../../services/cards.js';
+import type { CardArchiveResult, CardsService, CardUnarchiveResult } from '../../services/cards.js';
 import { emitServiceEvent } from '../../utils/emit-service-event.js';
 import { entityColorOverrideDescription, parseEntityColorOverride } from '../entity-color.js';
 import { resolveBoardId, resolveCardId } from '../resolve-ids.js';
@@ -21,6 +21,94 @@ import { coerceString, textResult } from '../server.js';
 import { runWithMcpTenantDatabaseScope } from '../tenant-scope.js';
 
 const CARD_COLOR_OVERRIDE_DESCRIPTION = entityColorOverrideDescription('this card');
+
+const ARCHIVED_UPDATE_DESCRIPTION =
+  'true archives the card (hidden from the board, data kept, reversible); false unarchives it and re-places it on the board if its placement was removed. Prefer archiving over agor_cards_delete for finished cards.';
+
+/**
+ * Archive or unarchive one card through the service (which runs the board
+ * mutate check) and publish what changed: the card itself, plus any placement
+ * the change removed or recreated.
+ */
+async function applyCardArchiveChange(
+  ctx: McpContext,
+  cardId: string,
+  archived: boolean,
+  options: { removeFromBoard?: boolean; restorePlacement?: boolean } = {}
+): Promise<CardArchiveResult & CardUnarchiveResult> {
+  const cardsService = ctx.app.service('cards') as unknown as CardsService;
+  const result: CardArchiveResult & CardUnarchiveResult = await runWithMcpTenantDatabaseScope(
+    ctx,
+    () =>
+      archived
+        ? cardsService.archive(cardId, ctx.baseServiceParams, {
+            removeFromBoard: options.removeFromBoard,
+          })
+        : cardsService.unarchive(cardId, ctx.baseServiceParams, {
+            restorePlacement: options.restorePlacement,
+          })
+  );
+  emitServiceEvent(ctx.app, {
+    path: 'cards',
+    event: 'patched',
+    data: result.card,
+    id: result.card.card_id,
+  });
+  if (result.removedBoardObject) {
+    emitServiceEvent(ctx.app, {
+      path: 'board-objects',
+      event: 'removed',
+      data: result.removedBoardObject,
+      id: result.removedBoardObject.object_id,
+    });
+  }
+  if (result.createdBoardObject) {
+    emitServiceEvent(ctx.app, {
+      path: 'board-objects',
+      event: 'created',
+      data: result.createdBoardObject,
+    });
+  }
+  return result;
+}
+
+/** Card fields an update may change, other than the archive state. */
+function cardPatchData(update: {
+  title?: string;
+  url?: string | null;
+  description?: string | null;
+  note?: string | null;
+  data?: Record<string, unknown> | null;
+  emojiOverride?: string | null;
+}): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  if (update.title !== undefined) patch.title = update.title;
+  if (update.url !== undefined) patch.url = update.url;
+  if (update.description !== undefined) patch.description = update.description;
+  if (update.note !== undefined) patch.note = update.note;
+  if (update.data !== undefined) patch.data = update.data;
+  if (update.emojiOverride !== undefined) patch.emoji_override = update.emojiOverride;
+  return patch;
+}
+
+/**
+ * Apply one card update: metadata through the transport patch (hooks + realtime),
+ * then the archive state through the service so archived_at and placement stay
+ * consistent. Returns the card as it stands after both.
+ */
+async function applyCardUpdate(
+  ctx: McpContext,
+  cardId: string,
+  patch: Record<string, unknown>,
+  archived: boolean | undefined
+): Promise<Card> {
+  let card: Card | undefined;
+  if (Object.keys(patch).length > 0 || archived === undefined) {
+    card = (await ctx.app.service('cards').patch(cardId, patch, ctx.baseServiceParams)) as Card;
+  }
+  if (archived === undefined) return card!;
+  return (await applyCardArchiveChange(ctx, card?.card_id ?? cardId, archived)).card;
+}
 
 export function registerCardTools(server: McpServer, ctx: McpContext): void {
   // Tool 1: agor_cards_create
@@ -128,14 +216,23 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
     'agor_cards_list',
     {
       description:
-        'List a page of cards with optional filtering by board, card type, zone, search query, or archive status. Advance with offset=nextOffset while hasMore is true.',
+        'List a page of cards with optional filtering by board, card type, zone, or search query. Archived cards are hidden unless includeArchived is true (or archived:true lists only archived cards). Advance with offset=nextOffset while hasMore is true.',
       annotations: { readOnlyHint: true },
       inputSchema: z.object({
         boardId: mcpOptionalId('boardId', 'Board', 'Filter by board ID'),
         cardTypeId: mcpOptionalId('cardTypeId', 'Card type', 'Filter by card type ID'),
         zoneId: mcpOptionalId('zoneId', 'Zone', 'Filter by zone ID (requires boardId)'),
         search: mcpOptionalString('search', 'Search query for card titles/descriptions'),
-        archived: z.boolean().optional().describe('Filter by archive status'),
+        archived: z
+          .boolean()
+          .optional()
+          .describe(
+            'Exact archive state to list: true lists only archived cards, false only active ones. Takes precedence over includeArchived.'
+          ),
+        includeArchived: z
+          .boolean()
+          .optional()
+          .describe('Include archived cards alongside active ones (default false).'),
         limit: mcpLimit(50, 100),
         offset: mcpOffset(0),
       }),
@@ -147,16 +244,23 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
       const cardTypeId = coerceString(args.cardTypeId);
       const zoneId = coerceString(args.zoneId);
       const search = coerceString(args.search);
-      const archived = args.archived === true;
+      // Default: active cards only. `archived` pins an exact state; otherwise
+      // includeArchived drops the archive predicate so both states are listed.
+      const archived =
+        typeof args.archived === 'boolean'
+          ? args.archived
+          : args.includeArchived === true
+            ? undefined
+            : false;
       const limit = typeof args.limit === 'number' ? args.limit : 50;
       const offset = typeof args.offset === 'number' ? args.offset : 0;
 
       const query: Record<string, unknown> = {
-        archived,
         $limit: limit,
         $skip: offset,
         $sort: { created_at: -1, card_id: 1 },
       };
+      if (archived !== undefined) query.archived = archived;
       if (boardId) query.board_id = boardId;
       if (cardTypeId) query.card_type_id = cardTypeId;
       if (zoneId) query.zone_id = zoneId;
@@ -171,7 +275,8 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
   server.registerTool(
     'agor_cards_update',
     {
-      description: "Update a card's metadata.",
+      description:
+        "Update a card's metadata, or archive/unarchive it with archived. Archive finished cards (archived:true) instead of deleting them; use agor_cards_archive for removeFromBoard.",
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         cardId: mcpRequiredId('cardId', 'Card', 'Card ID to update'),
@@ -193,21 +298,14 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
           'emojiOverride',
           'New emoji override (null to clear)'
         ).nullable(),
+        archived: z.boolean().optional().describe(ARCHIVED_UPDATE_DESCRIPTION),
       }),
     },
     async (args) => {
-      const updateData: Record<string, unknown> = {};
-      if (args.title !== undefined) updateData.title = args.title;
-      if (args.url !== undefined) updateData.url = args.url;
-      if (args.description !== undefined) updateData.description = args.description;
-      if (args.note !== undefined) updateData.note = args.note;
-      if (args.data !== undefined) updateData.data = args.data;
+      const updateData = cardPatchData(args as Parameters<typeof cardPatchData>[0]);
       if (args.colorOverride !== undefined)
         updateData.color_override = parseEntityColorOverride(args.colorOverride);
-      if (args.emojiOverride !== undefined) updateData.emoji_override = args.emojiOverride;
-      const updatedCard = await ctx.app
-        .service('cards')
-        .patch(args.cardId, updateData, ctx.baseServiceParams);
+      const updatedCard = await applyCardUpdate(ctx, args.cardId, updateData, args.archived);
       return textResult(updatedCard);
     }
   );
@@ -216,7 +314,8 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
   server.registerTool(
     'agor_cards_delete',
     {
-      description: 'Permanently delete a card and its board placement.',
+      description:
+        'Permanently delete a card and its board placement. Cannot be undone. For finished or stale cards, prefer agor_cards_archive, which hides the card but keeps it restorable.',
       annotations: { destructiveHint: true },
       inputSchema: z.object({
         cardId: mcpRequiredId('cardId', 'Card', 'Card ID to delete'),
@@ -232,24 +331,27 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
   server.registerTool(
     'agor_cards_archive',
     {
-      description: 'Archive a card (soft delete).',
-      annotations: { destructiveHint: true },
+      description:
+        'Archive a card: hide it from the board while keeping its data, reversible with agor_cards_unarchive. Preferred over agor_cards_delete for finished cards (e.g. cards left in a Done zone). removeFromBoard also deletes its board placement; unarchive re-places it.',
+      annotations: { idempotentHint: true },
       inputSchema: z.object({
         cardId: mcpRequiredId('cardId', 'Card', 'Card ID to archive'),
+        removeFromBoard: z
+          .boolean()
+          .optional()
+          .describe(
+            "Also remove the card's board placement (zone and position). Default false keeps it so unarchive restores the card where it was."
+          ),
       }),
     },
     async (args) => {
-      const cardsService = ctx.app.service('cards') as unknown as CardsService;
-      const archivedCard = await runWithMcpTenantDatabaseScope(ctx, () =>
-        cardsService.archive(args.cardId, ctx.baseServiceParams)
-      );
-      emitServiceEvent(ctx.app, {
-        path: 'cards',
-        event: 'patched',
-        data: archivedCard,
-        id: args.cardId,
+      const { card, removedBoardObject } = await applyCardArchiveChange(ctx, args.cardId, true, {
+        removeFromBoard: args.removeFromBoard === true,
       });
-      return textResult(archivedCard);
+      return textResult({
+        ...card,
+        removedBoardObjectId: removedBoardObject?.object_id ?? null,
+      });
     }
   );
 
@@ -257,23 +359,24 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
   server.registerTool(
     'agor_cards_unarchive',
     {
-      description: 'Restore a previously archived card.',
+      description:
+        'Restore an archived card to its board. If its placement was removed when archived, it is re-placed at the default board position (move it with agor_cards_move or agor_cards_set_position).',
+      annotations: { idempotentHint: true },
       inputSchema: z.object({
         cardId: mcpRequiredId('cardId', 'Card', 'Card ID to unarchive'),
+        restorePlacement: z
+          .boolean()
+          .optional()
+          .describe(
+            'Re-place the card on its board when it has no placement (default true). False leaves it unplaced.'
+          ),
       }),
     },
     async (args) => {
-      const cardsService = ctx.app.service('cards') as unknown as CardsService;
-      const unarchivedCard = await runWithMcpTenantDatabaseScope(ctx, () =>
-        cardsService.unarchive(args.cardId, ctx.baseServiceParams)
-      );
-      emitServiceEvent(ctx.app, {
-        path: 'cards',
-        event: 'patched',
-        data: unarchivedCard,
-        id: args.cardId,
+      const { card, createdBoardObject } = await applyCardArchiveChange(ctx, args.cardId, false, {
+        restorePlacement: args.restorePlacement,
       });
-      return textResult(unarchivedCard);
+      return textResult({ ...card, createdBoardObject: createdBoardObject ?? null });
     }
   );
 
@@ -437,7 +540,8 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
   server.registerTool(
     'agor_cards_bulk_update',
     {
-      description: 'Update multiple cards in one operation.',
+      description:
+        'Update multiple cards in one operation, including archiving finished cards with archived:true.',
       annotations: { idempotentHint: true },
       inputSchema: z.object({
         updates: z
@@ -457,6 +561,7 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
                 'updates[].emojiOverride',
                 'New emoji override'
               ).nullable(),
+              archived: z.boolean().optional().describe(ARCHIVED_UPDATE_DESCRIPTION),
             })
           )
           .min(1, 'updates must contain at least one update.')
@@ -477,18 +582,9 @@ export function registerCardTools(server: McpServer, ctx: McpContext): void {
       for (const [index, u] of updates.entries()) {
         const cardId = coerceString(u.cardId);
         if (!cardId) continue;
-        const updateData: Record<string, unknown> = {};
-        if (u.title !== undefined) updateData.title = u.title;
-        if (u.url !== undefined) updateData.url = u.url;
-        if (u.description !== undefined) updateData.description = u.description;
-        if (u.note !== undefined) updateData.note = u.note;
-        if (u.data !== undefined) updateData.data = u.data;
+        const updateData = cardPatchData(u as Parameters<typeof cardPatchData>[0]);
         if (colorOverrides[index] !== undefined) updateData.color_override = colorOverrides[index];
-        if (u.emojiOverride !== undefined) updateData.emoji_override = u.emojiOverride;
-        const updated = await ctx.app
-          .service('cards')
-          .patch(cardId, updateData, ctx.baseServiceParams);
-        results.push(updated);
+        results.push(await applyCardUpdate(ctx, cardId, updateData, u.archived));
       }
 
       return textResult({ updated: results.length, cards: results });

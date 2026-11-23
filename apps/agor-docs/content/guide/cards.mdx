@@ -100,13 +100,18 @@ Teammates manage cards entirely through MCP. The key tools:
 | `agor_card_types_create` | Define a new Card Type (emoji, color, schema) |
 | `agor_card_types_list` | List all available Card Types |
 | `agor_cards_create` | Create a card on a board, optionally into a zone |
-| `agor_cards_update` | Update title, description, note, data, or overrides |
+| `agor_cards_update` | Update title, description, note, data, or overrides; `archived` archives or restores |
 | `agor_cards_move` | Move a card to a different zone |
-| `agor_cards_list` | List cards, filterable by board, type, or zone |
-| `agor_cards_archive` | Soft-archive a card (removes from board, retains data) |
+| `agor_cards_list` | List cards, filterable by board, type, or zone; hides archived cards unless `includeArchived` |
+| `agor_cards_archive` | Archive a card: hidden from the board, data kept; `removeFromBoard` also drops its placement |
+| `agor_cards_unarchive` | Restore an archived card, re-placing it on the board if its placement was removed |
 | `agor_cards_delete` | Permanently delete a card |
 | `agor_cards_bulk_create` | Create many cards at once (e.g., importing from Jira) |
 | `agor_cards_bulk_move` | Move a batch of cards between zones |
+
+### Archiving finished cards
+
+Archive a card when its work is done instead of deleting it. An archived card disappears from the board but keeps its data, and `agor_cards_unarchive` brings it back. By default the card keeps its zone and position, so it returns where it was. Pass `removeFromBoard: true` to drop the placement as well; unarchiving such a card puts it back at the board's default position, ready to move into a zone.
 
 Card tools follow [board access](/guide/boards#permissions-and-branch-defaults): reading a card needs access to its board, and creating, changing, moving, archiving, or deleting one needs Board Editor or Manager access.
 

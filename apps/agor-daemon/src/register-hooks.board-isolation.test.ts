@@ -239,7 +239,12 @@ dbTest(
       }
       for (const cardId of [sharedCard, hiddenCard]) {
         await denied(memberKey, 'agor_cards_archive', { cardId });
+        await denied(memberKey, 'agor_cards_archive', { cardId, removeFromBoard: true });
         await denied(memberKey, 'agor_cards_unarchive', { cardId });
+        await denied(memberKey, 'agor_cards_update', { cardId, archived: true });
+        await denied(memberKey, 'agor_cards_bulk_update', {
+          updates: [{ cardId, archived: true }],
+        });
         await denied(memberKey, 'agor_cards_move', { cardId, zoneId: 'zone-b' });
         await denied(memberKey, 'agor_cards_bulk_move', { moves: [{ cardId, zoneId: 'zone-b' }] });
         await denied(memberKey, 'agor_cards_move', { cardId, zoneId: null });
@@ -341,6 +346,14 @@ dbTest(
         expect((await boards.findById(boardId))?.objects?.legit).toBeUndefined();
         await ok(key, 'agor_cards_archive', { cardId });
         await ok(key, 'agor_cards_unarchive', { cardId });
+        await ok(key, 'agor_cards_update', { cardId, archived: true });
+        expect((await cards.findById(cardId))?.archived).toBe(true);
+        await ok(key, 'agor_cards_update', { cardId, archived: false });
+        expect((await cards.findById(cardId))?.archived).toBe(false);
+        await ok(key, 'agor_cards_archive', { cardId, removeFromBoard: true });
+        expect(await placementOf(cardId)).toBeNull();
+        await ok(key, 'agor_cards_unarchive', { cardId });
+        expect(await placementOf(cardId)).not.toBeNull();
         await ok(key, 'agor_cards_move', { cardId, zoneId: 'zone-b' });
         expect((await placementOf(cardId))?.zone_id).toBe('zone-b');
         await ok(key, 'agor_cards_bulk_move', { moves: [{ cardId, zoneId: null }] });

@@ -47,6 +47,31 @@ export type CardParams = QueryParams<{
     _agorSqlBoardAccessUserId?: UUID;
   };
 
+/** Where a card lands when it is (re-)placed without a zone, matching createWithPlacement. */
+const DEFAULT_CARD_POSITION = { x: 0, y: 0 } as const;
+
+export interface CardArchiveOptions {
+  /** Also delete the card's board placement (its board object). */
+  removeFromBoard?: boolean;
+}
+
+export interface CardArchiveResult {
+  card: Card;
+  /** The placement deleted by `removeFromBoard`, if the card had one. */
+  removedBoardObject?: BoardEntityObject;
+}
+
+export interface CardUnarchiveOptions {
+  /** Re-place a card that has no board placement (default true). */
+  restorePlacement?: boolean;
+}
+
+export interface CardUnarchiveResult {
+  card: Card;
+  /** The placement created for a card that had none. */
+  createdBoardObject?: BoardEntityObject;
+}
+
 export class CardsService extends DrizzleService<Card, Partial<Card>, CardParams> {
   private cardRepo: CardRepository;
   private boardObjectRepo: BoardObjectRepository;
@@ -175,7 +200,7 @@ export class CardsService extends DrizzleService<Card, Partial<Card>, CardParams
     });
 
     // Calculate position
-    let position = { x: 0, y: 0 };
+    let position: { x: number; y: number } = { ...DEFAULT_CARD_POSITION };
     const zoneId = data.zoneId;
 
     if (zoneId && data.zoneData) {
@@ -258,19 +283,53 @@ export class CardsService extends DrizzleService<Card, Partial<Card>, CardParams
   }
 
   /**
-   * Archive a card
+   * Archive a card (soft, reversible).
+   *
+   * The card row and its data stay; the board stops rendering it. With
+   * `removeFromBoard` the card's placement (its board object) is deleted too,
+   * so a later unarchive re-places it at the default position. Re-archiving an
+   * already archived card keeps its original archived_at and only applies the
+   * placement removal, so retries are safe.
    */
-  async archive(id: string, params?: CardParams): Promise<Card> {
-    const card = await this.authorizedCard(id, 'mutate', 'archive this card', params);
-    return this.cardRepo.archive(card.card_id);
+  async archive(
+    id: string,
+    params?: CardParams,
+    options: CardArchiveOptions = {}
+  ): Promise<CardArchiveResult> {
+    const existing = await this.authorizedCard(id, 'mutate', 'archive this card', params);
+    const card = existing.archived ? existing : await this.cardRepo.archive(existing.card_id);
+    if (!options.removeFromBoard) return { card };
+
+    const placement = await this.boardObjectRepo.findByCardId(card.card_id as CardID);
+    if (!placement) return { card };
+    await this.boardObjectRepo.removeByCardId(card.card_id as CardID);
+    return { card, removedBoardObject: placement };
   }
 
   /**
-   * Unarchive a card
+   * Unarchive a card.
+   *
+   * A card whose placement was removed while archived is re-placed on its
+   * board at the default position (unless `restorePlacement` is false), so the
+   * restored card is visible again rather than an orphan with no board object.
    */
-  async unarchive(id: string, params?: CardParams): Promise<Card> {
-    const card = await this.authorizedCard(id, 'mutate', 'unarchive this card', params);
-    return this.cardRepo.unarchive(card.card_id);
+  async unarchive(
+    id: string,
+    params?: CardParams,
+    options: CardUnarchiveOptions = {}
+  ): Promise<CardUnarchiveResult> {
+    const existing = await this.authorizedCard(id, 'mutate', 'unarchive this card', params);
+    const card = existing.archived ? await this.cardRepo.unarchive(existing.card_id) : existing;
+    if (options.restorePlacement === false) return { card };
+
+    const placement = await this.boardObjectRepo.findByCardId(card.card_id as CardID);
+    if (placement) return { card };
+    const createdBoardObject = await this.boardObjectRepo.create({
+      board_id: card.board_id as BoardID,
+      card_id: card.card_id as CardID,
+      position: { ...DEFAULT_CARD_POSITION },
+    });
+    return { card, createdBoardObject };
   }
 
   /**
