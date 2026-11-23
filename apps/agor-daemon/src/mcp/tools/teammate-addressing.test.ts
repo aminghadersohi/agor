@@ -273,13 +273,14 @@ describe('resolveTeammateSession', () => {
     return { result, find };
   }
 
-  it('asks for the single most recently updated non-archived session in the branch', async () => {
+  it('asks for the single most recently updated non-archived, non-scheduled session in the branch', async () => {
     const { find } = await resolveSession([teammateSession('sess-warm', 'branch-front-desk')]);
     expect(find).toHaveBeenCalledWith(
       expect.objectContaining({
         query: {
           branch_id: 'branch-front-desk',
           archived: false,
+          scheduled_from_branch: false,
           $sort: { updated_at: -1 },
           $limit: 1,
         },
@@ -296,6 +297,14 @@ describe('resolveTeammateSession', () => {
   it('reports no_session when the teammate has none', async () => {
     const { result } = await resolveSession([]);
     expect(result.outcome).toBe('no_session');
+  });
+
+  it('refuses a scheduled run if the lookup ever returns one', async () => {
+    await expect(
+      resolveSession([
+        teammateSession('sess-run', 'branch-front-desk', { scheduled_from_branch: true }),
+      ])
+    ).rejects.toThrow(/scheduled-run session/i);
   });
 
   it('refuses a session from a different branch instead of messaging it', async () => {

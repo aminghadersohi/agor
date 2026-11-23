@@ -48,7 +48,11 @@ import { generateId } from '../../../packages/core/src/lib/ids';
 import type { McpContext } from '../src/mcp/server';
 import { tenantScopedToolProxy } from '../src/mcp/tenant-scope';
 import { registerSessionTools } from '../src/mcp/tools/sessions';
-import { resolveTeammateName, resolveTeammateSession } from '../src/mcp/tools/teammate-addressing';
+import {
+  previewTeammateAddress,
+  resolveTeammateName,
+  resolveTeammateSession,
+} from '../src/mcp/tools/teammate-addressing';
 import { SessionsService } from '../src/services/sessions';
 import { ensureCanView, loadSessionBranch } from '../src/utils/branch-authorization';
 
@@ -75,6 +79,8 @@ export interface SessionSeedOptions {
   /** Written to `sessions.updated_at`; the column recency ordering reads. */
   updatedAt: Date;
   archived?: boolean;
+  /** Seed a scheduler-created run (`scheduled_from_branch` + `scheduled_run_at`). */
+  scheduledRun?: boolean;
   /** Pin the UUID so tie-breaker direction can be asserted, not guessed. */
   sessionId?: SessionID;
 }
@@ -208,6 +214,9 @@ export async function teammateAddressingFixture(
         agentic_tool: 'claude-code',
         status: SessionStatus.IDLE,
         archived: options.archived ?? false,
+        ...(options.scheduledRun
+          ? { scheduled_from_branch: true, scheduled_run_at: options.updatedAt.getTime() }
+          : {}),
         // `sessionToInsert` maps `last_updated` onto the `updated_at` column.
         last_updated: options.updatedAt.toISOString(),
         model_config: { mode: 'alias', model: 'sonnet', updated_at: new Date().toISOString() },
@@ -467,6 +476,105 @@ export function teammateSessionRoutingSuite(setup: () => Promise<TeammateAddress
         session: { session_id: lower },
       });
     }
+  });
+
+  it('skips a scheduled run even when recency would pick it', async () => {
+    const f = await setup();
+    const branch = await f.createTeammate({ name: 'front-desk', displayName: 'Front Desk' });
+    const warm = await f.createSession({
+      branchId: branch.branch_id,
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    });
+    // Newer than the warm session, as a schedule's run is right after a tick.
+    await f.createSession({
+      branchId: branch.branch_id,
+      updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+      scheduledRun: true,
+    });
+    await f.createSession({
+      branchId: branch.branch_id,
+      updatedAt: new Date('2026-06-02T00:00:00.000Z'),
+      scheduledRun: true,
+    });
+
+    await expect(resolveTeammateSession(f.contextFor(), branch)).resolves.toMatchObject({
+      outcome: 'session',
+      via: 'recency',
+      session: { session_id: warm.session_id },
+    });
+    // The dry run walks the same rule.
+    const preview = await previewTeammateAddress(f.contextFor(), branch);
+    expect(preview.target).toMatchObject({ via: 'recency', sessionId: warm.session_id });
+  });
+
+  it('reports no_session when the teammate has only scheduled runs', async () => {
+    const f = await setup();
+    const branch = await f.createTeammate({ name: 'poster', displayName: 'Poster' });
+    await f.createSession({
+      branchId: branch.branch_id,
+      updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+      scheduledRun: true,
+    });
+
+    await expect(resolveTeammateSession(f.contextFor(), branch)).resolves.toMatchObject({
+      outcome: 'no_session',
+      branch: { branch_id: branch.branch_id },
+    });
+    const preview = await previewTeammateAddress(f.contextFor(), branch);
+    expect(preview.target).toMatchObject({ via: 'needs_session', reason: 'no_session' });
+
+    const result = await f.handlersFor().agor_sessions_prompt({
+      teammate: 'poster',
+      prompt: 'Release post handoff',
+      mode: 'continue',
+    });
+    expect(result.isError).toBe(true);
+    expect(f.payloadOf(result)).toMatchObject({
+      needs_session: true,
+      branch_id: branch.branch_id,
+      note: expect.stringMatching(/schedule/),
+    });
+    expect(f.promptService).not.toHaveBeenCalled();
+  });
+
+  it('warns, without refusing, when continuing a scheduled run by explicit sessionId', async () => {
+    const f = await setup();
+    const branch = await f.createTeammate({ name: 'poster', displayName: 'Poster' });
+    const run = await f.createSession({
+      branchId: branch.branch_id,
+      updatedAt: new Date('2026-06-01T00:00:00.000Z'),
+      scheduledRun: true,
+    });
+    const plain = await f.createSession({
+      branchId: branch.branch_id,
+      updatedAt: new Date('2026-05-01T00:00:00.000Z'),
+    });
+
+    const warned = f.payloadOf(
+      await f.handlersFor().agor_sessions_prompt({
+        sessionId: run.session_id,
+        prompt: 'On purpose',
+        mode: 'continue',
+      })
+    );
+    expect(warned).toMatchObject({
+      success: true,
+      scheduled_run_warning: {
+        scheduled_run_at: '2026-06-01T00:00:00.000Z',
+        note: expect.stringMatching(/scheduled run/),
+      },
+    });
+
+    const quiet = f.payloadOf(
+      await f.handlersFor().agor_sessions_prompt({
+        sessionId: plain.session_id,
+        prompt: 'Ordinary',
+        mode: 'continue',
+      })
+    );
+    expect(quiet.success).toBe(true);
+    expect(quiet).not.toHaveProperty('scheduled_run_warning');
+    expect(f.promptService).toHaveBeenCalledTimes(2);
   });
 
   it('reports no_session for a teammate branch with nothing to talk to', async () => {
