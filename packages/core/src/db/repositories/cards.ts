@@ -405,6 +405,13 @@ export class CardRepository implements BaseRepository<Card, Partial<Card>> {
       if (updates.archived_at !== undefined) {
         setData.archived_at = updates.archived_at ? new Date(updates.archived_at) : null;
       }
+      // archived_at only means something while the card is archived: stamp it
+      // when a caller archives without one and clear it on every unarchive, so
+      // a restored card never reports a stale archive time.
+      if (updates.archived === true && updates.archived_at === undefined) {
+        setData.archived_at = new Date();
+      }
+      if (updates.archived === false) setData.archived_at = null;
 
       await update(this.db, cards).set(setData).where(eq(cards.card_id, fullId)).run();
 
@@ -435,10 +442,7 @@ export class CardRepository implements BaseRepository<Card, Partial<Card>> {
    * Unarchive a card
    */
   async unarchive(id: string): Promise<Card> {
-    return this.update(id, {
-      archived: false,
-      archived_at: undefined,
-    });
+    return this.update(id, { archived: false });
   }
 
   async delete(id: string): Promise<void> {

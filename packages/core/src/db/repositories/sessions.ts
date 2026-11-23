@@ -167,6 +167,12 @@ export interface SessionPageOptions {
   /** Restrict to sessions matching this search (`SEARCHABLE_FIELDS.session`). */
   search?: string;
   archived?: boolean;
+  /**
+   * Restrict on the scheduler-run marker. `false` excludes every session the
+   * scheduler created — including runs whose schedule was later deleted
+   * (`schedule_id` nulls out on delete; this flag does not).
+   */
+  scheduledFromBranch?: boolean;
   sortUpdatedAt?: 1 | -1;
   sortCreatedAt?: 1 | -1;
   limit?: number;
@@ -807,6 +813,8 @@ export class SessionRepository implements BaseRepository<Session, Partial<Sessio
         conditions.push(inArray(sessions.session_id, opts.sessionIds));
       if (opts.createdBy !== undefined) conditions.push(eq(sessions.created_by, opts.createdBy));
       if (opts.archived !== undefined) conditions.push(eq(sessions.archived, opts.archived));
+      if (opts.scheduledFromBranch !== undefined)
+        conditions.push(eq(sessions.scheduled_from_branch, opts.scheduledFromBranch));
       if (opts.visibleToUserId) {
         // Same branch.view policy either way; only the evaluation shape differs.
         // Outer board/branch filters already pin the branch, so the probe

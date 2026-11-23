@@ -79,6 +79,31 @@ describe('CardRepository.findAll', () => {
   });
 });
 
+describe('CardRepository archive lifecycle', () => {
+  dbTest('archive stamps archived_at and unarchive clears it', async ({ db }) => {
+    const repo = new CardRepository(db);
+    const board = await createBoard(db);
+    const card = await repo.create({ board_id: board, title: 'done' });
+
+    const archived = await repo.archive(card.card_id);
+    expect(archived.archived).toBe(true);
+    expect(archived.archived_at).toBeDefined();
+
+    const restored = await repo.unarchive(card.card_id);
+    expect(restored.archived).toBe(false);
+    expect(restored.archived_at).toBeUndefined();
+  });
+
+  dbTest('a plain archived patch keeps archived_at consistent', async ({ db }) => {
+    const repo = new CardRepository(db);
+    const board = await createBoard(db);
+    const card = await repo.create({ board_id: board, title: 'patched' });
+
+    expect((await repo.update(card.card_id, { archived: true })).archived_at).toBeDefined();
+    expect((await repo.update(card.card_id, { archived: false })).archived_at).toBeUndefined();
+  });
+});
+
 describe('CardRepository.findByZoneId', () => {
   dbTest('joins placements in one query instead of one lookup per card', async ({ db }) => {
     const board = await createBoard(db);

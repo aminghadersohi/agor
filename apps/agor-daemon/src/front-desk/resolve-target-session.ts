@@ -10,8 +10,9 @@
  *   1. an explicitly named session;
  *   2. an existing gateway thread mapping (gateway only — not yet wired);
  *   3. the declared front-desk slot, if it passes the health gate;
- *   4. recency — Part 1's most-recently-updated pick;
- *   5. `needs_session`.
+ *   4. recency — Part 1's most-recently-updated pick, never a scheduler-run
+ *      session (a run is the schedule's job, not the teammate's conversation);
+ *   5. `needs_session` — including when only scheduled runs exist.
  *
  * This is addressing, not authorization. It never promotes, and the only write
  * it performs is demoting a slot the health gate rejects — after which it
@@ -108,7 +109,8 @@ export interface ResolveTargetSessionDeps {
   /**
    * Part 1's recency pick for the branch, through the caller's own
    * access-scoped read path. Returning the session keeps that path — and its
-   * ordering and tie-breaker — the single definition of "recency".
+   * ordering and tie-breaker — the single definition of "recency". Must never
+   * return a scheduler-created session; `null` when no other session exists.
    */
   mostRecentSession(branchId: BranchID): Promise<Session | null>;
 }

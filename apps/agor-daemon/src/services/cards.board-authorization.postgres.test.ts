@@ -63,6 +63,17 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
         /not found/i
       );
       await expect(
+        asB(() => service.archive(foreignCardId, adminParams, { removeFromBoard: true }))
+      ).rejects.toThrow(/not found/i);
+      await expect(asB(() => service.unarchive(foreignCardId, adminParams))).rejects.toThrow(
+        /not found/i
+      );
+      expect(
+        await runWithTenantDatabaseScope(db, 'cards-a', (scoped) =>
+          new BoardObjectRepository(scoped).findByCardId(foreignCardId)
+        )
+      ).toMatchObject({ object_id: a.cardObject.object_id });
+      await expect(
         asB(() => service.moveToZone(foreignCardId, 'zone-other', undefined, adminParams))
       ).rejects.toThrow();
       await expect(
@@ -73,7 +84,7 @@ describe.skipIf(!postgresUrl || process.env.AGOR_DB_DIALECT !== 'postgresql')(
       expect(await foreignCards()).toEqual(before);
 
       const ownCardId = b.cardObject.card_id as CardID;
-      expect((await asB(() => service.archive(ownCardId, adminParams))).archived).toBe(true);
+      expect((await asB(() => service.archive(ownCardId, adminParams))).card.archived).toBe(true);
     }, 30000);
 
     it('an admin cannot place their branch on another tenant board through REST', async () => {

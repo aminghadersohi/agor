@@ -307,7 +307,8 @@ export type SessionParams = QueryParams<{
  * (SQL board filter + recency sort + limit/offset) rather than the generic
  * in-memory path. We only divert the loader's bounded list queries — those that
  * sort by `updated_at` and/or scope to a `board_id`/`branch_id` — and only when the rest of
- * the query is a shape findPage fully models (archived/status/created_by + pagination). Anything
+ * the query is a shape findPage fully models (archived/scheduled_from_branch/status/created_by +
+ * pagination). Anything
  * with extra filters, operators, or `$select` falls through to the existing path
  * so we never silently drop semantics findPage doesn't implement.
  */
@@ -334,6 +335,7 @@ function shouldSqlPageSessionQuery(query?: Record<string, unknown>, forcePage = 
 
   const allowedKeys = new Set([
     'archived',
+    'scheduled_from_branch',
     'status',
     'board_id',
     'branch_id',
@@ -349,6 +351,8 @@ function shouldSqlPageSessionQuery(query?: Record<string, unknown>, forcePage = 
     if (!allowedKeys.has(key)) return false;
   }
   if (query.archived !== undefined && typeof query.archived !== 'boolean') return false;
+  if (query.scheduled_from_branch !== undefined && typeof query.scheduled_from_branch !== 'boolean')
+    return false;
   if (
     query.status !== undefined &&
     !Object.values(SessionStatus).includes(query.status as SessionStatus)
@@ -2784,6 +2788,7 @@ export class SessionsService extends DrizzleService<Session, SessionUpdate, Sess
         createdBy: query?.created_by as UserID | undefined,
         search: query?.search as string | undefined,
         archived: query?.archived as boolean | undefined,
+        scheduledFromBranch: query?.scheduled_from_branch as boolean | undefined,
         sortUpdatedAt: sortSpec?.updated_at,
         sortCreatedAt: sortSpec?.created_at,
         limit,
