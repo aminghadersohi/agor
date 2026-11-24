@@ -316,19 +316,27 @@ function assessScannedName(
  * service's own access scoping applies. `$sort: { updated_at: -1 }` selects the
  * SQL `findPage` path, which supplies a `session_id` tie-breaker, so equal
  * timestamps resolve deterministically instead of by physical row order.
+ *
+ * Exported so tests run this exact query through the real sessions query
+ * validator: every key must be in `sessionQuerySchema`, or the lookup is
+ * rejected before it reaches SQL.
  */
+export function teammateRecencyQuery(branchId: BranchID) {
+  return {
+    branch_id: branchId,
+    archived: false,
+    scheduled_from_branch: false,
+    $sort: { updated_at: -1 as const },
+    $limit: 1,
+  };
+}
+
 async function findMostRecentTeammateSession(
   ctx: TeammateAddressingContext,
   branch: Branch
 ): Promise<Session | null> {
   const result = await ctx.app.service('sessions').find({
-    query: {
-      branch_id: branch.branch_id,
-      archived: false,
-      scheduled_from_branch: false,
-      $sort: { updated_at: -1 },
-      $limit: 1,
-    },
+    query: teammateRecencyQuery(branch.branch_id),
     ...ctx.baseServiceParams,
   });
 
