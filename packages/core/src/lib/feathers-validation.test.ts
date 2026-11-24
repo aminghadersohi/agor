@@ -290,6 +290,32 @@ describe('sessionQueryValidator', () => {
     expect(context.params.query).toEqual({ session_id: '019e8e1c', _swapReplace: true });
   });
 
+  it('accepts and coerces the scheduled_from_branch filter', async () => {
+    // Regression: teammate recency (`scheduled_from_branch: false`) was
+    // rejected as an additional property, failing every teammate resolve that
+    // fell through to recency.
+    for (const [input, expected] of [
+      [false, false],
+      ['false', false],
+      [true, true],
+    ] as const) {
+      const context = { params: { query: { scheduled_from_branch: input } } };
+      await typedValidateQuery(sessionQueryValidator)(context);
+      expect(context.params.query.scheduled_from_branch).toBe(expected);
+    }
+    await expect(sessionQueryValidator({ scheduled_from_branch: 'sometimes' })).rejects.toThrow();
+  });
+
+  it('names the rejected key in the error message', async () => {
+    await expect(
+      typedValidateQuery(sessionQueryValidator)({
+        params: { query: { not_a_session_filter: true } },
+      })
+    ).rejects.toThrow(
+      'Invalid query: query must NOT have additional properties (not_a_session_filter)'
+    );
+  });
+
   it('rejects filters it does not model instead of dropping them', async () => {
     for (const query of [
       { session_id: '019e8e1c', unknown: 'value' },

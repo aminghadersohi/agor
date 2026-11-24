@@ -664,8 +664,11 @@ agent's own shell commands can read it:
 
 - **Claude Code:** applied over the SDK control channel, not on the CLI
   command line, together with the other MCP servers and their credentials.
-  Agor's server and any always-loaded server connect before the first prompt;
-  the others connect right after it, so a slow server does not hold the turn.
+  On a new conversation, Agor's server and any always-loaded server connect
+  before the first prompt and the others connect right after it, so a slow
+  server does not hold the turn. When a prompt continues an existing
+  conversation, every server connects before the prompt (up to 15 seconds),
+  so tools the agent already had stay available between prompts.
 - **Codex:** read by Codex from an environment variable that Agor blanks in
   every command Codex runs (`shell_environment_policy.set`), along with the
   variables carrying other MCP servers' credentials. Your own

@@ -1011,6 +1011,7 @@ export async function startup(ctx: StartupContext): Promise<void> {
 
   // 7. Start scheduler service (background worker)
   const schedulerMultiTenancy = resolveMultiTenancyConfig(config);
+  const claudeBackendOAuth = app.get('claudeBackendOAuth');
   const schedulerService = new SchedulerService(db, app, {
     deploymentPolicy: resolveDeploymentAgenticToolPolicy(config),
     deploymentToolUnsupported: createDeploymentToolUnsupportedGate(config),
@@ -1027,6 +1028,9 @@ export async function startup(ctx: StartupContext): Promise<void> {
       schedulerMultiTenancy.mode === 'static' ? schedulerMultiTenancy.static_tenant_id : undefined,
     workIdentity: ctx.distributedWorkIdentity,
     powerPolicy: powerPolicyController,
+    claudeReconnectRequired: claudeBackendOAuth
+      ? (tenantId, userId) => claudeBackendOAuth.reconnectRequired(tenantId, userId)
+      : undefined,
   });
   app.set('scheduler', schedulerService);
   schedulerService.start();

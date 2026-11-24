@@ -193,6 +193,9 @@ export const sessionQuerySchema = createQuerySchema(
     // Every token in `SEARCHABLE_FIELDS.session` (SQL page only).
     search: Type.Optional(CommonSchemas.searchText),
     archived: Type.Optional(CommonSchemas.boolean),
+    // Teammate recency excludes scheduler-created runs in SQL (findPage
+    // `scheduledFromBranch`); see findMostRecentTeammateSession.
+    scheduled_from_branch: Type.Optional(CommonSchemas.boolean),
     created_at: Type.Optional(CommonSchemas.timestamp),
     updated_at: Type.Optional(CommonSchemas.timestamp),
     // Marks a `remove` as the delete half of a "switch tool" swap so the
@@ -626,12 +629,17 @@ function describeQueryValidationErrors(errors: unknown): string | null {
   const described = errors
     .slice(0, 5)
     .map((error) => {
-      const { instancePath, message } = (error ?? {}) as {
+      const { instancePath, message, params } = (error ?? {}) as {
         instancePath?: string;
         message?: string;
+        params?: { additionalProperty?: unknown };
       };
       const field = instancePath ? instancePath.replace(/^\//, '').replace(/\//g, '.') : 'query';
-      return `${field} ${message ?? 'is invalid'}`;
+      // Name the rejected key: "must NOT have additional properties" alone does
+      // not say which one, so the caller cannot tell what to drop.
+      const extra =
+        typeof params?.additionalProperty === 'string' ? ` (${params.additionalProperty})` : '';
+      return `${field} ${message ?? 'is invalid'}${extra}`;
     })
     .join('; ');
   const overflow = errors.length > 5 ? ` (+${errors.length - 5} more)` : '';

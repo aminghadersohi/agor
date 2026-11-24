@@ -21,7 +21,7 @@ import {
 } from '@agor/core/db';
 import { type Application, feathers } from '@agor/core/feathers';
 import { sessionQueryValidator, typedValidateQuery } from '@agor/core/lib/feathers-validation';
-import type { ListSyncPage, Session, UserID, UUID } from '@agor/core/types';
+import type { BranchID, ListSyncPage, Session, UserID, UUID } from '@agor/core/types';
 import { LIST_SYNC_HASH_LENGTH, SESSION_LIST_ROW_SHAPE, SessionStatus } from '@agor/core/types';
 import { afterEach, describe, expect, vi } from 'vitest';
 import type { SessionPageOptions } from '../../../../packages/core/src/db/repositories/sessions';
@@ -30,6 +30,7 @@ import {
   seedSessionVisibilityFixture,
 } from '../../../../packages/core/src/db/repositories/sessions.visibility-parity-test-helpers';
 import { ownedDbTest as dbTest } from '../../../../packages/core/src/db/test-helpers';
+import { teammateRecencyQuery } from '../mcp/tools/teammate-addressing';
 import { scopeFindToAccessibleSessionsSql } from '../utils/branch-authorization';
 import { listSyncRowVersion, projectListSyncResult, stripListSyncQuery } from '../utils/list-sync';
 import { SessionsService } from './sessions';
@@ -171,6 +172,42 @@ describe('SessionsService.find — board_id pushdown', () => {
           spy.mockRestore();
         }
       }
+    }
+  );
+
+  dbTest(
+    'serves the teammate recency query through validation, skipping newer scheduled runs',
+    async ({ db }) => {
+      // Regression: `scheduled_from_branch` was missing from the session query
+      // schema, so every teammate resolve that fell through to recency failed
+      // with "Invalid query: query must NOT have additional properties".
+      const user = await new UsersRepository(db).create({
+        user_id: generateId(),
+        email: `teammate-${generateId()}@example.invalid`,
+        role: 'member',
+      });
+      const branch = await createBranchOnBoard(db, null, user.user_id);
+      const warm = await createSession(db, branch);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const run = await createSession(db, branch, { scheduled_from_branch: true });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await new SessionRepository(db).update(run, { title: 'freshest tick' });
+      const app = feathers<{ sessions: SessionsService }>();
+      app.use('sessions', createService(db));
+      app.service('sessions').hooks({
+        before: {
+          all: [typedValidateQuery(sessionQueryValidator)],
+          find: [scopeFindToAccessibleSessionsSql()],
+        },
+      });
+      const findAllSpy = vi.spyOn(SessionRepository.prototype, 'findAll');
+      for (const provider of [undefined, 'socketio', 'rest']) {
+        const result = await app
+          .service('sessions')
+          .find({ provider, user, query: teammateRecencyQuery(branch as BranchID) });
+        expect(orderedIds(result)).toEqual([warm]);
+      }
+      expect(findAllSpy).not.toHaveBeenCalled();
     }
   );
 
