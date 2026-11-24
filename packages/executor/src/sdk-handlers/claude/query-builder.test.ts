@@ -559,6 +559,9 @@ describe('setupQuery - live MCP reprojection', () => {
     const deps = {
       ...refreshDeps(vi.fn().mockResolvedValue(readyProjection()), reportRefresh, undefined, {
         mcp_token: 'test-token',
+        // A fresh conversation: only Agor holds the first message, so there
+        // are two startup sets for the refresh to queue behind.
+        sdk_session_id: undefined,
       }),
       mcpServerRepo: {} as any,
     };
@@ -1070,6 +1073,59 @@ describe('setupQuery - Local Settings Support', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('holds the first message of a resumed conversation on every server so none flaps', async () => {
+    // Each task is a new CLI process resuming the transcript. A server applied
+    // only after the first message is announced to the model as removed and
+    // then re-added — non-OAuth servers flapped on every prompt.
+    const deps = createMockDeps();
+    vi.mocked(deps.sessionsRepo.findById).mockResolvedValue({
+      session_id: 'test-session' as SessionID,
+      branch_id: 'test-branch' as BranchID,
+      mcp_token: 'test-token',
+      sdk_session_id: 'sdk-session-resumed',
+      created_at: new Date().toISOString(),
+      last_updated: new Date().toISOString(),
+    } as any);
+    deps.sessionMCPRepo = {} as any;
+    deps.mcpServerRepo = {} as any;
+    vi.mocked(getMcpServersForSession).mockResolvedValue([
+      { server: { name: 'remote', transport: 'http', url: 'https://example.com/mcp' } } as any,
+      { server: { name: 'local-tool', transport: 'stdio', command: 'local-tool' } } as any,
+    ]);
+    let connect!: (value: unknown) => void;
+    const setMcpServers = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          connect = resolve;
+        })
+    );
+    claudeQuery.mockReturnValue({ setMcpServers } as any);
+
+    await setupQuery('test-session' as SessionID, 'test prompt', deps);
+    const { options, prompt } = claudeQuery.mock.calls[0][0];
+    expect(options.resume).toBe('sdk-session-resumed');
+
+    let released = false;
+    const input = prompt[Symbol.asyncIterator]();
+    const first = input.next().then(() => {
+      released = true;
+    });
+    await vi.waitFor(() => expect(setMcpServers).toHaveBeenCalledTimes(1));
+    expect(Object.keys((setMcpServers.mock.calls[0] as unknown[])[0] as object).sort()).toEqual([
+      'agor',
+      'local-tool',
+      'remote',
+    ]);
+    expect(released).toBe(false);
+    connect({ added: ['agor', 'local-tool', 'remote'], removed: [], errors: {} });
+    await first;
+    expect(released).toBe(true);
+    void input.next();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // One set, before the message: nothing is re-applied after it.
+    expect(setMcpServers).toHaveBeenCalledTimes(1);
   });
 
   it('releases the first message at once when only user servers are attached', async () => {
