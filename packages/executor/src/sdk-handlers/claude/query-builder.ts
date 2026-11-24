@@ -696,12 +696,24 @@ export async function setupQuery(
   };
   delete queryOptions.mcpServers;
   // The CLI handles a pending set before the next user message, so only these hold the first turn.
-  const blockingMcpServers: MCPServersConfig = Object.fromEntries(
-    Object.entries(startupMcpServers).filter(
-      ([name, config]) =>
-        name === AGOR_MCP_SERVER_NAME || (config as { alwaysLoad?: boolean }).alwaysLoad === true
-    )
-  );
+  //
+  // A resumed (or forked) conversation is the exception: its transcript already
+  // announced every server's tools on an earlier turn. Each task is a fresh CLI
+  // process, and the CLI diffs its live tool set against that transcript when
+  // it takes the first message, so any server applied only after that message
+  // is announced to the model as removed, then re-added seconds later — a
+  // disconnect/reconnect on every prompt. Holding the first message on the full
+  // set (still bounded by MCP_SET_SERVERS_TIMEOUT_MS) keeps the set stable.
+  const resumesConversation = typeof queryOptions.resume === 'string' && queryOptions.resume !== '';
+  const blockingMcpServers: MCPServersConfig = resumesConversation
+    ? startupMcpServers
+    : Object.fromEntries(
+        Object.entries(startupMcpServers).filter(
+          ([name, config]) =>
+            name === AGOR_MCP_SERVER_NAME ||
+            (config as { alwaysLoad?: boolean }).alwaysLoad === true
+        )
+      );
   let refreshApplyTail: Promise<unknown> = Promise.resolve();
   const MCP_SET_SERVERS_TIMEOUT_MS = 15_000;
   // The SDK starts reading the prompt inside query(), before it returns the Query.
