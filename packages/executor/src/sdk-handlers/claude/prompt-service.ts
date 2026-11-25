@@ -35,6 +35,7 @@ import type { MessagesService, SessionsPatchClient, TasksService } from '../base
 import {
   BACKGROUND_TASK_TIMEOUT_EVENT,
   ClaudeBackgroundTaskLifecycle,
+  isTopLevelModelOutput,
 } from './background-task-lifecycle.js';
 import { AWAIT_TIMEOUT, awaitWithTimeout } from './bounded-await.js';
 import {
@@ -112,7 +113,10 @@ export class ClaudePromptService {
    * Unlike the active-task bound, no work is running here — the tasks finished —
    * so if no continuation arrives we settle promptly and cleanly, with no
    * teardown notice. This closes the "task finished but no continuation `result`
-   * followed" gap in seconds instead of minutes. */
+   * followed" gap in seconds instead of minutes. It bounds only the wait for a
+   * continuation to BEGIN: once top-level model output arrives, the continuation
+   * is an ordinary turn and is read without this budget (a tool call in it may
+   * be silent for far longer than the grace). */
   static readonly POST_RESULT_CONTINUATION_GRACE_MS = 20_000;
 
   /**
@@ -349,6 +353,14 @@ If you continue to see authentication errors, please contact your Agor administr
     // finalization `for await` did on break (see the `finally` below).
     const iterator = result[Symbol.asyncIterator]();
     let awaitingPostResultContinuation = false;
+    // Once the held query starts a real continuation turn (top-level model
+    // output after the held `result`), that turn is an ordinary model turn: it
+    // ends with its own `result`, and its tool calls may legitimately stay silent
+    // for minutes (a long render, a slow build). The post-result budget exists
+    // only to stop waiting for a continuation that never comes, so it must stop
+    // racing reads as soon as one has demonstrably begun — otherwise a silent
+    // tool inside the continuation is interrupted mid-call after the grace.
+    let continuationTurnStarted = false;
     // On resume, the CLI can replay a `<task-notification>` for background work
     // the previous process left unfinished BEFORE Agor's prompt. That preamble
     // ends with its own zero-turn success `result` while the real prompt is still
@@ -382,7 +394,7 @@ If you continue to see authentication errors, please contact your Agor administr
       });
       while (true) {
         let iteration: Awaited<ReturnType<typeof iterator.next>> | typeof AWAIT_TIMEOUT;
-        if (awaitingPostResultContinuation) {
+        if (awaitingPostResultContinuation && !continuationTurnStarted) {
           // Tasks still active → give real background work time to finish; all
           // settled → only a short grace for an auto-continuation turn.
           const budget =
@@ -481,6 +493,16 @@ If you continue to see authentication errors, please contact your Agor administr
 
         const msg = iteration.value;
         reportSdkActivity(onActivity, 'claude-code', msg.type);
+        if (
+          awaitingPostResultContinuation &&
+          !continuationTurnStarted &&
+          isTopLevelModelOutput(msg)
+        ) {
+          continuationTurnStarted = true;
+          console.log(
+            `▶️ [claude-code] continuation turn started after a held result for session ${shortId(sessionId)}; reading it without the post-result budget`
+          );
+        }
         const lifecycleTransition = backgroundTasks.observe(msg);
         const { resultDisposition } = lifecycleTransition;
         if (
@@ -510,6 +532,7 @@ If you continue to see authentication errors, please contact your Agor administr
           deferredPreambleResult = msg;
           sdkResults.push(msg);
           awaitingPostResultContinuation = true;
+          continuationTurnStarted = false;
           console.log(
             `⏳ [claude-code] zero-turn result before any assistant turn for session ${shortId(sessionId)}; holding it as a resume preamble`
           );
@@ -571,11 +594,13 @@ If you continue to see authentication errors, please contact your Agor administr
               // idle timeout so a continuation that never arrives cannot wedge
               // the query open indefinitely.
               awaitingPostResultContinuation = true;
+              continuationTurnStarted = false;
               console.log(
                 `⏳ Parent turn ended with ${backgroundTasks.activeTaskCount} background task(s) still active; keeping SDK query alive`
               );
             } else {
               awaitingPostResultContinuation = false;
+              continuationTurnStarted = false;
               event.raw_sdk_message = aggregateClaudeResults(sdkResults);
               try {
                 // Bounded: a subprocess that never answers this control request
