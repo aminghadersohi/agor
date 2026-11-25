@@ -38,6 +38,55 @@ function sdkResult(uuid: string): SDKMessage {
   };
 }
 
+const taskStarted = (taskId: string): SDKMessage =>
+  ({
+    type: 'system',
+    subtype: 'task_started',
+    task_id: taskId,
+    description: 'background fixture',
+    uuid: `start-${taskId}`,
+    session_id: 'sdk-session',
+  }) as SDKMessage;
+
+const taskCompleted = (taskId: string): SDKMessage =>
+  ({
+    type: 'system',
+    subtype: 'task_notification',
+    task_id: taskId,
+    status: 'completed',
+    output_file: `/tmp/${taskId}`,
+    summary: 'done',
+    uuid: `notification-${taskId}`,
+    session_id: 'sdk-session',
+  }) as SDKMessage;
+
+/** A top-level (parentToolUseId null) or subagent assistant frame calling a tool. */
+const assistantToolUse = (toolUseId: string, parentToolUseId: string | null = null): SDKMessage =>
+  ({
+    type: 'assistant',
+    message: {
+      id: `msg-${toolUseId}`,
+      role: 'assistant',
+      model: 'claude-sonnet-4-6',
+      content: [{ type: 'tool_use', id: toolUseId, name: 'Bash', input: { command: 'render' } }],
+    },
+    parent_tool_use_id: parentToolUseId,
+    uuid: `assistant-${toolUseId}`,
+    session_id: 'sdk-session',
+  }) as unknown as SDKMessage;
+
+const toolResult = (toolUseId: string): SDKMessage =>
+  ({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'rendered' }],
+    },
+    parent_tool_use_id: null,
+    uuid: `result-${toolUseId}`,
+    session_id: 'sdk-session',
+  }) as unknown as SDKMessage;
+
 /**
  * Models the installed SDK Query as a wrapper distinct from its inner message
  * generator. Iterating the Query returns the inner generator
@@ -649,6 +698,153 @@ describe('ClaudePromptService background task query lifetime', () => {
     }
   });
 
+  it('does not interrupt a silent tool call inside the continuation turn', async () => {
+    // Regression: the agent launched a background task and ended its turn; the
+    // task settled and the SDK woke the continuation turn, which started a tool
+    // call that stayed silent longer than the post-result grace (e.g. a
+    // Lightroom render). The grace must not interrupt a continuation that has
+    // already begun.
+    vi.useFakeTimers();
+    try {
+      let finishTool = () => {};
+      const toolFinished = new Promise<void>((resolve) => {
+        finishTool = resolve;
+      });
+      const query = fakeQuery(async function* () {
+        yield taskStarted('task-1');
+        yield sdkResult('parent-result');
+        yield taskCompleted('task-1');
+        yield assistantToolUse('render-1');
+        // The tool runs silently, far past the grace.
+        await toolFinished;
+        yield toolResult('render-1');
+        yield sdkResult('continuation-result');
+      });
+      vi.mocked(setupQuery).mockResolvedValue({
+        query: query as never,
+        resolvedModel: 'claude-sonnet-4-6',
+        getStderrMetadata: () => ({ hasStderr: false, byteLength: 0 }),
+      });
+      const events: Array<{ type: string; raw_sdk_message?: { uuid?: string } }> = [];
+      const drained = (async () => {
+        for await (const event of service().promptSessionStreaming(sessionId, 'prompt')) {
+          events.push(event);
+        }
+      })();
+
+      await vi.advanceTimersByTimeAsync(ClaudePromptService.POST_RESULT_CONTINUATION_GRACE_MS * 3);
+      expect(query.interrupt).not.toHaveBeenCalled();
+      expect(query.releaseInput).not.toHaveBeenCalled();
+
+      finishTool();
+      await vi.advanceTimersByTimeAsync(0);
+      await drained;
+
+      expect(query.interrupt).not.toHaveBeenCalled();
+      expect(
+        events
+          .filter((event) => event.type === 'result')
+          .map((event) => event.raw_sdk_message?.uuid)
+      ).toEqual(['parent-result', 'continuation-result']);
+      expect(query.getContextUsage).toHaveBeenCalledTimes(1);
+      expect(query.releaseInput).toHaveBeenCalledTimes(1);
+      expect(query.return).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the grace when only subagent output arrives after the held result', async () => {
+    // A background Agent streams its own frames (parent_tool_use_id set) while
+    // the parent is held. Those are not a continuation turn, so once the task
+    // settles with no continuation the grace still settles the turn.
+    vi.useFakeTimers();
+    try {
+      const query = fakeQuery((transportClosed) =>
+        (async function* () {
+          yield taskStarted('task-1');
+          yield sdkResult('parent-result');
+          yield assistantToolUse('subagent-tool', 'agent-launch-tool-use');
+          yield taskCompleted('task-1');
+          await transportClosed;
+        })()
+      );
+      vi.mocked(setupQuery).mockResolvedValue({
+        query: query as never,
+        resolvedModel: 'claude-sonnet-4-6',
+        getStderrMetadata: () => ({ hasStderr: false, byteLength: 0 }),
+      });
+      const events: Array<{ type: string; raw_sdk_message?: { uuid?: string } }> = [];
+      const drained = (async () => {
+        for await (const event of service().promptSessionStreaming(sessionId, 'prompt')) {
+          events.push(event);
+        }
+      })();
+
+      await vi.advanceTimersByTimeAsync(ClaudePromptService.POST_RESULT_CONTINUATION_GRACE_MS + 10);
+      await drained;
+
+      expect(
+        events
+          .filter((event) => event.type === 'result')
+          .map((event) => event.raw_sdk_message?.uuid)
+      ).toEqual(['parent-result']);
+      expect(query.interrupt).toHaveBeenCalledTimes(1);
+      expect(query.releaseInput).toHaveBeenCalledTimes(1);
+      expect(query.return).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-arms the grace when a continuation turn ends with work still in the background', async () => {
+    // Two background tasks: the first settles and wakes a continuation turn,
+    // which ends while the second is still running. The next hold must apply
+    // the budget again, so the query still settles if no further continuation
+    // follows the second task.
+    vi.useFakeTimers();
+    try {
+      const query = fakeQuery((transportClosed) =>
+        (async function* () {
+          yield taskStarted('task-1');
+          yield taskStarted('task-2');
+          yield sdkResult('parent-result');
+          yield taskCompleted('task-1');
+          yield assistantToolUse('follow-up');
+          yield toolResult('follow-up');
+          yield sdkResult('first-continuation');
+          yield taskCompleted('task-2');
+          await transportClosed;
+        })()
+      );
+      vi.mocked(setupQuery).mockResolvedValue({
+        query: query as never,
+        resolvedModel: 'claude-sonnet-4-6',
+        getStderrMetadata: () => ({ hasStderr: false, byteLength: 0 }),
+      });
+      const events: Array<{ type: string; raw_sdk_message?: { uuid?: string } }> = [];
+      const drained = (async () => {
+        for await (const event of service().promptSessionStreaming(sessionId, 'prompt')) {
+          events.push(event);
+        }
+      })();
+
+      await vi.advanceTimersByTimeAsync(ClaudePromptService.POST_RESULT_CONTINUATION_GRACE_MS + 10);
+      await drained;
+
+      expect(
+        events
+          .filter((event) => event.type === 'result')
+          .map((event) => event.raw_sdk_message?.uuid)
+        // The third entry is the timeout path's cumulative aggregate re-emit.
+      ).toEqual(['parent-result', 'first-continuation', 'first-continuation']);
+      expect(query.interrupt).toHaveBeenCalledTimes(1);
+      expect(query.releaseInput).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('releases input and balances watchdog activity when cancellation interrupts a task', async () => {
     const query = fakeQuery(async function* () {
       yield {
@@ -762,6 +958,40 @@ describe('ClaudePromptService resume preamble result', () => {
       expect(events[1].raw_sdk_message).toMatchObject({ uuid: 'preamble', num_turns: 0 });
       expect(query.releaseInput).toHaveBeenCalledTimes(1);
       expect(query.return).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not interrupt a silent tool call in the real turn after a held preamble', async () => {
+    vi.useFakeTimers();
+    try {
+      let finishTool = () => {};
+      const toolFinished = new Promise<void>((resolve) => {
+        finishTool = resolve;
+      });
+      const query = fakeQuery(async function* () {
+        yield preambleResult();
+        yield assistantToolUse('slow-tool');
+        await toolFinished;
+        yield toolResult('slow-tool');
+        yield assistantTurn;
+        yield sdkResult('real-result');
+      });
+      const drained = drain(query);
+      await vi.advanceTimersByTimeAsync(ClaudePromptService.POST_RESULT_CONTINUATION_GRACE_MS * 3);
+      expect(query.interrupt).not.toHaveBeenCalled();
+      expect(query.releaseInput).not.toHaveBeenCalled();
+      finishTool();
+      await vi.advanceTimersByTimeAsync(0);
+      const events = await drained;
+
+      expect(query.interrupt).not.toHaveBeenCalled();
+      const completes = events.filter((event) => event.type === 'complete');
+      expect(completes.some((event) => event.isSynthesizedResult === true)).toBe(false);
+      const results = events.filter((event) => event.type === 'result');
+      expect(results).toHaveLength(1);
+      expect(query.releaseInput).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

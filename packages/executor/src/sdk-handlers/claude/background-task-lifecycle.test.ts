@@ -1,6 +1,9 @@
 import type { SDKMessage } from '@agor/core/sdk';
 import { describe, expect, it } from 'vitest';
-import { ClaudeBackgroundTaskLifecycle } from './background-task-lifecycle.js';
+import {
+  ClaudeBackgroundTaskLifecycle,
+  isTopLevelModelOutput,
+} from './background-task-lifecycle.js';
 
 const message = (value: Record<string, unknown>) => value as SDKMessage;
 const started = (taskId: string, taskType = 'agent') =>
@@ -190,5 +193,25 @@ describe('ClaudeBackgroundTaskLifecycle', () => {
     expect(lifecycle.observe(settled('unknown')).tasksSettled).toBeUndefined();
     expect(lifecycle.clearActiveTasks()).toBe(1);
     expect(lifecycle.clearActiveTasks()).toBe(0);
+  });
+});
+
+describe('isTopLevelModelOutput', () => {
+  it('accepts only main-agent assistant output and stream events', () => {
+    expect(isTopLevelModelOutput(message({ type: 'assistant', parent_tool_use_id: null }))).toBe(
+      true
+    );
+    expect(isTopLevelModelOutput(message({ type: 'stream_event', parent_tool_use_id: null }))).toBe(
+      true
+    );
+    expect(
+      isTopLevelModelOutput(message({ type: 'assistant', parent_tool_use_id: 'toolu_agent' }))
+    ).toBe(false);
+    expect(
+      isTopLevelModelOutput(message({ type: 'stream_event', parent_tool_use_id: 'toolu_agent' }))
+    ).toBe(false);
+    expect(isTopLevelModelOutput(message({ type: 'user', parent_tool_use_id: null }))).toBe(false);
+    expect(isTopLevelModelOutput(settled('task-1'))).toBe(false);
+    expect(isTopLevelModelOutput(result())).toBe(false);
   });
 });

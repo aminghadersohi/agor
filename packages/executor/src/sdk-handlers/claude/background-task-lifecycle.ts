@@ -161,3 +161,17 @@ export class ClaudeBackgroundTaskLifecycle {
     };
   }
 }
+
+/**
+ * True when a message is the main agent's own model output — an assistant
+ * message or partial stream event with no `parent_tool_use_id`. Subagent frames
+ * (including a background Agent's progress) carry the launching tool_use ID and
+ * do not count. Seeing top-level model output after a held `result` proves a
+ * continuation turn has begun, and that turn ends with its own `result`.
+ * User-role messages are deliberately excluded: the CLI can surface a task
+ * notification as a user message without ever starting a continuation turn.
+ */
+export function isTopLevelModelOutput(message: SDKMessage): boolean {
+  if (message.type !== 'assistant' && message.type !== 'stream_event') return false;
+  return !message.parent_tool_use_id;
+}
