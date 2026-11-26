@@ -60,6 +60,8 @@ export { configureSecretKeyDerivationTracing } from './secret-key-derivation';
 // Session guard utilities (defensive programming for deleted sessions)
 export * from './session-guard';
 export * from './standalone-power-owner';
+// Per-task usage for analytics (undoes session running totals)
+export * from './task-usage';
 // Tenant database lifecycle primitives. Filesystem-backed portability operations
 // live at @agor/core/tenant-portability so importing the daemon's database
 // surface does not implicitly grant host-filesystem capabilities.
