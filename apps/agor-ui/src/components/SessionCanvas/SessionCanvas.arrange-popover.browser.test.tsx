@@ -194,7 +194,14 @@ describe('SessionCanvas Arrange Board popover (real browser)', () => {
     });
     await act(async () => user.click(zoneNode));
     const toolbar = screen.getByRole('toolbar', { name: 'Zone actions' });
-    expect(Number.isFinite(Number.parseFloat(toolbar.style.left))).toBe(true);
+    // NodeToolbar positions its portal in screen space, not with inline left on the toolbar.
+    await waitFor(() => {
+      const rect = toolbar.getBoundingClientRect();
+      const zone = zoneNode.getBoundingClientRect();
+      expect(rect.width).toBeGreaterThan(0);
+      expect(Math.abs(rect.left + rect.width / 2 - (zone.left + zone.width / 2))).toBeLessThan(2);
+      expect(rect.bottom).toBeLessThan(zone.top);
+    });
     expect(document.querySelector('.react-flow__node[data-id="legacy-text"]')).toBeNull();
     await act(async () => user.click(screen.getByRole('button', { name: 'More zone actions' })));
     const enableAutoZone = await visibleMenuItem(/Enable Auto Zone/);

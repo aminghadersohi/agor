@@ -59,6 +59,7 @@ import {
   Handle,
   NodeResizeControl,
   NodeResizer,
+  NodeToolbar,
   Position,
   ResizeControlVariant,
   useViewport,
@@ -275,7 +276,7 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
   const allDensityCompact =
     densityExpandableCount > 0 && compactDensityCount === densityExpandableCount;
 
-  // Inverse scale to keep toolbar at constant size regardless of zoom
+  // Inverse scale to keep the label at constant size regardless of zoom
   const scale = 1 / zoom;
 
   // Sync label state when data.label changes (from WebSocket or modal
@@ -582,376 +583,372 @@ const ZoneNodeComponent = ({ data, selected }: { data: ZoneNodeData; selected?: 
         }}
       >
         {selected && !data.suppressToolbar && !mutationDisabled && (
-          <div
-            className="nodrag nopan"
-            role="toolbar"
-            aria-label="Zone actions"
-            onPointerDown={(event) => event.stopPropagation()}
-            onPointerUp={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
-            style={{
-              position: 'absolute',
-              top: '-48px',
-              left: '50%',
-              transform: `translateX(-50%) scale(${scale})`,
-              transformOrigin: 'center bottom',
-              display: 'flex',
-              alignItems: 'center',
-              gap: token.marginXXS,
-              padding: token.paddingXXS,
-              background: token.colorBgElevated,
-              border: `1px solid ${token.colorBorder}`,
-              borderRadius: token.borderRadiusLG,
-              boxShadow: token.boxShadowSecondary,
-              zIndex: 1000,
-              userSelect: 'none',
-              whiteSpace: 'nowrap',
-              pointerEvents: 'auto',
-            }}
-          >
-            <Button
-              type="text"
-              size="small"
-              aria-label="Rename zone"
-              title="Rename zone"
-              icon={<EditOutlined />}
-              disabled={mutationDisabled}
-              onClick={() => {
-                // An open editor (or a refused draft) keeps its ticket.
-                if (isEditingLabel) return;
-                beginEdit();
-                setIsEditingLabel(true);
+          <NodeToolbar isVisible position={Position.Top} offset={12}>
+            <div
+              className="nodrag nopan"
+              role="toolbar"
+              aria-label="Zone actions"
+              onPointerDown={(event) => event.stopPropagation()}
+              onPointerUp={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: token.marginXXS,
+                padding: token.paddingXXS,
+                background: token.colorBgElevated,
+                border: `1px solid ${token.colorBorder}`,
+                borderRadius: token.borderRadiusLG,
+                boxShadow: token.boxShadowSecondary,
+                userSelect: 'none',
+                whiteSpace: 'nowrap',
+                pointerEvents: 'auto',
               }}
-              style={{ width: 32, height: 32 }}
-            />
-
-            <Popover
-              trigger="click"
-              placement="bottom"
-              title="Appearance"
-              content={
-                <Space orientation="vertical" size="middle" style={{ width: 240 }}>
-                  <Flex justify="space-between" align="center" gap="middle">
-                    <Typography.Text>Border</Typography.Text>
-                    <ColorPicker
-                      value={borderColor}
-                      onChangeComplete={handleBorderColorChange}
-                      trigger="click"
-                      showText
-                      format="hex"
-                      presets={[
-                        { label: 'Presets', colors },
-                        ...(recentColors.length > 0
-                          ? [{ label: 'Recent', colors: recentColors }]
-                          : []),
-                      ]}
-                    >
-                      <Button
-                        aria-label="Zone border color"
-                        icon={
-                          <span
-                            aria-hidden="true"
-                            style={{
-                              width: 14,
-                              height: 14,
-                              borderRadius: token.borderRadiusSM,
-                              backgroundColor: borderColor,
-                              display: 'inline-block',
-                            }}
-                          />
-                        }
-                      >
-                        {borderColor.toUpperCase()}
-                      </Button>
-                    </ColorPicker>
-                  </Flex>
-                  <Flex justify="space-between" align="center" gap="middle">
-                    <Typography.Text>Fill</Typography.Text>
-                    <ColorPicker
-                      value={backgroundColor}
-                      onChangeComplete={handleBackgroundColorChange}
-                      trigger="click"
-                      showText
-                      format="hex"
-                      presets={[
-                        {
-                          label: 'Presets',
-                          colors: colors.map(
-                            (color) =>
-                              `${color}${Math.round(ZONE_CONTENT_OPACITY * 255)
-                                .toString(16)
-                                .padStart(2, '0')}`
-                          ),
-                        },
-                        ...(recentColors.length > 0
-                          ? [{ label: 'Recent', colors: recentColors }]
-                          : []),
-                      ]}
-                    >
-                      <Button
-                        aria-label="Zone fill color"
-                        icon={
-                          <span
-                            aria-hidden="true"
-                            style={{
-                              width: 14,
-                              height: 14,
-                              borderRadius: token.borderRadiusSM,
-                              border: `1px solid ${token.colorBorder}`,
-                              backgroundColor,
-                              display: 'inline-block',
-                            }}
-                          />
-                        }
-                      >
-                        {backgroundColor.toUpperCase()}
-                      </Button>
-                    </ColorPicker>
-                  </Flex>
-                  <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                    Label size and theme defaults are in Zone settings.
-                  </Typography.Text>
-                </Space>
-              }
             >
               <Button
                 type="text"
                 size="small"
-                aria-label="Zone appearance"
-                title="Zone appearance"
+                aria-label="Rename zone"
+                title="Rename zone"
+                icon={<EditOutlined />}
                 disabled={mutationDisabled}
-                icon={
-                  <span
-                    aria-hidden="true"
-                    style={{
-                      position: 'relative',
-                      display: 'inline-flex',
-                      fontSize: token.fontSizeLG,
-                    }}
-                  >
-                    <BgColorsOutlined />
-                    <span
-                      style={{
-                        position: 'absolute',
-                        right: -4,
-                        bottom: -2,
-                        width: 9,
-                        height: 9,
-                        borderRadius: '50%',
-                        border: `1px solid ${token.colorBorder}`,
-                        backgroundColor,
-                      }}
-                    />
-                  </span>
-                }
+                onClick={() => {
+                  // An open editor (or a refused draft) keeps its ticket.
+                  if (isEditingLabel) return;
+                  beginEdit();
+                  setIsEditingLabel(true);
+                }}
                 style={{ width: 32, height: 32 }}
               />
-            </Popover>
 
-            <Button
-              type={data.locked ? 'default' : 'text'}
-              size="small"
-              aria-label={data.locked ? 'Unlock position and size' : 'Lock position and size'}
-              title={data.locked ? 'Unlock position and size' : 'Lock position and size'}
-              icon={data.locked ? <LockOutlined /> : <UnlockOutlined />}
-              disabled={mutationDisabled}
-              onClick={handleToggleLock}
-              style={{
-                width: 32,
-                height: 32,
-                ...(data.locked
-                  ? { color: token.colorWarning, borderColor: token.colorWarning }
-                  : {}),
-              }}
-            />
-
-            {data.onLayoutChange && (
-              <Dropdown trigger={['click']} placement="bottom" menu={layoutMenu}>
+              <Popover
+                trigger="click"
+                placement="bottom"
+                title="Appearance"
+                content={
+                  <Space orientation="vertical" size="middle" style={{ width: 240 }}>
+                    <Flex justify="space-between" align="center" gap="middle">
+                      <Typography.Text>Border</Typography.Text>
+                      <ColorPicker
+                        value={borderColor}
+                        onChangeComplete={handleBorderColorChange}
+                        trigger="click"
+                        showText
+                        format="hex"
+                        presets={[
+                          { label: 'Presets', colors },
+                          ...(recentColors.length > 0
+                            ? [{ label: 'Recent', colors: recentColors }]
+                            : []),
+                        ]}
+                      >
+                        <Button
+                          aria-label="Zone border color"
+                          icon={
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                width: 14,
+                                height: 14,
+                                borderRadius: token.borderRadiusSM,
+                                backgroundColor: borderColor,
+                                display: 'inline-block',
+                              }}
+                            />
+                          }
+                        >
+                          {borderColor.toUpperCase()}
+                        </Button>
+                      </ColorPicker>
+                    </Flex>
+                    <Flex justify="space-between" align="center" gap="middle">
+                      <Typography.Text>Fill</Typography.Text>
+                      <ColorPicker
+                        value={backgroundColor}
+                        onChangeComplete={handleBackgroundColorChange}
+                        trigger="click"
+                        showText
+                        format="hex"
+                        presets={[
+                          {
+                            label: 'Presets',
+                            colors: colors.map(
+                              (color) =>
+                                `${color}${Math.round(ZONE_CONTENT_OPACITY * 255)
+                                  .toString(16)
+                                  .padStart(2, '0')}`
+                            ),
+                          },
+                          ...(recentColors.length > 0
+                            ? [{ label: 'Recent', colors: recentColors }]
+                            : []),
+                        ]}
+                      >
+                        <Button
+                          aria-label="Zone fill color"
+                          icon={
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                width: 14,
+                                height: 14,
+                                borderRadius: token.borderRadiusSM,
+                                border: `1px solid ${token.colorBorder}`,
+                                backgroundColor,
+                                display: 'inline-block',
+                              }}
+                            />
+                          }
+                        >
+                          {backgroundColor.toUpperCase()}
+                        </Button>
+                      </ColorPicker>
+                    </Flex>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                      Label size and theme defaults are in Zone settings.
+                    </Typography.Text>
+                  </Space>
+                }
+              >
                 <Button
                   type="text"
                   size="small"
-                  aria-label={`Zone layout: ${layoutOption.label}`}
-                  title={`Zone layout: ${layoutOption.label}`}
-                  // One icon for every layout, so the control is easy to find; the menu marks the current one.
-                  icon={<LayoutOutlined />}
+                  aria-label="Zone appearance"
+                  title="Zone appearance"
+                  disabled={mutationDisabled}
+                  icon={
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        position: 'relative',
+                        display: 'inline-flex',
+                        fontSize: token.fontSizeLG,
+                      }}
+                    >
+                      <BgColorsOutlined />
+                      <span
+                        style={{
+                          position: 'absolute',
+                          right: -4,
+                          bottom: -2,
+                          width: 9,
+                          height: 9,
+                          borderRadius: '50%',
+                          border: `1px solid ${token.colorBorder}`,
+                          backgroundColor,
+                        }}
+                      />
+                    </span>
+                  }
+                  style={{ width: 32, height: 32 }}
+                />
+              </Popover>
+
+              <Button
+                type={data.locked ? 'default' : 'text'}
+                size="small"
+                aria-label={data.locked ? 'Unlock position and size' : 'Lock position and size'}
+                title={data.locked ? 'Unlock position and size' : 'Lock position and size'}
+                icon={data.locked ? <LockOutlined /> : <UnlockOutlined />}
+                disabled={mutationDisabled}
+                onClick={handleToggleLock}
+                style={{
+                  width: 32,
+                  height: 32,
+                  ...(data.locked
+                    ? { color: token.colorWarning, borderColor: token.colorWarning }
+                    : {}),
+                }}
+              />
+
+              {data.onLayoutChange && (
+                <Dropdown trigger={['click']} placement="bottom" menu={layoutMenu}>
+                  <Button
+                    type="text"
+                    size="small"
+                    aria-label={`Zone layout: ${layoutOption.label}`}
+                    title={`Zone layout: ${layoutOption.label}`}
+                    // One icon for every layout, so the control is easy to find; the menu marks the current one.
+                    icon={<LayoutOutlined />}
+                    disabled={mutationDisabled}
+                    style={{ width: 32, height: 32 }}
+                  />
+                </Dropdown>
+              )}
+
+              <Button
+                type="text"
+                size="small"
+                aria-label="Zone settings"
+                title="Zone settings"
+                icon={<SettingOutlined />}
+                disabled={mutationDisabled}
+                onClick={() => {
+                  if (zoneDialogOpen) return;
+                  beginEdit();
+                  setConfigModalOpen(true);
+                }}
+                style={{ width: 32, height: 32 }}
+              />
+
+              <Dropdown
+                trigger={['click']}
+                placement="bottomRight"
+                classNames={{ root: CANVAS_LAYOUT_CONTROLS_CLASS }}
+                menu={{
+                  items: [
+                    {
+                      key: 'tidy',
+                      label: 'Tidy up contents',
+                      icon: <AppstoreOutlined />,
+                      disabled: positionableItemCount < 1 || arrangedLayout,
+                    },
+                    {
+                      key: 'auto-zone',
+                      label: autoZoneEnabled ? 'Disable Auto Zone' : 'Enable Auto Zone',
+                      icon: <SyncOutlined />,
+                      disabled: arrangedLayout,
+                    },
+                    {
+                      key: 'align-contents',
+                      label: alignsInsideGridCells
+                        ? 'Align inside Grid cells'
+                        : 'Align content cluster',
+                      icon: <AlignCenterOutlined />,
+                      disabled: positionableItemCount < 1 || arrangedLayout,
+                      children: [
+                        { key: 'align-left', label: 'Left', icon: <AlignLeftOutlined /> },
+                        {
+                          key: 'align-middle',
+                          label: 'Horizontal center',
+                          icon: <AlignCenterOutlined />,
+                        },
+                        { key: 'align-right', label: 'Right', icon: <AlignRightOutlined /> },
+                        { key: 'align-top', label: 'Top', icon: <VerticalAlignTopOutlined /> },
+                        {
+                          key: 'align-vertical-middle',
+                          label: 'Vertical center',
+                          icon: <VerticalAlignMiddleOutlined />,
+                        },
+                        {
+                          key: 'align-bottom',
+                          label: 'Bottom',
+                          icon: <VerticalAlignBottomOutlined />,
+                        },
+                      ],
+                    },
+                    {
+                      key: 'content-expansion',
+                      label: 'Content expansion',
+                      disabled: densityExpandableCount < 1,
+                      children: [
+                        {
+                          key: 'expand-contents',
+                          label: 'Expand eligible contents',
+                          disabled: compactDensityCount < 1,
+                        },
+                        {
+                          key: 'collapse-contents',
+                          label: 'Collapse eligible contents',
+                          disabled: allDensityCompact,
+                        },
+                      ],
+                    },
+                    { type: 'divider' },
+                    {
+                      key: 'arrange',
+                      label:
+                        data.overlappingZoneCount && data.overlappingZoneCount > 0
+                          ? `Arrange (${data.overlappingZoneCount} overlapping)`
+                          : 'Arrange',
+                      icon: <VerticalAlignTopOutlined />,
+                      children: [
+                        {
+                          key: 'front',
+                          label: 'Bring to front',
+                          icon: <VerticalAlignTopOutlined />,
+                          disabled: data.layerAvailability?.front === false,
+                        },
+                        {
+                          key: 'forward',
+                          label: 'Bring forward',
+                          icon: <CaretUpOutlined />,
+                          disabled: data.layerAvailability?.forward === false,
+                        },
+                        {
+                          key: 'backward',
+                          label: 'Send backward',
+                          icon: <CaretDownOutlined />,
+                          disabled: data.layerAvailability?.backward === false,
+                        },
+                        {
+                          key: 'back',
+                          label: 'Send to back',
+                          icon: <VerticalAlignBottomOutlined />,
+                          disabled: data.layerAvailability?.back === false,
+                        },
+                      ],
+                    },
+                    { type: 'divider' },
+                    { key: 'delete', label: 'Delete zone', icon: <DeleteOutlined />, danger: true },
+                  ],
+                  onClick: ({ key, domEvent }) => {
+                    domEvent.stopPropagation();
+                    if (mutationDisabled) return;
+                    if (key === 'delete') {
+                      if (zoneDialogOpen) return;
+                      beginEdit();
+                      setDeleteModalOpen(true);
+                      return;
+                    }
+                    if (key === 'tidy') {
+                      data.onArrangeContents?.(data.objectId);
+                      return;
+                    }
+                    if (key === 'auto-zone') {
+                      handleToggleAutoZone();
+                      return;
+                    }
+                    const justificationByKey: Partial<Record<string, ZoneContentJustification>> = {
+                      'align-left': 'left',
+                      'align-middle': 'middle',
+                      'align-right': 'right',
+                      'align-top': 'top',
+                      'align-vertical-middle': 'vertical_middle',
+                      'align-bottom': 'bottom',
+                    };
+                    const justification = justificationByKey[key];
+                    if (justification) {
+                      data.onJustifyContents?.(data.objectId, justification);
+                      return;
+                    }
+                    if (key === 'expand-contents' || key === 'collapse-contents') {
+                      data.onSetContentsCompact?.(data.objectId, key === 'collapse-contents');
+                      return;
+                    }
+                    if (
+                      key === 'front' ||
+                      key === 'forward' ||
+                      key === 'backward' ||
+                      key === 'back'
+                    ) {
+                      handleReorder(key);
+                    }
+                  },
+                }}
+              >
+                <Button
+                  type="text"
+                  size="small"
+                  aria-label="More zone actions"
+                  title="More zone actions"
+                  icon={<MoreOutlined />}
                   disabled={mutationDisabled}
                   style={{ width: 32, height: 32 }}
                 />
               </Dropdown>
-            )}
-
-            <Button
-              type="text"
-              size="small"
-              aria-label="Zone settings"
-              title="Zone settings"
-              icon={<SettingOutlined />}
-              disabled={mutationDisabled}
-              onClick={() => {
-                if (zoneDialogOpen) return;
-                beginEdit();
-                setConfigModalOpen(true);
-              }}
-              style={{ width: 32, height: 32 }}
-            />
-
-            <Dropdown
-              trigger={['click']}
-              placement="bottomRight"
-              classNames={{ root: CANVAS_LAYOUT_CONTROLS_CLASS }}
-              menu={{
-                items: [
-                  {
-                    key: 'tidy',
-                    label: 'Tidy up contents',
-                    icon: <AppstoreOutlined />,
-                    disabled: positionableItemCount < 1 || arrangedLayout,
-                  },
-                  {
-                    key: 'auto-zone',
-                    label: autoZoneEnabled ? 'Disable Auto Zone' : 'Enable Auto Zone',
-                    icon: <SyncOutlined />,
-                    disabled: arrangedLayout,
-                  },
-                  {
-                    key: 'align-contents',
-                    label: alignsInsideGridCells
-                      ? 'Align inside Grid cells'
-                      : 'Align content cluster',
-                    icon: <AlignCenterOutlined />,
-                    disabled: positionableItemCount < 1 || arrangedLayout,
-                    children: [
-                      { key: 'align-left', label: 'Left', icon: <AlignLeftOutlined /> },
-                      {
-                        key: 'align-middle',
-                        label: 'Horizontal center',
-                        icon: <AlignCenterOutlined />,
-                      },
-                      { key: 'align-right', label: 'Right', icon: <AlignRightOutlined /> },
-                      { key: 'align-top', label: 'Top', icon: <VerticalAlignTopOutlined /> },
-                      {
-                        key: 'align-vertical-middle',
-                        label: 'Vertical center',
-                        icon: <VerticalAlignMiddleOutlined />,
-                      },
-                      {
-                        key: 'align-bottom',
-                        label: 'Bottom',
-                        icon: <VerticalAlignBottomOutlined />,
-                      },
-                    ],
-                  },
-                  {
-                    key: 'content-expansion',
-                    label: 'Content expansion',
-                    disabled: densityExpandableCount < 1,
-                    children: [
-                      {
-                        key: 'expand-contents',
-                        label: 'Expand eligible contents',
-                        disabled: compactDensityCount < 1,
-                      },
-                      {
-                        key: 'collapse-contents',
-                        label: 'Collapse eligible contents',
-                        disabled: allDensityCompact,
-                      },
-                    ],
-                  },
-                  { type: 'divider' },
-                  {
-                    key: 'arrange',
-                    label:
-                      data.overlappingZoneCount && data.overlappingZoneCount > 0
-                        ? `Arrange (${data.overlappingZoneCount} overlapping)`
-                        : 'Arrange',
-                    icon: <VerticalAlignTopOutlined />,
-                    children: [
-                      {
-                        key: 'front',
-                        label: 'Bring to front',
-                        icon: <VerticalAlignTopOutlined />,
-                        disabled: data.layerAvailability?.front === false,
-                      },
-                      {
-                        key: 'forward',
-                        label: 'Bring forward',
-                        icon: <CaretUpOutlined />,
-                        disabled: data.layerAvailability?.forward === false,
-                      },
-                      {
-                        key: 'backward',
-                        label: 'Send backward',
-                        icon: <CaretDownOutlined />,
-                        disabled: data.layerAvailability?.backward === false,
-                      },
-                      {
-                        key: 'back',
-                        label: 'Send to back',
-                        icon: <VerticalAlignBottomOutlined />,
-                        disabled: data.layerAvailability?.back === false,
-                      },
-                    ],
-                  },
-                  { type: 'divider' },
-                  { key: 'delete', label: 'Delete zone', icon: <DeleteOutlined />, danger: true },
-                ],
-                onClick: ({ key, domEvent }) => {
-                  domEvent.stopPropagation();
-                  if (mutationDisabled) return;
-                  if (key === 'delete') {
-                    if (zoneDialogOpen) return;
-                    beginEdit();
-                    setDeleteModalOpen(true);
-                    return;
-                  }
-                  if (key === 'tidy') {
-                    data.onArrangeContents?.(data.objectId);
-                    return;
-                  }
-                  if (key === 'auto-zone') {
-                    handleToggleAutoZone();
-                    return;
-                  }
-                  const justificationByKey: Partial<Record<string, ZoneContentJustification>> = {
-                    'align-left': 'left',
-                    'align-middle': 'middle',
-                    'align-right': 'right',
-                    'align-top': 'top',
-                    'align-vertical-middle': 'vertical_middle',
-                    'align-bottom': 'bottom',
-                  };
-                  const justification = justificationByKey[key];
-                  if (justification) {
-                    data.onJustifyContents?.(data.objectId, justification);
-                    return;
-                  }
-                  if (key === 'expand-contents' || key === 'collapse-contents') {
-                    data.onSetContentsCompact?.(data.objectId, key === 'collapse-contents');
-                    return;
-                  }
-                  if (
-                    key === 'front' ||
-                    key === 'forward' ||
-                    key === 'backward' ||
-                    key === 'back'
-                  ) {
-                    handleReorder(key);
-                  }
-                },
-              }}
-            >
-              <Button
-                type="text"
-                size="small"
-                aria-label="More zone actions"
-                title="More zone actions"
-                icon={<MoreOutlined />}
-                disabled={mutationDisabled}
-                style={{ width: 32, height: 32 }}
-              />
-            </Dropdown>
-          </div>
+            </div>
+          </NodeToolbar>
         )}
         <div
           style={{

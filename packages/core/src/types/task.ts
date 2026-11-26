@@ -805,8 +805,9 @@ export interface Task {
    * Structured metadata for the task. Fields here are load-bearing for
    * auth, lineage, and UI styling — see the per-field comments. When a
    * QUEUED task transitions to RUNNING and a user-message row is written,
-   * `is_agor_callback` and `source` are copied onto the new message.metadata
-   * so the UI styling for callbacks survives the queue → run hop.
+   * `is_agor_callback`, `source`, and `prompt_provenance` are copied onto the
+   * new message.metadata so callback styling and prompt origin survive the
+   * queue → run hop.
    */
   metadata?: TaskMetadata;
 
@@ -857,6 +858,8 @@ export interface Task {
   // then projected again by the daemon before persistence/realtime.
   // Stored here so UI doesn't need SDK-specific normalization logic
   // Will be empty for legacy tasks (pre-normalization)
+  // Some tools record session running totals here, not this task's own usage;
+  // aggregate through `taskUsageTable` (`@agor/core/db`), never a plain SUM.
   normalized_sdk_response?: {
     tokenUsage: {
       inputTokens: number;

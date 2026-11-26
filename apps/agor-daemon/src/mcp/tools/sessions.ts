@@ -334,6 +334,10 @@ export function scheduledRunContinueWarning(
 }
 
 export function registerSessionTools(server: McpServer, ctx: McpContext): void {
+  const promptProvenanceNotice = ctx.sessionId
+    ? 'The recipient receives a server-stamped provenance block naming the sender session.'
+    : 'The recipient receives a server-stamped provenance block with origin not established.';
+
   // Tool 1: agor_sessions_list
   server.registerTool(
     'agor_sessions_list',
@@ -921,6 +925,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
         note: powerHold
           ? `Subsession created; its prompt is queued. ${powerHold.note}`
           : 'Subsession created and prompt execution started in background.',
+        promptProvenance: promptProvenanceNotice,
       });
     }
   );
@@ -1182,6 +1187,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
                 ? powerHold.note
                 : `${busyNote} ${powerHold.note}`
               : busyNote,
+            promptProvenance: promptProvenanceNotice,
           });
         }
         return textResult({
@@ -1191,6 +1197,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           taskId: task.task_id,
           status: task.status,
           note: 'Prompt added to existing session and execution started.',
+          promptProvenance: promptProvenanceNotice,
         });
       } else if (mode === 'fork' || mode === 'btw') {
         // Check if the target session's tool supports forking
@@ -1272,6 +1279,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           status: task.status,
           ...(powerHold ? { power_hold: powerHold } : {}),
           note: powerHold ? `${note} ${powerHold.note}` : note,
+          promptProvenance: promptProvenanceNotice,
         });
       } else if (mode === 'subsession') {
         const spawnData: Partial<import('@agor/core/types').SpawnConfig> = {
@@ -1311,6 +1319,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           note: powerHold
             ? `Subsession created; its prompt is queued. ${powerHold.note}`
             : 'Subsession created and prompt execution started.',
+          promptProvenance: promptProvenanceNotice,
         });
       }
 
@@ -2285,6 +2294,7 @@ export function registerSessionTools(server: McpServer, ctx: McpContext): void {
           : args.initialPrompt
             ? `Session created and initial prompt execution started.${parentNote}${callbackNote}${mcpWarningNote}`
             : `Session created successfully.${parentNote}${callbackNote}${mcpWarningNote}`,
+        ...(initialTask && { promptProvenance: promptProvenanceNotice }),
         ...(remoteRelationship && { remoteRelationship }),
         ...(session.mcp_defaults_skipped && { mcp_defaults_skipped: session.mcp_defaults_skipped }),
       });
