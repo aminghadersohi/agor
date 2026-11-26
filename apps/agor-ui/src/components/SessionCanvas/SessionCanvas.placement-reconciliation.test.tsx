@@ -87,7 +87,10 @@ vi.mock('reactflow', async () => {
     NodeResizer: () => null,
     // Fork zone nodes render workflow connection handles.
     Handle: () => null,
-    Position: { Left: 'left', Right: 'right', Top: 'top', Bottom: 'bottom' },
+    // The real NodeToolbar portals into a mounted React Flow renderer; render inline here.
+    NodeToolbar: ({ isVisible, children }: { isVisible?: boolean; children?: ReactNode }) =>
+      isVisible ? <>{children}</> : null,
+    Position: { Top: 'top', Right: 'right', Bottom: 'bottom', Left: 'left' },
     ReactFlow: (
       props: CapturedFlowProps & { children?: ReactNode; onInit?: (value: unknown) => void }
     ) => {

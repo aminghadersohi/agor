@@ -63,6 +63,11 @@ import { HistoryMarkdown, historyTextKey } from './HistoryMarkdown';
 // Side-effect import: registers every built-in widget component with the
 // `WidgetBlock` dispatcher (e.g. `env_vars`).
 import '../Widgets';
+import {
+  getPromptProvenance,
+  PromptProvenance,
+  stripProvenanceForDisplay,
+} from './PromptProvenance';
 import { WidgetBlock } from './WidgetBlock';
 
 interface ToolUseBlock {
@@ -299,6 +304,9 @@ export function getMessageSpeaker(message: Message): 'user' | 'agent' | null {
   ) {
     return null;
   }
+  if (message.metadata?.is_agor_callback === true || getPromptProvenance(message)) {
+    return 'agent';
+  }
   if (message.role === 'user' && !isTaskToolPrompt(message) && !isTaskToolResult(message)) {
     return 'user';
   }
@@ -510,11 +518,13 @@ const MessageBlockInner: React.FC<MessageBlockProps> = ({
   const isTaskPrompt = isTaskToolPrompt(message);
   const isTaskResult = isTaskToolResult(message);
   const isSystem = message.role === 'system';
-  const isCallback = message.metadata?.is_agor_callback === true;
+  const provenance = getPromptProvenance(message);
+  const isCallback = message.metadata?.is_agor_callback === true || !!provenance;
 
   // Determine if this should be displayed as user or agent message
   const isUser = getMessageSpeaker(message) === 'user';
-  const isAgent = message.role === 'assistant' || isTaskPrompt || isTaskResult || isSystem;
+  const isAgent =
+    message.role === 'assistant' || isTaskPrompt || isTaskResult || isSystem || isCallback;
 
   // Check if message is currently streaming
   const isStreaming = 'isStreaming' in message && message.isStreaming === true;
@@ -655,6 +665,8 @@ const MessageBlockInner: React.FC<MessageBlockProps> = ({
     // Other system message types handled elsewhere (e.g., compaction in TaskBlock)
   }
 
+  const displayText = (text: string) => (provenance ? stripProvenanceForDisplay(text) : text);
+
   // Parse content blocks from message, preserving order
   const getContentBlocks = (): {
     thinkingBlocks: string[];
@@ -673,7 +685,7 @@ const MessageBlockInner: React.FC<MessageBlockProps> = ({
       const content = isTaskPrompt ? `[Task Tool]\n${message.content}` : message.content;
       return {
         thinkingBlocks: [],
-        textBeforeTools: [content],
+        textBeforeTools: [displayText(content)],
         toolBlocks: [],
         textAfterTools: [],
       };
@@ -691,7 +703,7 @@ const MessageBlockInner: React.FC<MessageBlockProps> = ({
           const text = (block as unknown as ThinkingContentBlock).text;
           thinkingBlocks.push(text);
         } else if (block.type === 'text') {
-          let text = (block as unknown as TextBlock).text;
+          let text = displayText((block as unknown as TextBlock).text);
 
           // Add Task tool prefix to the first text block if this is a Task prompt
           if (isTaskPrompt && textBeforeTools.length === 0 && !hasSeenTool) {
@@ -776,7 +788,7 @@ const MessageBlockInner: React.FC<MessageBlockProps> = ({
   // Skip rendering if message has no meaningful content
   const hasThinking =
     thinkingBlocks.length > 0 || (streamingThinking && streamingThinking.length > 0);
-  const hasTextBefore = textBeforeTools.some((text) => text.trim().length > 0);
+  const hasTextBefore = !!provenance || textBeforeTools.some((text) => text.trim().length > 0);
   const hasTextAfter = textAfterTools.some((text) => text.trim().length > 0);
   const hasTools = toolBlocks.length > 0;
   // A reveal opens reasoning only when it renders; otherwise the first tool.
@@ -898,6 +910,7 @@ const MessageBlockInner: React.FC<MessageBlockProps> = ({
                         gap: token.sizeUnit,
                       }}
                     >
+                      {provenance && <PromptProvenance provenance={provenance} />}
                       {textBeforeTools.map((text, textIndex) => {
                         const shouldTruncate = isLongMarkdown(text);
 

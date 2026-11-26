@@ -76,7 +76,15 @@ export function classifyFailedRefreshClaimStatus(
 
 export class InvalidGrantError extends Error {
   readonly code = 'invalid_grant';
-  constructor(message = 'OAuth refresh grant is no longer valid') {
+  constructor(
+    message = 'OAuth refresh grant is no longer valid',
+    /**
+     * The token endpoint answered `invalid_client` (RFC 6749 §5.2): the server
+     * no longer recognizes the client the grant was issued to, so the saved
+     * registration is stale and not only the grant.
+     */
+    readonly invalidClient = false
+  ) {
     super(message);
     this.name = 'InvalidGrantError';
   }
@@ -249,7 +257,7 @@ export async function refreshMCPToken(
       throw new OAuthRefreshExchangeError('response_ambiguous', true);
     }
     if (['invalid_grant', 'invalid_client', 'unauthorized_client'].includes(parsed.error)) {
-      throw new InvalidGrantError();
+      throw new InvalidGrantError(undefined, parsed.error === 'invalid_client');
     }
     throw new OAuthRefreshExchangeError('provider_rejected', false);
   }
@@ -324,6 +332,16 @@ export interface RefreshAndPersistDeps {
     db: Database | TenantScopeAwareDatabase
   ) => boolean | Promise<boolean>;
   onInvalidGrant?: (info: { userId: UserID | null; mcpServerId: MCPServerID }) => void;
+  /**
+   * Called when the refresh was rejected with `invalid_client`, after the grant
+   * is deleted. The daemon drops only the rejected client's dynamic registration here
+   * so the reconnect registers a new client instead of reusing the stale one.
+   */
+  onInvalidClient?: (info: {
+    userId: UserID | null;
+    mcpServerId: MCPServerID;
+    clientId: string;
+  }) => void | Promise<void>;
   /** Internal test/development seam; daemon PostgreSQL callers leave this false. */
   allowLocalhostHttpDevelopment?: boolean;
   assertCurrent?: () => void | Promise<void>;
@@ -415,6 +433,19 @@ async function standaloneWork<T>(
   return runWithTenantDatabaseScope(deps.db, deps.tenantId ?? getCurrentTenantId(), (scoped) =>
     work(scoped as Database)
   );
+}
+
+async function notifyInvalidClient(
+  deps: RefreshAndPersistDeps,
+  error: unknown,
+  clientId: string
+): Promise<void> {
+  if (!(error instanceof InvalidGrantError) || !error.invalidClient) return;
+  try {
+    await deps.onInvalidClient?.({ userId: deps.userId, mcpServerId: deps.mcpServerId, clientId });
+  } catch {
+    console.error('[MCP OAuth Refresh] callback_failed category=invalid_client_notification');
+  }
 }
 
 function notifyInvalidGrant(deps: RefreshAndPersistDeps): void {
@@ -573,7 +604,7 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
       if (error instanceof OAuthRefreshExchangeError && !error.ambiguous) return 'rejected';
       return 'ambiguous';
     },
-    async settle({ row, fence }, outcome) {
+    async settle({ row, fence }, outcome, error) {
       if (outcome === 'invalid') {
         const deleted = await tenantWork(deps, (db) =>
           new UserMCPOAuthTokenRepository(db).deleteClaimedInvalidGrant(
@@ -582,8 +613,10 @@ async function refreshPostgres(deps: RefreshAndPersistDeps): Promise<string> {
             fence
           )
         );
-        if (deleted) notifyInvalidGrant(deps);
-        else await observeCommittedRefresh(deps, fence);
+        if (deleted) {
+          notifyInvalidGrant(deps);
+          await notifyInvalidClient(deps, error, row.oauth_client_id!);
+        } else await observeCommittedRefresh(deps, fence);
         return;
       }
       await tenantWork(deps, (db) =>
@@ -739,8 +772,10 @@ async function refreshStandalone(
           exactGrantVersion.grantBindingFingerprint
         )
       );
-      if (deleted) notifyInvalidGrant(deps);
-      else throw new GrantConfigurationChangedError();
+      if (deleted) {
+        notifyInvalidGrant(deps);
+        await notifyInvalidClient(deps, error, clientId);
+      } else throw new GrantConfigurationChangedError();
     }
     if (!(error instanceof InvalidGrantError)) {
       const retrySafe =
